@@ -1,5 +1,18 @@
 # AGENTS.md — operating guide for coding agents
 
+## Neuve workspace integration
+
+When this repository is checked out at `apps/neuve-graph` inside the Neuve
+workspace, the parent repository's `CONSTITUTION.md` and `AGENTS.md` apply to
+Neuve-wide product ownership, evidence, and review. Start engine work with
+`apps/neuve-graph` as the working directory, then apply this guide and the
+generated `.entire/agent-guide.md` for repository-specific Go, graph, schema,
+identity, no-egress, and verification rules. Surface conflicts between the
+parent and local guidance rather than silently choosing one.
+
+The local `package.json` is a Bun-workspace task shim only. It delegates to
+`mise.toml`; Go and mise remain authoritative for builds and verification.
+
 Hand this to any coding agent working in a repo where the `entire graph` plugin
 is installed. It moves initial code-location work from broad grep/read
 exploration to targeted graph queries; token impact depends on the task and

@@ -1,5 +1,6 @@
 /entire-graph
 /dist/
+/bun.lock
 __pycache__/
 *.py[cod]
 

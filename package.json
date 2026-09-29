@@ -1,0 +1,14 @@
+{
+  "name": "@neuve/graph",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "mise run build",
+    "test": "mise run test",
+    "test:ci": "mise run test:ci",
+    "vet": "mise run vet",
+    "format": "mise run fmt",
+    "check": "mise run check",
+    "install:local": "mise run install"
+  }
+}
