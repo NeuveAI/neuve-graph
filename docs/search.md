@@ -22,17 +22,28 @@ a surprising hit can be audited instead of trusted.
 
 Results are byte-budgeted to drop into an agent's context: top hits carry full
 snippets, later hits shrink to locators, and `--max-context-bytes` bounds the
-total (`0` removes the bound). `--top-k` sets the result count.
+total (`0` removes the bound). `--top-k` selects the base primary ranking.
+Explicitly requested primary enrichment such as `--callee-hop` may then add
+candidate fix sites, followed by up to four independently ordered `related`
+locators and one final `covering-test` entry. To remain inside the byte ceiling,
+those supplements may replace eligible redundant primary tail locators. They
+never reorder retained primary evidence, displace the protected head, or remove
+a file's last locator, so the final primary count may be below its
+pre-supplement count. Rank is the authoritative policy order; `score` reports
+the underlying relevance evidence and need not descend after stable policy
+interleaving or additive enrichment.
 
 ## What a response contains
 
 The default format is JSON, one object per query:
 
-- `results`: ranked hits. Each has `file_path`, `start_line`/`end_line`, a
+- `results`: retained base primary hits, requested primary enrichment, and then
+  any bounded supplements. Each has `file_path`, `start_line`/`end_line`, a
   `focus_line`, the symbol's `kind`, `qualified_name`, and `signature` when the
   hit is a known symbol, the `signals` that ranked it, and a source `snippet`.
-  Trailing entries in `section: "related"` are zero-scored context, such as
-  callers, siblings, or a covering test adjacent to the real hits.
+  Trailing entries in `section: "related"` are zero-scored callers, siblings,
+  or near duplicates. At most four appear, ordered by the related-site policy.
+  A final `section: "covering-test"` entry may follow and is capped at one.
 - `literal_cluster`: occurrences of a distinctive literal from the top hits
   across the repository, tagged by role (edit site vs consumer).
 - `verify_command`: a suggested check, with the evidence it was derived from

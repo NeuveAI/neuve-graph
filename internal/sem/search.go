@@ -30,23 +30,42 @@ const (
 	defaultSearchMaxSnippetLines   = 6
 	defaultSearchMaxRegionsPerFile = 3
 	defaultSearchMaxIndexedFiles   = 96
-	deepSearchMaxIndexedFiles      = 256
-	searchIndexedFilesPerResult    = 3
 	maxSearchQueryTerms            = 48
-	minGitGrepPreselectionFiles    = 10_000
-	sparseSearchChunkStrideLines   = 60
-	sparseSearchRRFConstant        = 60
-	sparseSearchFileRankWeight     = 2
-	deepSearchSparseNumerator      = 5
-	deepSearchSparseDenominator    = 8
-	deepSearchSemanticHeadDivisor  = 32
-	maxDeepSearchSemanticHead      = 10
-	maxSparseSearchQueryTerms      = 64
-	maxSparseSearchFileBytes       = 2 * 1024 * 1024
-	maxSearchContentCacheBytes     = 32 * 1024 * 1024
-	maxSearchContentCacheFileBytes = 2 * 1024 * 1024
-	searchDiversityRelevanceRatio  = 0.75
-	maxSearchGitGrepPatterns       = 4096
+	// Expansion inspects symbol/container indexes per candidate seed. This fixed
+	// work horizon caps those probes independently of caller TopK; 384 bounds the
+	// dense same-file/container topology without pretending seeds are files.
+	searchExpansionMaxSeedCandidates = 384
+	// Same-container expansion admits at most 24 adjacent stages. A fixed 128
+	// distinct-identity evidence horizon bounds candidate construction after
+	// cheap container lookup and before source scoring.
+	searchNeighborOutputLimit     = 24
+	searchNeighborEvidenceHorizon = 128
+	// Same-file bridges return at most 20 observations. Rank lightweight pair
+	// descriptors first, then spend a fixed 128-construction evidence horizon so
+	// dense files cannot materialize every pair before throwing almost all away.
+	searchBridgeOutputLimit         = 20
+	searchBridgePairEvidenceHorizon = 128
+	// A bridge is the short omitted transition between nearby operations, not a
+	// caller-sized source read. Presentation may render less, but a larger
+	// MaxSnippetLines must not make new semantic bridge identities eligible.
+	searchBridgeMaxSpanLines     = 6
+	minGitGrepPreselectionFiles  = 10_000
+	sparseSearchChunkStrideLines = 60
+	sparseSearchRRFConstant      = 60
+	sparseSearchFileRankWeight   = 2
+	deepSearchSparseNumerator    = 5
+	deepSearchSparseDenominator  = 8
+	// At sparse rank 1024, reciprocal-rank evidence is below six percent
+	// of rank 1. This fixed evidence horizon is 16x the K64 continuity control
+	// while remaining independent of the CLI's unbounded TopK; it prevents
+	// semantic file boosts from reviving an unbounded weak tail.
+	deepSearchSparseEvidenceHorizon = 1024
+	maxSparseSearchQueryTerms       = 64
+	maxSparseSearchFileBytes        = 2 * 1024 * 1024
+	maxSearchContentCacheBytes      = 32 * 1024 * 1024
+	maxSearchContentCacheFileBytes  = 2 * 1024 * 1024
+	searchDiversityRelevanceRatio   = 0.75
+	maxSearchGitGrepPatterns        = 4096
 )
 
 // SearchOptions controls local issue-to-code retrieval. Search reads the same
@@ -209,8 +228,8 @@ type SearchOptions struct {
 	// was disabled, every file in the repo was read, the indexed-file pool shrank, region
 	// deduplication stopped and the reported score stopped being a relevance score. Asking
 	// for one more result is not a request to switch retrieval strategy, so deep search is
-	// now an explicit choice. Top-k may scale the same strategy's legacy base cohort, while
-	// progressive selection remains under one absolute total-file ceiling.
+	// now an explicit choice. Top-k only projects the strategy's result order; the
+	// legacy base cohort and progressive absolute file ceiling are independent of it.
 	Deep bool
 	// SingleResolution turns OFF multi-resolution prose retrieval: the finer regions of a prose
 	// document stay in each result's `passages` field instead of being promoted to results of their
@@ -245,7 +264,10 @@ type SearchPassage struct {
 
 // SearchResult is a ranked source region suitable for direct agent context.
 type SearchResult struct {
-	Rank             int     `json:"rank"`
+	Rank int `json:"rank"`
+	// Score is the region's underlying retrieval relevance. Rank is the
+	// authoritative presentation order after stable ranking policies and
+	// explicitly requested enrichments have been applied.
 	Score            float64 `json:"score"`
 	FilePath         string  `json:"file_path"`
 	StartLine        int     `json:"start_line"`
@@ -268,9 +290,13 @@ type SearchResult struct {
 	QualifiedName   string   `json:"qualified_name,omitempty"`
 	Signature       string   `json:"signature,omitempty"`
 	Signals         []string `json:"signals"`
-	// Section groups a result for presentation. Empty (omitted) means the primary list of
-	// candidate fix sites; see search_section.go for the other values and why the grouping is
-	// a label rather than a filter.
+	// Section groups a result for presentation. TopK selects the base primary
+	// ranking (empty or docs-and-fixtures), then explicitly requested primary
+	// enrichment such as CalleeHop may add rows. Related (at most four) and
+	// covering-test (at most one) append in their own order. To stay inside the
+	// byte budget they may replace eligible redundant primary tail locators, but
+	// never reorder retained primary evidence, displace the protected head, or
+	// remove a file's last locator. See search_section.go.
 	Section string `json:"section,omitempty"`
 	Snippet string `json:"snippet"`
 	// Passages are additional source slices from FilePath. The primary snippet stays unchanged
@@ -463,13 +489,20 @@ type SearchResponse struct {
 	// format_version and the record/snapshot surfaces emit schema_version, but a
 	// consumer parsing search JSON had nothing to tell one payload shape from the
 	// next.
-	FormatVersion int            `json:"format_version"`
-	Query         string         `json:"query"`
-	RepoRoot      string         `json:"repo_root"`
-	Commit        string         `json:"commit,omitempty"`
-	Tree          string         `json:"tree,omitempty"`
-	Profile       string         `json:"profile"`
-	Results       []SearchResult `json:"results"`
+	FormatVersion int    `json:"format_version"`
+	Query         string `json:"query"`
+	RepoRoot      string `json:"repo_root"`
+	Commit        string `json:"commit,omitempty"`
+	Tree          string `json:"tree,omitempty"`
+	Profile       string `json:"profile"`
+	// Results starts with the retained TopK-selected base primary ranking plus
+	// any explicitly requested primary enrichment (for example CalleeHop), then
+	// up to four `related` locators and one final `covering-test`. Supplements may
+	// fund themselves by replacing eligible redundant primary tail locators, so
+	// the final primary count can be below the pre-supplement count. Retained
+	// primary evidence keeps its relative order and protected/last-file locators
+	// cannot be displaced.
+	Results []SearchResult `json:"results"`
 	// The three blocks below live outside `results`, and they are declared in the order they
 	// are rendered — see the section order documented in search_blocks.go.
 	//
@@ -1098,7 +1131,7 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 	}
 	maxIndexedFilesOmitted := options.MaxIndexedFiles <= 0
 	if maxIndexedFilesOmitted {
-		options.MaxIndexedFiles = defaultSearchIndexedFiles(options.TopK)
+		options.MaxIndexedFiles = defaultSearchIndexedFiles()
 	}
 	options.progressivePreselection = maxIndexedFilesOmitted
 	if options.Profile == "" {
@@ -2067,12 +2100,12 @@ func openSearchContentReader(
 	return opened.read, opened.close, nil
 }
 
-func defaultSearchIndexedFiles(topK int) int {
+func defaultSearchIndexedFiles() int {
 	// This is the legacy BASE cohort, not the total progressive selection.
-	// Shallow interactive searches keep the original cold-start base. Deeper
-	// rankings may use a wider base before TopK and per-file diversity take
-	// effect, while omitted-limit progressive selection still has a fixed total
-	// ceiling of searchPreselectionMaxSelectedFiles (384).
+	// It is deliberately independent of TopK: result count projects one stable
+	// evidence ranking and must not silently select a different repository view.
+	// Omitted-limit progressive selection still has a fixed total ceiling of
+	// searchPreselectionMaxSelectedFiles (384).
 	//
 	// Do NOT raise these bounds hoping for recall: MEASURED THE OPPOSITE. On 52
 	// SWE-bench Multilingual instances disjoint from the tuning suite, distilled
@@ -2087,13 +2120,7 @@ func defaultSearchIndexedFiles(topK int) int {
 	// the gold file: at 1024 the losses were PHP/laravel, Java/lucene, Ruby/fastlane,
 	// Ruby/fluentd and TS/vue. Rust alone improves (33% -> 50%), so the tradeoff is
 	// per-language and negative on aggregate.
-	return minInt(
-		deepSearchMaxIndexedFiles,
-		maxInt(
-			defaultSearchMaxIndexedFiles,
-			minInt(topK, deepSearchMaxIndexedFiles)*searchIndexedFilesPerResult,
-		),
-	)
+	return defaultSearchMaxIndexedFiles
 }
 
 func fitSearchResultsToBudget(results []SearchResult, q searchQuery, budget int) ([]SearchResult, int, int, int) {
@@ -5058,55 +5085,85 @@ func expandSameContainerNeighborCandidates(
 	languages map[string]string,
 	options SearchOptions,
 ) []searchCandidate {
+	out, _ := expandSameContainerNeighborCandidatesBounded(
+		ctx, seeds, q, symbolsByID, symbolsByFile, read, languages, options,
+	)
+	return out
+}
+
+type searchFlowContainerKey struct {
+	filePath, containerID string
+}
+
+type searchFlowContainerIndex struct {
+	symbols []SymbolRecord
+	byID    map[string]int
+}
+
+type searchNeighborDescriptor struct {
+	filePath   string
+	start, end int
+	neighbor   SymbolRecord
+	score      float64
+}
+
+func expandSameContainerNeighborCandidatesBounded(
+	ctx context.Context,
+	seeds []searchCandidate,
+	q searchQuery,
+	symbolsByID map[string]SymbolRecord,
+	symbolsByFile map[string][]SymbolRecord,
+	read contentReader,
+	languages map[string]string,
+	options SearchOptions,
+) ([]searchCandidate, int) {
 	if len(seeds) == 0 {
-		return nil
+		return nil, 0
 	}
-	limit := minInt(len(seeds), maxInt(30, options.TopK*2))
 	bestScore := seeds[0].score
 	if bestScore <= 0 {
-		return nil
+		return nil, 0
 	}
+	limit := searchExpansionSeedHorizon(seeds, 0.35)
 	seedSymbolIDs := map[string]bool{}
 	for _, seed := range seeds[:limit] {
 		if ctx.Err() != nil {
-			return nil
+			return nil, 0
 		}
 		seedSymbolIDs[seed.result.SymbolID] = true
 	}
-	seen := map[string]bool{}
-	var out []searchCandidate
+	containerIndexes := map[searchFlowContainerKey]searchFlowContainerIndex{}
+	var descriptors []searchNeighborDescriptor
 	for _, seed := range seeds[:limit] {
 		if ctx.Err() != nil {
-			return nil
+			return nil, 0
 		}
-		if seed.score < 0.35*bestScore || !searchFlowSymbolKind(seed.result.Kind) {
+		if !searchFlowSymbolKind(seed.result.Kind) {
 			continue
 		}
 		symbol, ok := symbolsByID[seed.result.SymbolID]
 		if !ok {
 			continue
 		}
-		siblings := sameContainerFlowSymbols(symbolsByFile[symbol.FilePath], symbol.ContainerID)
-		index := -1
-		for i := range siblings {
-			if siblings[i].ID == symbol.ID {
-				index = i
-				break
+		containerKey := searchFlowContainerKey{filePath: symbol.FilePath, containerID: symbol.ContainerID}
+		containerIndex, cached := containerIndexes[containerKey]
+		if !cached {
+			containerIndex.symbols = sameContainerFlowSymbols(symbolsByFile[symbol.FilePath], symbol.ContainerID)
+			containerIndex.byID = make(map[string]int, len(containerIndex.symbols))
+			for index := range containerIndex.symbols {
+				containerIndex.byID[containerIndex.symbols[index].ID] = index
 			}
+			containerIndexes[containerKey] = containerIndex
 		}
-		if index < 0 {
+		index, ok := containerIndex.byID[symbol.ID]
+		if !ok {
 			continue
 		}
-		content, ok := read(symbol.FilePath)
-		if !ok || strings.IndexByte(content, 0) >= 0 {
-			continue
-		}
-		lines := physicalSourceLines(content)
 		for _, neighborIndex := range []int{index - 1, index + 1} {
-			if neighborIndex < 0 || neighborIndex >= len(siblings) {
+			if neighborIndex < 0 || neighborIndex >= len(containerIndex.symbols) {
 				continue
 			}
-			neighbor := siblings[neighborIndex]
+			neighbor := containerIndex.symbols[neighborIndex]
 			if seedSymbolIDs[neighbor.ID] {
 				continue
 			}
@@ -5117,44 +5174,103 @@ func expandSameContainerNeighborCandidates(
 				start = maxInt(symbol.EndLine+1, neighbor.StartLine-options.ContextLines)
 				end = minInt(neighbor.EndLine, start+options.MaxSnippetLines-1)
 			}
-			if start < 1 || start > end || start > len(lines) || end-start+1 > options.MaxSnippetLines {
+			if start < 1 || start > end || end-start+1 > options.MaxSnippetLines {
 				continue
 			}
 			gap := maxInt(0, maxInt(neighbor.StartLine-symbol.EndLine-1, symbol.StartLine-neighbor.EndLine-1))
 			if gap > options.MaxSnippetLines {
 				continue
 			}
-			key := fmt.Sprintf("%s:%d:%d", symbol.FilePath, start, end)
-			if seen[key] {
-				continue
-			}
-			candidate, ok := makeSearchCandidate(q, symbol.FilePath, languages[symbol.FilePath], lines, start, end, neighbor, options.MaxSnippetLines)
-			if !ok {
-				// Adjacency is itself the relevance signal; the neighboring stage
-				// need not repeat narrative terms from the original query.
-				candidate, ok = makeSearchCandidate(buildSearchQuery(neighbor.Name), symbol.FilePath, languages[symbol.FilePath], lines, start, end, neighbor, options.MaxSnippetLines)
-				if !ok {
-					continue
-				}
-				candidate.result.Signals = nil
-			}
-			// neighbor.StartLine is the meaningful focus point, but under a small
-			// options.MaxSnippetLines the emitted region above can be truncated to a window
-			// that no longer contains it. Clamp into the candidate's own region so FocusLine
-			// never escapes [StartLine, EndLine] and trips SearchResponse.Validate.
-			candidate.result.FocusLine = minInt(maxInt(neighbor.StartLine, candidate.result.StartLine), candidate.result.EndLine)
-			candidate.result.Signals = appendUnique(candidate.result.Signals, "same-container-neighbor")
-			candidate.score = derivedSearchScore(seed.score, 0.85*seed.score)
-			candidate.baseScore = candidate.score
-			seen[key] = true
-			out = append(out, candidate)
+			descriptors = append(descriptors, searchNeighborDescriptor{
+				filePath: symbol.FilePath,
+				start:    start,
+				end:      end,
+				neighbor: neighbor,
+				score:    derivedSearchScore(seed.score, 0.85*seed.score),
+			})
 		}
 	}
-	sortSearchCandidates(out)
-	if len(out) > 24 {
-		out = out[:24]
+	sort.SliceStable(descriptors, func(i, j int) bool {
+		left, right := descriptors[i], descriptors[j]
+		if left.score != right.score {
+			return left.score > right.score
+		}
+		if left.filePath != right.filePath {
+			return left.filePath < right.filePath
+		}
+		if left.start != right.start {
+			return left.start < right.start
+		}
+		if left.end != right.end {
+			return left.end < right.end
+		}
+		return left.neighbor.ID < right.neighbor.ID
+	})
+	seenIdentities := map[searchBridgeIdentity]bool{}
+	uniqueDescriptors := descriptors[:0]
+	for _, descriptor := range descriptors {
+		identity := searchBridgeIdentity{filePath: descriptor.filePath, start: descriptor.start, end: descriptor.end}
+		if seenIdentities[identity] {
+			continue
+		}
+		seenIdentities[identity] = true
+		uniqueDescriptors = append(uniqueDescriptors, descriptor)
 	}
-	return out
+	descriptors = uniqueDescriptors
+	if len(descriptors) > searchNeighborEvidenceHorizon {
+		descriptors = descriptors[:searchNeighborEvidenceHorizon]
+	}
+
+	var out []searchCandidate
+	fileLines := map[string][]string{}
+	unreadable := map[string]bool{}
+	materialized := 0
+	for _, descriptor := range descriptors {
+		if len(out) == searchNeighborOutputLimit || ctx.Err() != nil {
+			break
+		}
+		lines, cached := fileLines[descriptor.filePath]
+		if !cached {
+			if unreadable[descriptor.filePath] {
+				continue
+			}
+			content, ok := read(descriptor.filePath)
+			if !ok || strings.IndexByte(content, 0) >= 0 {
+				unreadable[descriptor.filePath] = true
+				continue
+			}
+			lines = physicalSourceLines(content)
+			fileLines[descriptor.filePath] = lines
+		}
+		if descriptor.start > len(lines) {
+			continue
+		}
+		materialized++
+		candidate, ok := makeSearchCandidate(q, descriptor.filePath, languages[descriptor.filePath], lines,
+			descriptor.start, descriptor.end, descriptor.neighbor, options.MaxSnippetLines)
+		if !ok {
+			// Adjacency is itself the relevance signal; the neighboring stage
+			// need not repeat narrative terms from the original query.
+			candidate, ok = makeSearchCandidate(buildSearchQuery(descriptor.neighbor.Name), descriptor.filePath,
+				languages[descriptor.filePath], lines, descriptor.start, descriptor.end,
+				descriptor.neighbor, options.MaxSnippetLines)
+			if !ok {
+				continue
+			}
+			candidate.result.Signals = nil
+		}
+		// neighbor.StartLine is the meaningful focus point, but under a small
+		// options.MaxSnippetLines the emitted region above can be truncated to a window
+		// that no longer contains it. Clamp into the candidate's own region so FocusLine
+		// never escapes [StartLine, EndLine] and trips SearchResponse.Validate.
+		candidate.result.FocusLine = minInt(maxInt(descriptor.neighbor.StartLine, candidate.result.StartLine), candidate.result.EndLine)
+		candidate.result.Signals = appendUnique(candidate.result.Signals, "same-container-neighbor")
+		candidate.score = descriptor.score
+		candidate.baseScore = descriptor.score
+		out = append(out, candidate)
+	}
+	sortSearchCandidates(out)
+	return out, materialized
 }
 
 func sameContainerFlowSymbols(symbols []SymbolRecord, containerID string) []SymbolRecord {
@@ -5186,17 +5302,45 @@ func expandSameFileBridgeCandidates(
 	languages map[string]string,
 	options SearchOptions,
 ) []searchCandidate {
+	out, _ := expandSameFileBridgeCandidatesBounded(
+		ctx, candidates, q, symbolsByFile, read, languages, options,
+	)
+	return out
+}
+
+type searchBridgePairDescriptor struct {
+	filePath                string
+	start, end              int
+	leftSymbol, rightSymbol string
+	score                   float64
+}
+
+type searchBridgeIdentity struct {
+	filePath   string
+	start, end int
+}
+
+func expandSameFileBridgeCandidatesBounded(
+	ctx context.Context,
+	candidates []searchCandidate,
+	q searchQuery,
+	symbolsByFile map[string][]SymbolRecord,
+	read contentReader,
+	languages map[string]string,
+	_ SearchOptions,
+) ([]searchCandidate, int) {
 	if len(candidates) < 2 {
-		return nil
+		return nil, 0
 	}
-	limit := minInt(len(candidates), maxInt(40, options.TopK*2))
 	byFile := map[string][]searchCandidate{}
 	bestScore := candidates[0].score
 	if bestScore <= 0 {
-		return nil
+		return nil, 0
 	}
+	bridgeSpanLines := searchBridgeMaxSpanLines
+	limit := searchExpansionSeedHorizon(candidates, 0.3)
 	for _, candidate := range candidates[:limit] {
-		if candidate.score < 0.3*bestScore || !searchFlowSymbolKind(candidate.result.Kind) || candidate.result.SymbolID == "" {
+		if !searchFlowSymbolKind(candidate.result.Kind) || candidate.result.SymbolID == "" {
 			continue
 		}
 		byFile[candidate.result.FilePath] = append(byFile[candidate.result.FilePath], candidate)
@@ -5206,21 +5350,19 @@ func expandSameFileBridgeCandidates(
 		filePaths = append(filePaths, filePath)
 	}
 	sort.Strings(filePaths)
-	var out []searchCandidate
-	seenBridges := map[string]bool{}
+	var descriptors []searchBridgePairDescriptor
 	for _, filePath := range filePaths {
 		if ctx.Err() != nil {
-			return nil
+			return nil, 0
 		}
 		regions := byFile[filePath]
 		sort.Slice(regions, func(i, j int) bool {
 			return searchCandidateLess(regions[i], regions[j])
 		})
-		content, ok := read(filePath)
-		if !ok || strings.IndexByte(content, 0) >= 0 {
-			continue
+		symbols := make(map[string]SymbolRecord, len(symbolsByFile[filePath]))
+		for _, symbol := range symbolsByFile[filePath] {
+			symbols[symbol.ID] = symbol
 		}
-		lines := physicalSourceLines(content)
 		for leftIndex := 0; leftIndex+1 < len(regions); leftIndex++ {
 			for rightIndex := leftIndex + 1; rightIndex < len(regions); rightIndex++ {
 				left, right := regions[leftIndex], regions[rightIndex]
@@ -5228,49 +5370,139 @@ func expandSameFileBridgeCandidates(
 				if gapStart > gapEnd {
 					continue
 				}
-				if gapEnd-gapStart+1 > options.MaxSnippetLines {
+				if gapEnd-gapStart+1 > searchBridgeMaxSpanLines {
 					break
 				}
-				// Reserve at least half the snippet for the downstream operation.
-				// A long omitted span must not consume the entire result and end one
-				// line before the consumer that makes the bridge actionable.
-				start := maxInt(gapStart, right.result.StartLine-options.MaxSnippetLines/2)
-				end := minInt(right.result.EndLine, start+options.MaxSnippetLines-1)
-				leftSymbol, leftOK := searchSymbolByID(symbolsByFile[filePath], left.result.SymbolID)
-				rightSymbol, rightOK := searchSymbolByID(symbolsByFile[filePath], right.result.SymbolID)
+				leftSymbol, leftOK := symbols[left.result.SymbolID]
+				rightSymbol, rightOK := symbols[right.result.SymbolID]
 				if !leftOK || !rightOK || leftSymbol.ContainerID != rightSymbol.ContainerID {
 					continue
 				}
-				bridgeKey := fmt.Sprintf("%s:%d:%d", filePath, start, end)
-				if seenBridges[bridgeKey] {
-					continue
-				}
-				focus := searchFocusLine(q, lines, start, end)
-				container := enclosingSearchSymbol(symbolsByFile[filePath], focus)
-				candidate, ok := makeSearchCandidate(q, filePath, languages[filePath], lines, start, end, container, options.MaxSnippetLines)
-				if !ok {
-					continue
-				}
-				// An inferred path alias locates the file, but does not justify a
-				// symbol-free bridge displacing the actual downstream graph symbol.
-				directPathQuery := q
-				directPathQuery.inferredAbbreviations = nil
-				if len(candidate.termCounts) == 0 && candidate.result.SymbolID == "" && pathSearchScore(directPathQuery, filePath) == 0 {
-					continue
-				}
-				candidate.result.Signals = appendUnique(candidate.result.Signals, "same-file-bridge")
-				candidate.score = derivedSearchScore(maxFloat64(left.score, right.score), 0.45*(left.score+right.score))
-				candidate.baseScore = candidate.score
-				seenBridges[bridgeKey] = true
-				out = append(out, candidate)
+				// Reserve half the fixed semantic span for the downstream operation.
+				// Caller presentation width cannot create or remove bridge identities.
+				start := maxInt(gapStart, right.result.StartLine-bridgeSpanLines/2)
+				end := minInt(right.result.EndLine, start+bridgeSpanLines-1)
+				descriptors = append(descriptors, searchBridgePairDescriptor{
+					filePath: filePath, start: start, end: end,
+					leftSymbol: leftSymbol.ID, rightSymbol: rightSymbol.ID,
+					score: derivedSearchScore(maxFloat64(left.score, right.score), 0.45*(left.score+right.score)),
+				})
 			}
 		}
 	}
-	sortSearchCandidates(out)
-	if len(out) > 20 {
-		out = out[:20]
+	sort.SliceStable(descriptors, func(i, j int) bool {
+		left, right := descriptors[i], descriptors[j]
+		if left.score != right.score {
+			return left.score > right.score
+		}
+		if left.filePath != right.filePath {
+			return left.filePath < right.filePath
+		}
+		if left.start != right.start {
+			return left.start < right.start
+		}
+		if left.end != right.end {
+			return left.end < right.end
+		}
+		if left.leftSymbol != right.leftSymbol {
+			return left.leftSymbol < right.leftSymbol
+		}
+		return left.rightSymbol < right.rightSymbol
+	})
+	// One source gap can have several symbol representations. The fixed
+	// evidence horizon counts public bridge identities, not parser/provider
+	// representations, so a duplicated gap cannot starve a later distinct one.
+	// The first descriptor wins because the preceding order is the evidence
+	// order (derived endpoint score, then deterministic source tie-breaks).
+	seenDescriptorIdentities := make(map[searchBridgeIdentity]bool, len(descriptors))
+	uniqueDescriptors := descriptors[:0]
+	for _, descriptor := range descriptors {
+		identity := searchBridgeIdentity{
+			filePath: descriptor.filePath,
+			start:    descriptor.start,
+			end:      descriptor.end,
+		}
+		if seenDescriptorIdentities[identity] {
+			continue
+		}
+		seenDescriptorIdentities[identity] = true
+		uniqueDescriptors = append(uniqueDescriptors, descriptor)
 	}
-	return out
+	descriptors = uniqueDescriptors
+	if len(descriptors) > searchBridgePairEvidenceHorizon {
+		descriptors = descriptors[:searchBridgePairEvidenceHorizon]
+	}
+
+	var out []searchCandidate
+	seenBridges := map[string]bool{}
+	fileLines := map[string][]string{}
+	unreadable := map[string]bool{}
+	materialized := 0
+	for _, descriptor := range descriptors {
+		if len(out) == searchBridgeOutputLimit || ctx.Err() != nil {
+			break
+		}
+		bridgeKey := fmt.Sprintf("%s:%d:%d", descriptor.filePath, descriptor.start, descriptor.end)
+		if seenBridges[bridgeKey] {
+			continue
+		}
+		lines, cached := fileLines[descriptor.filePath]
+		if !cached {
+			if unreadable[descriptor.filePath] {
+				continue
+			}
+			content, ok := read(descriptor.filePath)
+			if !ok || strings.IndexByte(content, 0) >= 0 {
+				unreadable[descriptor.filePath] = true
+				continue
+			}
+			lines = physicalSourceLines(content)
+			fileLines[descriptor.filePath] = lines
+		}
+		materialized++
+		focus := searchFocusLine(q, lines, descriptor.start, descriptor.end)
+		container := enclosingSearchSymbol(symbolsByFile[descriptor.filePath], focus)
+		candidate, ok := makeSearchCandidate(
+			q, descriptor.filePath, languages[descriptor.filePath], lines,
+			descriptor.start, descriptor.end, container, bridgeSpanLines,
+		)
+		if !ok {
+			continue
+		}
+		// An inferred path alias locates the file, but does not justify a
+		// symbol-free bridge displacing the actual downstream graph symbol.
+		directPathQuery := q
+		directPathQuery.inferredAbbreviations = nil
+		if len(candidate.termCounts) == 0 && candidate.result.SymbolID == "" &&
+			pathSearchScore(directPathQuery, descriptor.filePath) == 0 {
+			continue
+		}
+		candidate.result.Signals = appendUnique(candidate.result.Signals, "same-file-bridge")
+		candidate.score = descriptor.score
+		candidate.baseScore = descriptor.score
+		seenBridges[bridgeKey] = true
+		out = append(out, candidate)
+	}
+	sortSearchCandidates(out)
+	return out, materialized
+}
+
+// searchExpansionSeedHorizon makes expansion independent of the number of rows
+// the caller asked to display. The existing relative-score gate defines useful
+// evidence; the repository-wide selective-index ceiling bounds the work even
+// when a query produces a very long equal-score tail.
+func searchExpansionSeedHorizon(candidates []searchCandidate, relativeFloor float64) int {
+	if len(candidates) == 0 || candidates[0].score <= 0 {
+		return 0
+	}
+	limit := minInt(len(candidates), searchExpansionMaxSeedCandidates)
+	floor := relativeFloor * candidates[0].score
+	for index := 0; index < limit; index++ {
+		if candidates[index].score < floor {
+			return index
+		}
+	}
+	return limit
 }
 
 func searchSymbolByID(symbols []SymbolRecord, id string) (SymbolRecord, bool) {
@@ -5317,10 +5549,12 @@ func selectHybridCandidates(semantic, sparse []searchCandidate, topK int) []sear
 			semanticFileRank[candidate.result.FilePath] = index + 1
 		}
 	}
-	// RRF combines rankings at the requested retrieval depth. Allowing the
-	// entire sparse tail to participate lets weak chunks from a highly ranked
-	// file leapfrog genuinely strong top-K sparse regions.
-	fusedSparse := append([]searchCandidate(nil), sparse[:minInt(topK, len(sparse))]...)
+	// Construct one bounded fused ordering before the caller's result count
+	// projects it. The horizon is independent of TopK, preserving projection
+	// stability without allowing an unbounded weak sparse tail to re-enter
+	// through semantic file-rank boosts.
+	sparseHorizon := minInt(len(sparse), deepSearchSparseEvidenceHorizon)
+	fusedSparse := append([]searchCandidate(nil), sparse[:sparseHorizon]...)
 	for index := range fusedSparse {
 		sparseRank := index + 1
 		fusedSparse[index].score = 1 / float64(sparseSearchRRFConstant+sparseRank)
@@ -5330,64 +5564,147 @@ func selectHybridCandidates(semantic, sparse []searchCandidate, topK int) []sear
 	}
 	sortSearchCandidates(fusedSparse)
 
-	semanticHead := minInt(
-		len(semantic),
-		minInt(maxDeepSearchSemanticHead, maxInt(1, topK/deepSearchSemanticHeadDivisor)),
-	)
-	sparseTarget := minInt(len(fusedSparse), topK*deepSearchSparseNumerator/deepSearchSparseDenominator)
+	// Each modality is a monotonic queue. Candidates from already represented
+	// files are deferred once, not found through repeated scans and slice
+	// deletion. Exact source locations are the dedupe identity: two useful
+	// regions of one symbol remain distinct while semantic/sparse overlap does
+	// not print the same region twice.
+	semanticQueue := newSearchCandidateCoverageQueue(semantic)
+	sparseQueue := newSearchCandidateCoverageQueue(fusedSparse)
 	selected := make([]searchCandidate, 0, minInt(topK, len(semantic)+len(fusedSparse)))
-	// Every append goes through the region-dedup guard, INCLUDING the two head blocks.
-	// The head blocks used to append unchecked, so a region the semantic ranking and the
-	// sparse ranking both found was seated twice — observed as one symbol holding ranks 1,
-	// 2 and 3 of an 11-row payload that contained only 9 distinct locations.
-	appendUnique := func(candidates []searchCandidate, limit int) {
-		for _, candidate := range candidates {
-			if limit >= 0 && len(selected) >= limit {
-				return
-			}
-			if len(selected) >= topK {
-				return
-			}
-			if containsSearchCandidate(selected, candidate) {
+	selectedFiles := make(map[string]bool, topK)
+	selectedLocations := make(map[string]bool, topK)
+	semanticUsed, sparseUsed := 0, 0
+	appendNextSparse := func() bool {
+		candidate, ok := sparseQueue.pop(selectedFiles, selectedLocations)
+		if !ok {
+			return false
+		}
+		selected = append(selected, candidate)
+		selectedFiles[candidate.result.FilePath] = true
+		selectedLocations[searchCandidateLocationKey(candidate)] = true
+		return true
+	}
+	appendNextSemantic := func() bool {
+		candidate, ok := semanticQueue.pop(selectedFiles, selectedLocations)
+		if !ok {
+			return false
+		}
+		selected = append(selected, candidate)
+		selectedFiles[candidate.result.FilePath] = true
+		selectedLocations[searchCandidateLocationKey(candidate)] = true
+		return true
+	}
+	if appendNextSemantic() {
+		semanticUsed++
+	}
+	for len(selected) < topK && (!semanticQueue.empty() || !sparseQueue.empty()) {
+		preferSparse := !sparseQueue.empty() &&
+			(semanticQueue.empty() ||
+				sparseUsed*(deepSearchSparseDenominator-deepSearchSparseNumerator) < semanticUsed*deepSearchSparseNumerator)
+		if preferSparse {
+			if appendNextSparse() {
+				sparseUsed++
 				continue
 			}
-			selected = append(selected, candidate)
 		}
-	}
-	appendUnique(semantic[:semanticHead], -1)
-	appendUnique(fusedSparse, minInt(topK, len(selected)+sparseTarget))
-
-	// Prefer one representative for every additional semantic file. This is a
-	// coverage reserve, so cross-modality region overlap is intentionally not a
-	// reason to discard a sparse window.
-	seenFiles := make(map[string]bool, len(selected))
-	for _, candidate := range selected {
-		seenFiles[candidate.result.FilePath] = true
-	}
-	for _, candidate := range semantic[semanticHead:] {
-		if len(selected) == topK {
-			break
-		}
-		if seenFiles[candidate.result.FilePath] || containsSearchCandidate(selected, candidate) {
+		if appendNextSemantic() {
+			semanticUsed++
 			continue
 		}
-		seenFiles[candidate.result.FilePath] = true
-		selected = append(selected, candidate)
+		if appendNextSparse() {
+			sparseUsed++
+			continue
+		}
+		break
 	}
-	appendUnique(semantic[semanticHead:], -1)
-	appendUnique(fusedSparse[minInt(sparseTarget, len(fusedSparse)):], -1)
 	return selected
 }
 
-func containsSearchCandidate(candidates []searchCandidate, target searchCandidate) bool {
-	for _, candidate := range candidates {
-		if candidate.result.FilePath == target.result.FilePath &&
-			candidate.result.StartLine == target.result.StartLine &&
-			candidate.result.EndLine == target.result.EndLine {
-			return true
+type searchCandidateCoverageQueue struct {
+	candidates []searchCandidate
+	consumed   []bool
+	bandEnds   []int
+	head       int
+}
+
+func newSearchCandidateCoverageQueue(candidates []searchCandidate) searchCandidateCoverageQueue {
+	return searchCandidateCoverageQueue{
+		candidates: candidates,
+		bandEnds:   searchCandidateCoverageBandEnds(candidates),
+	}
+}
+
+func searchCandidateCoverageBandEnds(candidates []searchCandidate) []int {
+	if len(candidates) == 0 {
+		return nil
+	}
+	// Partition the modality's complete fixed ordering at every material score
+	// cliff. Unseen-file preference stays inside the current evidence band: a
+	// weak lower band cannot displace a strong repeated row, while credible
+	// 20/19/18-style evidence regains diversity after a 100-to-20 cliff. These
+	// boundaries are computed once and never depend on TopK.
+	ends := make([]int, len(candidates))
+	bandStart := 0
+	for index := 1; index < len(candidates); index++ {
+		if candidates[index].score < searchDiversityRelevanceRatio*candidates[index-1].score {
+			for member := bandStart; member < index; member++ {
+				ends[member] = index
+			}
+			bandStart = index
 		}
 	}
-	return false
+	for member := bandStart; member < len(candidates); member++ {
+		ends[member] = len(candidates)
+	}
+	return ends
+}
+
+func (queue *searchCandidateCoverageQueue) pop(
+	selectedFiles, selectedLocations map[string]bool,
+) (searchCandidate, bool) {
+	if queue.consumed == nil {
+		queue.consumed = make([]bool, len(queue.candidates))
+	}
+	for queue.head < len(queue.candidates) &&
+		(queue.consumed[queue.head] || selectedLocations[searchCandidateLocationKey(queue.candidates[queue.head])]) {
+		queue.consumed[queue.head] = true
+		queue.head++
+	}
+	if queue.head == len(queue.candidates) {
+		return searchCandidate{}, false
+	}
+	head := queue.candidates[queue.head]
+	chosen := queue.head
+	if selectedFiles[head.result.FilePath] {
+		for index := queue.head + 1; index < queue.bandEnds[queue.head]; index++ {
+			candidate := queue.candidates[index]
+			if queue.consumed[index] || selectedLocations[searchCandidateLocationKey(candidate)] {
+				continue
+			}
+			if !selectedFiles[candidate.result.FilePath] {
+				chosen = index
+				break
+			}
+		}
+	}
+	queue.consumed[chosen] = true
+	if chosen == queue.head {
+		queue.head++
+	}
+	return queue.candidates[chosen], true
+}
+
+func (queue *searchCandidateCoverageQueue) empty() bool {
+	if queue.consumed == nil {
+		return len(queue.candidates) == 0
+	}
+	for index := queue.head; index < len(queue.candidates); index++ {
+		if !queue.consumed[index] {
+			return false
+		}
+	}
+	return true
 }
 
 // searchCandidateLocationKey identifies the source region a candidate occupies. Two
@@ -5445,13 +5762,45 @@ func bestSearchCandidateScores(candidates []searchCandidate) (map[string]float64
 }
 
 func selectDiverseCandidates(candidates []searchCandidate, topK, maxPerFile int) []searchCandidate {
-	remaining := append([]searchCandidate(nil), candidates...)
-	selected := make([]searchCandidate, 0, minInt(topK, len(remaining)))
-	perFile := map[string]int{}
-	perSymbolName := map[string]int{}
-	perBaseName := map[string]int{}
-	distinctFileTarget := minInt(topK, (topK+1)/2)
-	for len(selected) < topK {
+	order := newDiverseSearchCandidateOrder(candidates, maxPerFile)
+	for len(order.selected) < topK {
+		if _, ok := order.next(); !ok {
+			break
+		}
+	}
+	return order.selected
+}
+
+// diverseSearchCandidateOrder incrementally constructs the same deterministic
+// diversity order without knowing how many rows a caller will eventually
+// project. Mixed prose/source scheduling uses it so a source just below a
+// shallow ordinary projection remains reachable without inventing a source
+// quota or rebuilding a different order for a larger TopK.
+type diverseSearchCandidateOrder struct {
+	remaining     []searchCandidate
+	selected      []searchCandidate
+	perFile       map[string]int
+	perSymbolName map[string]int
+	perBaseName   map[string]int
+	maxPerFile    int
+}
+
+func newDiverseSearchCandidateOrder(candidates []searchCandidate, maxPerFile int) *diverseSearchCandidateOrder {
+	return &diverseSearchCandidateOrder{
+		remaining:     append([]searchCandidate(nil), candidates...),
+		selected:      make([]searchCandidate, 0, minInt(defaultSearchTopK, len(candidates))),
+		perFile:       map[string]int{},
+		perSymbolName: map[string]int{},
+		perBaseName:   map[string]int{},
+		maxPerFile:    maxPerFile,
+	}
+}
+
+func (order *diverseSearchCandidateOrder) next() (searchCandidate, bool) {
+	if len(order.remaining) == 0 {
+		return searchCandidate{}, false
+	}
+	for {
 		// Search is primarily a discovery operation for coding agents. Give the
 		// agent one strong location from each candidate file before spending the
 		// remaining result budget on additional regions in files it has already
@@ -5460,42 +5809,43 @@ func selectDiverseCandidates(candidates []searchCandidate, topK, maxPerFile int)
 		// close behind them. The reserve is relevance-bounded: an exact usage or
 		// second requested symbol must not be buried under weak matches merely
 		// because it shares a file with an earlier result.
-		fileLimit := maxPerFile
-		if len(perFile) < distinctFileTarget && shouldReserveUnseenSearchFile(
-			remaining, selected, perFile, perSymbolName, perBaseName, maxPerFile,
+		fileLimit := order.maxPerFile
+		if shouldReserveUnseenSearchFile(
+			order.remaining, order.selected, order.perFile, order.perSymbolName, order.perBaseName, order.maxPerFile,
 		) {
 			fileLimit = 1
 		}
 		bestIndex := -1
 		bestAdjusted := -math.MaxFloat64
-		for i := range remaining {
-			candidate := remaining[i]
-			if perFile[candidate.result.FilePath] >= fileLimit || overlapsSelected(candidate, selected) {
+		for i := range order.remaining {
+			candidate := order.remaining[i]
+			if order.perFile[candidate.result.FilePath] >= fileLimit || overlapsSelected(candidate, order.selected) {
 				continue
 			}
-			adjusted := adjustedSearchCandidateScore(candidate, perFile, perSymbolName, perBaseName)
-			if adjusted > bestAdjusted || (adjusted == bestAdjusted && searchCandidateLess(candidate, remaining[bestIndex])) {
+			adjusted := adjustedSearchCandidateScore(candidate, order.perFile, order.perSymbolName, order.perBaseName)
+			if adjusted > bestAdjusted || (adjusted == bestAdjusted && searchCandidateLess(candidate, order.remaining[bestIndex])) {
 				bestIndex = i
 				bestAdjusted = adjusted
 			}
 		}
 		if bestIndex < 0 {
-			break
+			return searchCandidate{}, false
 		}
-		selected = append(selected, remaining[bestIndex])
-		chosen := remaining[bestIndex].result
-		perFile[chosen.FilePath]++
+		candidate := order.remaining[bestIndex]
+		order.selected = append(order.selected, candidate)
+		chosen := candidate.result
+		order.perFile[chosen.FilePath]++
 		symbolKey := strings.ToLower(chosen.QualifiedName)
 		if symbolKey == "" {
 			symbolKey = strings.ToLower(chosen.SymbolName)
 		}
 		if symbolKey != "" {
-			perSymbolName[symbolKey]++
+			order.perSymbolName[symbolKey]++
 		}
-		perBaseName[strings.ToLower(filepath.Base(chosen.FilePath))]++
-		remaining = append(remaining[:bestIndex], remaining[bestIndex+1:]...)
+		order.perBaseName[strings.ToLower(filepath.Base(chosen.FilePath))]++
+		order.remaining = append(order.remaining[:bestIndex], order.remaining[bestIndex+1:]...)
+		return candidate, true
 	}
-	return selected
 }
 
 func shouldReserveUnseenSearchFile(
@@ -7087,6 +7437,8 @@ func (response SearchResponse) Validate() error {
 	if err := validateSearchContextBlockBudget(response); err != nil {
 		return err
 	}
+	relatedSupplements, coveringSupplements := 0, 0
+	supplementsStarted, coveringStarted := false, false
 	for index, result := range response.Results {
 		if result.Rank != index+1 {
 			return fmt.Errorf("search result rank %d at index %d", result.Rank, index)
@@ -7097,6 +7449,28 @@ func (response SearchResponse) Validate() error {
 		if err := validateSearchResultPassages(result); err != nil {
 			return fmt.Errorf("invalid search result at rank %d: %w", result.Rank, err)
 		}
+		switch result.Section {
+		case searchSectionRelated:
+			if coveringStarted {
+				return errors.New("related search supplement follows covering test")
+			}
+			supplementsStarted = true
+			relatedSupplements++
+		case searchSectionCoveringTest:
+			supplementsStarted = true
+			coveringStarted = true
+			coveringSupplements++
+		case searchSectionPrimary, searchSectionDocs:
+			if supplementsStarted {
+				return errors.New("primary search result follows supplemental result")
+			}
+		default:
+			return fmt.Errorf("unknown search result section %q", result.Section)
+		}
+	}
+	if relatedSupplements > searchRelatedSiteLimit || coveringSupplements > searchCoveringTestLimit {
+		return fmt.Errorf("search supplements exceed bounds: %d related, %d covering-test",
+			relatedSupplements, coveringSupplements)
 	}
 	return nil
 }

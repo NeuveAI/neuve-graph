@@ -26,9 +26,16 @@ import (
 //   - Related sites (searchSectionRelated): not ranked answers at all, but the other places
 //     the top hit's change usually has to land. See search_related.go.
 //
-// Sectioning is therefore a LABEL, not a filter: every hit stays in `results`, keeps its rank
-// and stays reachable. Renderers group by section, so the list an agent reads as "candidate
-// fix sites" contains only entries that could be one.
+// TopK selects the base primary ranking (the empty and docs-and-fixtures
+// sections). Explicitly requested primary enrichment such as CalleeHop may
+// then add more candidate fix sites. Sectioning is a LABEL, not a filter.
+// Search may finally append a separately ordered and bounded supplement block:
+// at most four related locators, then at most one covering test. To fund that
+// context inside the byte ceiling, supplement merging may replace eligible
+// redundant primary tail locators. It never reorders retained primary evidence,
+// displaces the protected head, or removes a file's last locator. Renderers
+// group by section, so the list an agent reads as "candidate fix sites"
+// contains only entries that could be one.
 //   - The covering test (searchSectionCoveringTest): the test that exercises the top hit. It is
 //     the one entry in the payload whose file the ranker deliberately DEMOTES, and it is here
 //     precisely because a test is not a fix site — it is the statement of what the fix has to

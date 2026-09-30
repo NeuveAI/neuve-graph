@@ -1,7 +1,6 @@
 package sem
 
 import (
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -105,11 +104,9 @@ func TestExpandProseResolutionRoundRobinsAcrossParents(t *testing.T) {
 	if len(expanded) != 4 {
 		t.Fatalf("expanded to %d results, want 4", len(expanded))
 	}
-	// Round robin is a property of WHICH passages are promoted, not of where they are printed:
-	// the second document contributes before the first document contributes twice. `one beta` is
-	// the first document's depth-2 passage, so its absence is the property under test. (Position
-	// is no longer meaningful here — results[] is re-sorted by score, so a promotion is reported
-	// beside its parent rather than at the end.)
+	// Round robin is a property of WHICH passages are promoted: the second document contributes
+	// before the first document contributes twice. Promotions form their own stable suffix, so
+	// `one beta`, the first document's depth-2 passage, is absent.
 	promoted := map[string]bool{}
 	bySnippet := map[string]SearchResult{}
 	for _, result := range expanded {
@@ -172,36 +169,71 @@ func TestExpandProseResolutionSkipsPassagesInsideGrownWindows(t *testing.T) {
 	}
 }
 
-// TestExpandProseResolutionKeepsResultsScoreOrdered pins the invariant results[] advertises.
-// Promotions inherit their parent's score, so appending them left a high-scoring passage sitting
-// behind every low-scoring parent: a consumer taking "top 20 by score" got a different set than
-// the first 20 entries, which is precisely the consumer this pass exists to serve.
-func TestExpandProseResolutionKeepsResultsScoreOrdered(t *testing.T) {
+// TestExpandProseResolutionPreservesPolicyOrder pins rank as the authoritative order. Primaries
+// may already be non-monotonic by raw relevance after source/prose policy interleaving; promotions
+// append in their own stable order and never re-sort or rewrite those primaries.
+func TestExpandProseResolutionPreservesPolicyOrder(t *testing.T) {
 	t.Parallel()
-	results := make([]SearchResult, 0, 6)
-	for index := 1; index <= 6; index++ {
-		results = append(results, proseResolutionParent(
-			index, "sessions/doc-"+strconv.Itoa(index)+".md", index*10,
-			"primary "+strconv.Itoa(index),
-			proseResolutionPassage(index*10+5, "passage "+strconv.Itoa(index)),
-		))
+	results := []SearchResult{
+		proseResolutionParent(1, "sessions/one.md", 10, "primary one", proseResolutionPassage(15, "passage one")),
+		proseResolutionParent(2, "sessions/two.md", 20, "primary two", proseResolutionPassage(25, "passage two")),
+		proseResolutionParent(3, "sessions/three.md", 30, "primary three", proseResolutionPassage(35, "passage three")),
 	}
+	results[0].Score, results[1].Score, results[2].Score = 10, 100, 50
 
-	expanded := expandProseResolution(results, 12, 0, 0)
+	expanded := expandProseResolution(results, 6, 0, 0)
 
-	if len(expanded) != 12 {
-		t.Fatalf("expanded to %d results, want 12", len(expanded))
+	if len(expanded) != 6 {
+		t.Fatalf("expanded to %d results, want 6", len(expanded))
 	}
-	for index := 1; index < len(expanded); index++ {
-		if expanded[index].Score > expanded[index-1].Score {
-			t.Fatalf("results not descending by score: position %d scores %v, position %d scores %v",
-				index-1, expanded[index-1].Score, index, expanded[index].Score)
+	wantSnippets := []string{"primary one", "primary two", "primary three", "passage one", "passage two", "passage three"}
+	wantScores := []float64{10, 100, 50, 10, 100, 50}
+	for index := range expanded {
+		if expanded[index].Snippet != wantSnippets[index] || expanded[index].Score != wantScores[index] {
+			t.Fatalf("rank %d = %q/%v, want %q/%v", index+1, expanded[index].Snippet,
+				expanded[index].Score, wantSnippets[index], wantScores[index])
 		}
 	}
 	for index := range expanded {
 		if expanded[index].Rank != index+1 {
 			t.Fatalf("rank %d reported at position %d", expanded[index].Rank, index)
 		}
+	}
+}
+
+func TestExpandProseResolutionInsertsPromotionsBeforeSupplements(t *testing.T) {
+	t.Parallel()
+	primary := proseResolutionParent(1, "sessions/one.md", 10, "primary one",
+		proseResolutionPassage(30, "promoted passage"))
+	related := SearchResult{
+		Rank: 2, Score: 0, FilePath: "src/related.go", StartLine: 4, EndLine: 4,
+		FocusLine: 4, SnippetStartLine: 4, SnippetEndLine: 4,
+		Section: searchSectionRelated, Signals: []string{searchRelatedSignalPrefix + "caller"}, Snippet: "related",
+	}
+	covering := SearchResult{
+		Rank: 3, Score: 0, FilePath: "src/unit_test.go", StartLine: 8, EndLine: 8,
+		FocusLine: 8, SnippetStartLine: 8, SnippetEndLine: 8,
+		Section: searchSectionCoveringTest, Signals: []string{searchRelatedSignalPrefix + searchCoveringTestSignal}, Snippet: "covering",
+	}
+
+	expanded := expandProseResolution([]SearchResult{primary, related, covering}, 4, 0, 0)
+	want := []string{"primary one", "promoted passage", "related", "covering"}
+	if len(expanded) != len(want) {
+		t.Fatalf("expanded to %d results, want %d: %#v", len(expanded), len(want), expanded)
+	}
+	for index, snippet := range want {
+		if expanded[index].Snippet != snippet || expanded[index].Rank != index+1 {
+			t.Fatalf("rank %d = %q/%d, want %q/%d", index+1, expanded[index].Snippet,
+				expanded[index].Rank, snippet, index+1)
+		}
+	}
+	passages, passageBytes := searchPassageStats(expanded)
+	response := SearchResponse{Results: expanded, Stats: SearchStats{
+		ResultBytes:   serializedSearchResultBytes(expanded),
+		ProsePassages: passages, ProsePassageBytes: passageBytes,
+	}}
+	if err := response.Validate(); err != nil {
+		t.Fatalf("promotion broke primary/supplement ordering: %v", err)
 	}
 }
 

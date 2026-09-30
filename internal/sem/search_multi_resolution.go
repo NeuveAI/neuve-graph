@@ -1,28 +1,28 @@
 package sem
 
-import "sort"
-
 // MULTI-RESOLUTION RETRIEVAL
 //
-// Ranking returns at most one result per file, because for code search a second region of a file
-// the caller can already see is worth less than the first region of a file it cannot. That rule is
-// right for code and wrong for prose: one markdown file is one document — a design note, a meeting
-// log, a chat session — and the answer to a question about it is routinely spread across several
-// distant regions of the SAME file. For those files the ranker already computes the extra regions
+// Ranking can finish with fewer base primary regions than TopK after unit dedupe, file diversity,
+// containment removal, and byte fitting. For prose, one markdown file is one document — a design
+// note, a meeting log, a chat session — and the answer to a question about it is routinely spread
+// across several distant regions of the SAME file. For those files the ranker already computes
+// extra regions
 // and attaches them to their parent as `passages` (search_prose_passage.go), but a consumer that
 // reads `results[]` and nothing else never sees them: the parent result carries one span, and the
 // rest of the evidence sits in a field it did not ask about.
 //
-// So when the caller asked for more results than the ranking could fill with distinct files, the
-// leftover slots are spent promoting those already-computed regions to first-class results. Two
+// So when the base ranking and any explicitly requested primary enrichment leave capacity below
+// TopK, the leftover slots are spent promoting those already-computed regions to first-class
+// results. Two
 // resolutions of the same document are then returned side by side: the parent's own span, which
 // keeps the surrounding context, and the finer spans, which are the precise evidence.
 //
 // The rule that keeps this from becoming `--deep` (which traded breadth for depth and measured
 // worse) is that promotion is STRICTLY ADDITIVE: it runs after selection, only into slots the
-// distinct-file ranking left empty, and only within the byte ceiling the caller set. It can never
-// displace a file. `--top-k` still means "number of returned regions", and when the ranking already
-// filled it, the output is byte-identical to single-resolution.
+// pre-supplement primary block left empty, and only within the byte ceiling the caller set. It can
+// never displace a file. TopK bounds the base ranking rather than supplements or requested primary
+// enrichment; promotions only spend capacity that remains after those primary rows. When the
+// primary block already fills that capacity, the output is byte-identical to single-resolution.
 //
 // Ordinary code search is untouched: no code result carries passages, so there is nothing to
 // promote.
@@ -35,22 +35,16 @@ type prosePromotion struct {
 	passage int
 }
 
-// planProseResolutionPromotions orders promotions round-robin by depth, so a single long document
-// cannot spend every free slot before a second document has contributed anything. A passage whose
-// text the payload already prints is not promotable at all — its slot goes to the next passage in
-// the round robin instead.
-func planProseResolutionPromotions(results []SearchResult, limit int) []prosePromotion {
-	if limit <= 0 {
-		return nil
-	}
+// planProseResolutionPromotions constructs the complete promotion order before
+// TopK projects it. Round-robin depth prevents one long document from spending
+// every spare slot. A passage whose text the payload already prints is skipped.
+func planProseResolutionPromotions(results []SearchResult) []prosePromotion {
+	var order []prosePromotion
 	deepest := 0
 	for index := range results {
-		if count := len(results[index].Passages); count > deepest {
-			deepest = count
-		}
+		deepest = maxInt(deepest, len(results[index].Passages))
 	}
-	order := make([]prosePromotion, 0, limit)
-	for depth := 0; depth < deepest && len(order) < limit; depth++ {
+	for depth := 0; depth < deepest; depth++ {
 		for index := range results {
 			if depth >= len(results[index].Passages) {
 				continue
@@ -59,9 +53,6 @@ func planProseResolutionPromotions(results []SearchResult, limit int) []prosePro
 				continue
 			}
 			order = append(order, prosePromotion{parent: index, passage: depth})
-			if len(order) == limit {
-				break
-			}
 		}
 	}
 	return order
@@ -120,20 +111,38 @@ func applyProseResolutionPromotions(results []SearchResult, order []prosePromoti
 		expanded = append(expanded, parent)
 	}
 	for _, promotion := range order[:count] {
-		expanded = append(expanded, proseResolutionResult(results[promotion.parent], results[promotion.parent].Passages[promotion.passage]))
+		promoted := proseResolutionResult(results[promotion.parent], results[promotion.parent].Passages[promotion.passage])
+		expanded = append(expanded, promoted)
 	}
-	// results[] is documented as descending by score, and consumers truncate on it. Appending
-	// promotions would break that: a promotion carries its parent's score, so a passage of a
-	// high-scoring document landed after every low-scoring parent and the array stopped being
-	// monotone. Re-sorting restores the invariant, and a STABLE sort is what makes it safe --
-	// a promotion ties with its parent exactly, so it settles immediately after that parent
-	// instead of anywhere else in the tie. Set membership is untouched, so promotion stays
-	// strictly additive; only the order it is reported in changes.
-	sort.SliceStable(expanded, func(i, j int) bool { return expanded[i].Score > expanded[j].Score })
+	// Rank is the policy order: retain the selected primaries byte-for-byte, then append the
+	// independently planned promotion suffix. Score remains each region's underlying retrieval
+	// relevance and is deliberately not a second final-order key.
 	for index := range expanded {
 		expanded[index].Rank = index + 1
 	}
 	return expanded
+}
+
+func proseResolutionPrimaryPrefix(results []SearchResult) ([]SearchResult, []SearchResult) {
+	for index, result := range results {
+		if result.Section == searchSectionRelated || result.Section == searchSectionCoveringTest {
+			return results[:index], results[index:]
+		}
+	}
+	return results, nil
+}
+
+func appendProseResolutionSupplements(primaries, supplements []SearchResult) []SearchResult {
+	if len(supplements) == 0 {
+		return primaries
+	}
+	combined := make([]SearchResult, 0, len(primaries)+len(supplements))
+	combined = append(combined, primaries...)
+	combined = append(combined, supplements...)
+	for index := range combined {
+		combined[index].Rank = index + 1
+	}
+	return combined
 }
 
 // proseResolutionResult turns one passage into a result. It inherits its parent's file, language
@@ -159,8 +168,9 @@ func proseResolutionResult(parent SearchResult, passage SearchPassage) SearchRes
 	}
 }
 
-// expandProseResolution spends the result slots the distinct-file ranking left empty on the finer
-// regions it already computed, without breaching the caller's byte ceiling.
+// expandProseResolution spends the TopK capacity the pre-supplement primary block left empty on
+// the finer regions it already computed, without breaching the caller's byte ceiling. Promotions
+// are inserted before the related/covering supplement suffix.
 //
 // `reserved` is the bytes the reference blocks funded from that SAME ceiling have already spent —
 // the declaration card and the signature-type block. Both live OUTSIDE `results`, and
@@ -171,15 +181,21 @@ func proseResolutionResult(parent SearchResult, passage SearchPassage) SearchRes
 // --max-context-bytes the search command failed outright instead of returning results, which is
 // the worst possible outcome for a caller who asked for a SMALLER answer.
 func expandProseResolution(results []SearchResult, topK, budget, reserved int) []SearchResult {
-	if topK <= 0 || len(results) >= topK {
+	primaries, supplements := proseResolutionPrimaryPrefix(results)
+	if topK <= 0 || len(primaries) >= topK {
 		return results
 	}
-	order := planProseResolutionPromotions(results, topK-len(results))
+	order := planProseResolutionPromotions(primaries)
 	if len(order) == 0 {
 		return results
 	}
+	order = order[:minInt(len(order), topK-len(primaries))]
+	apply := func(count int) []SearchResult {
+		expanded := applyProseResolutionPromotions(primaries, order, count)
+		return appendProseResolutionSupplements(expanded, supplements)
+	}
 	if budget <= 0 {
-		return applyProseResolutionPromotions(results, order, len(order))
+		return apply(len(order))
 	}
 	// `budget <= 0` above means "no ceiling at all"; an available allowance of zero or less means
 	// the opposite — the blocks already spent the ceiling, so nothing may be promoted.
@@ -194,7 +210,7 @@ func expandProseResolution(results []SearchResult, topK, budget, reserved int) [
 	low, high := 0, len(order)
 	for low < high {
 		mid := (low + high + 1) / 2
-		if serializedSearchResultBytes(applyProseResolutionPromotions(results, order, mid)) <= available {
+		if serializedSearchResultBytes(apply(mid)) <= available {
 			low = mid
 		} else {
 			high = mid - 1
@@ -203,5 +219,5 @@ func expandProseResolution(results []SearchResult, topK, budget, reserved int) [
 	if low == 0 {
 		return results
 	}
-	return applyProseResolutionPromotions(results, order, low)
+	return apply(low)
 }

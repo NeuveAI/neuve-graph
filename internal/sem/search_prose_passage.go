@@ -14,27 +14,54 @@ func planProseParentPassages(
 	q searchQuery,
 	limit int,
 ) []SearchPassage {
+	return planProsePassages(parent, &primary, q, limit)
+}
+
+func planCompleteProseDocumentPassages(
+	parent *proseParent,
+	q searchQuery,
+	limit int,
+) []SearchPassage {
+	return planProsePassages(parent, nil, q, limit)
+}
+
+func planProsePassages(
+	parent *proseParent,
+	primary *searchCandidate,
+	q searchQuery,
+	limit int,
+) []SearchPassage {
 	if parent == nil || limit <= 0 || len(parent.candidates) == 0 {
 		return nil
 	}
 	terms := proseParentQueryTerms(q)
-	covered := proseCandidateTermCoverage(primary, terms)
-	primaryPassage, ok := searchCandidatePassage(primary)
-	if !ok {
-		return nil
+	covered := map[string]bool{}
+	var primaryPassage SearchPassage
+	if primary != nil {
+		covered = proseCandidateTermCoverage(*primary, terms)
+		var ok bool
+		primaryPassage, ok = searchCandidatePassage(*primary)
+		if !ok {
+			return nil
+		}
 	}
 	type option struct {
 		candidate *searchCandidate
 		passage   SearchPassage
 		coverage  map[string]bool
 	}
-	options := make([]option, 0, len(parent.candidates))
-	for _, candidate := range parent.candidates {
+	candidateLimit := minInt(len(parent.candidates), limit)
+	options := make([]option, 0, candidateLimit)
+	// parent.candidates follows the stable global merit order. Only the bounded
+	// consumable prefix participates in the quadratic marginal-coverage planner;
+	// scanning an unbounded remainder cannot add a passage the plan is allowed to
+	// return.
+	for _, candidate := range parent.candidates[:candidateLimit] {
 		if candidate == nil {
 			continue
 		}
 		passage, valid := searchCandidatePassage(*candidate)
-		if !valid || passagesOverlap(primaryPassage, passage) {
+		if !valid || (primary != nil && passagesOverlap(primaryPassage, passage)) {
 			continue
 		}
 		options = append(options, option{
@@ -43,40 +70,72 @@ func planProseParentPassages(
 			coverage:  proseCandidateTermCoverage(*candidate, terms),
 		})
 	}
+	sort.SliceStable(options, func(left, right int) bool {
+		return searchCandidateScoreLess(*options[left].candidate, *options[right].candidate)
+	})
 	planned := make([]SearchPassage, 0, minInt(limit, len(options)))
-	for len(options) > 0 && len(planned) < limit {
-		best := 0
-		bestMarginal := -1
+	selectedPassages := make([]SearchPassage, 0, minInt(limit, len(options)))
+	selectedOptions := make([]bool, len(options))
+	// Marginal coverage can improve only while one of the query's bounded terms
+	// remains unseen. That limits full rescoring to at most len(terms) rounds;
+	// after coverage is exhausted, the remaining order is ordinary candidate
+	// merit and can be consumed in one linear pass.
+	for len(planned) < limit && len(covered) < len(terms) {
+		best, bestMarginal := -1, 0
 		for index, candidate := range options {
+			if selectedOptions[index] || prosePassageOverlapsSorted(selectedPassages, candidate.passage) {
+				continue
+			}
 			marginal := 0
 			for term := range candidate.coverage {
 				if !covered[term] {
 					marginal++
 				}
 			}
-			if marginal > bestMarginal ||
-				(marginal == bestMarginal && searchCandidateScoreLess(*candidate.candidate, *options[best].candidate)) {
+			if marginal > bestMarginal || (marginal > 0 && marginal == bestMarginal &&
+				(best < 0 || searchCandidateScoreLess(*candidate.candidate, *options[best].candidate))) {
 				best, bestMarginal = index, marginal
 			}
 		}
-		selected := options[best]
-		options = append(options[:best], options[best+1:]...)
-		overlaps := false
-		for _, passage := range planned {
-			if passagesOverlap(passage, selected.passage) {
-				overlaps = true
-				break
-			}
+		if best < 0 || bestMarginal == 0 {
+			break
 		}
-		if overlaps {
-			continue
-		}
-		planned = append(planned, selected.passage)
-		for term := range selected.coverage {
+		selectedOptions[best] = true
+		planned = append(planned, options[best].passage)
+		selectedPassages = insertProsePassageSorted(selectedPassages, options[best].passage)
+		for term := range options[best].coverage {
 			covered[term] = true
 		}
 	}
+	for index, candidate := range options {
+		if len(planned) == limit {
+			break
+		}
+		if selectedOptions[index] || prosePassageOverlapsSorted(selectedPassages, candidate.passage) {
+			continue
+		}
+		planned = append(planned, candidate.passage)
+		selectedPassages = insertProsePassageSorted(selectedPassages, candidate.passage)
+	}
 	return planned
+}
+
+func prosePassageOverlapsSorted(passages []SearchPassage, candidate SearchPassage) bool {
+	index := sort.Search(len(passages), func(index int) bool {
+		return passages[index].StartLine >= candidate.StartLine
+	})
+	return (index > 0 && passagesOverlap(passages[index-1], candidate)) ||
+		(index < len(passages) && passagesOverlap(passages[index], candidate))
+}
+
+func insertProsePassageSorted(passages []SearchPassage, passage SearchPassage) []SearchPassage {
+	index := sort.Search(len(passages), func(index int) bool {
+		return passages[index].StartLine >= passage.StartLine
+	})
+	passages = append(passages, SearchPassage{})
+	copy(passages[index+1:], passages[index:])
+	passages[index] = passage
+	return passages
 }
 
 func searchCandidatePassage(candidate searchCandidate) (SearchPassage, bool) {

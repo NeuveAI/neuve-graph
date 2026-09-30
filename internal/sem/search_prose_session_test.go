@@ -113,6 +113,22 @@ func TestSearchRepositoryRanksSafePluralMarkdownSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	wantFocusRegions := []string{"# Ambers", "## Orchards", "## Ledgers", "## Lanterns", "## Vessels"}
+	for _, heading := range wantFocusRegions {
+		count := 0
+		for _, result := range response.Results {
+			if result.FilePath != "sessions/focus.md" {
+				continue
+			}
+			count += strings.Count(result.Snippet, heading)
+			for _, passage := range result.Passages {
+				count += strings.Count(passage.Snippet, heading)
+			}
+		}
+		if count != 1 {
+			t.Fatalf("focus heading %q appears %d times across primary and passages, want exactly once", heading, count)
+		}
+	}
 	// The admitted region is `## Vessels`, the section that carries the one query term no other
 	// document matches, rather than the document's globally best `# Ambers` heading: with the
 	// section as the ranked unit, the region that earned the slot is the region returned. Same
@@ -251,8 +267,8 @@ func TestProseParentHeadCountReservesMoreTailForListQuestions(t *testing.T) {
 		{query: "which physics explains motion", want: 5},
 	}
 	for _, testCase := range tests {
-		if got := proseParentHeadCount(buildSearchQuery(testCase.query), 10); got != testCase.want {
-			t.Errorf("proseParentHeadCount(%q, 10) = %d, want %d",
+		if got := proseParentHeadCount(buildSearchQuery(testCase.query)); got != testCase.want {
+			t.Errorf("proseParentHeadCount(%q) = %d, want %d",
 				testCase.query, got, testCase.want)
 		}
 	}
@@ -805,7 +821,7 @@ func TestSearchRepositoryProseParentOrderIsExactlyDeterministic(t *testing.T) {
 		}
 		if run == 0 {
 			first = encoded
-			assertSearchResultGolden(t, response.Results, "438571e7f7e9f76c0e6dbfbd649ed5fc9d052c51f98c309dd2858a695886d08f")
+			assertSearchResultGolden(t, response.Results, "5273400db6d36c2f0794d7077fee6877efb4dd7c12392625b179c2eca09d72ea")
 			continue
 		}
 		if !reflect.DeepEqual(encoded, first) {

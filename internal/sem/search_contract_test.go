@@ -1,6 +1,9 @@
 package sem
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // contractPayload is a ranked payload with a protected head and two tail locators, one of which is
 // the LAST mention of its file (so it may never be displaced) and one of which is redundant.
@@ -36,6 +39,37 @@ func contractCard() []TypeCardEntry {
 	return []TypeCardEntry{
 		{Name: "series.headChunks", FilePath: "src/head.go", Line: 91, Decl: "headChunks *memChunk"},
 		{Name: "memChunk", FilePath: "src/head.go", Line: 120, Decl: "type memChunk struct { prev *memChunk }"},
+	}
+}
+
+func TestSearchResponseValidateEnforcesSupplementOrderingAndBounds(t *testing.T) {
+	result := func(rank int, section string) SearchResult {
+		return SearchResult{Rank: rank, Score: 1, FilePath: "src/unit.go", StartLine: rank,
+			EndLine: rank, FocusLine: rank, SnippetStartLine: rank, SnippetEndLine: rank,
+			Section: section, Signals: []string{}, Snippet: "x"}
+	}
+	validate := func(results []SearchResult) error {
+		response := SearchResponse{Results: results, Stats: SearchStats{ResultBytes: serializedSearchResultBytes(results)}}
+		return response.Validate()
+	}
+	valid := []SearchResult{result(1, searchSectionPrimary), result(2, searchSectionDocs), result(3, searchSectionRelated), result(4, searchSectionCoveringTest)}
+	if err := validate(valid); err != nil {
+		t.Fatalf("valid primary + supplement contract rejected: %v", err)
+	}
+	wrongOrder := []SearchResult{result(1, searchSectionPrimary), result(2, searchSectionCoveringTest), result(3, searchSectionRelated)}
+	if err := validate(wrongOrder); err == nil || !strings.Contains(err.Error(), "related search supplement follows") {
+		t.Fatalf("wrong supplement order error = %v", err)
+	}
+	tooMany := []SearchResult{result(1, searchSectionPrimary)}
+	for index := 0; index <= searchRelatedSiteLimit; index++ {
+		tooMany = append(tooMany, result(len(tooMany)+1, searchSectionRelated))
+	}
+	if err := validate(tooMany); err == nil || !strings.Contains(err.Error(), "exceed bounds") {
+		t.Fatalf("supplement bound error = %v", err)
+	}
+	unknown := []SearchResult{result(1, "future-section")}
+	if err := validate(unknown); err == nil || !strings.Contains(err.Error(), "unknown search result section") {
+		t.Fatalf("unknown section error = %v", err)
 	}
 }
 

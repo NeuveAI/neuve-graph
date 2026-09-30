@@ -216,11 +216,11 @@ func TestSearchReferenceDeclarationKeepsExpressionBodies(t *testing.T) {
 func TestProseParentHeadCountRequiresTheOtherThanPhrase(t *testing.T) {
 	t.Parallel()
 	single := buildSearchQuery("why is this slower than the other implementation")
-	if got, want := proseParentHeadCount(single, 12), 6; got != want {
+	if got, want := proseParentHeadCount(single), proseParentOrdinaryMeritHead; got != want {
 		t.Fatalf("head count on a singular comparison = %d, want %d", got, want)
 	}
 	list := buildSearchQuery("which sessions other than the migration one touched billing")
-	if got, want := proseParentHeadCount(list, 12), 4; got != want {
+	if got, want := proseParentHeadCount(list), proseParentListMeritHead; got != want {
 		t.Fatalf("head count on an `other than` list = %d, want %d", got, want)
 	}
 }
@@ -230,7 +230,7 @@ func TestProseParentHeadCountRequiresTheOtherThanPhrase(t *testing.T) {
 func TestProseParentHeadCountRequiresAPluralFrameAfterAre(t *testing.T) {
 	t.Parallel()
 	single := buildSearchQuery("what are we doing about deployments")
-	if got, want := proseParentHeadCount(single, 12), 6; got != want {
+	if got, want := proseParentHeadCount(single), proseParentOrdinaryMeritHead; got != want {
 		t.Fatalf("head count on a singular question = %d, want %d", got, want)
 	}
 	for _, query := range []string{
@@ -238,7 +238,7 @@ func TestProseParentHeadCountRequiresAPluralFrameAfterAre(t *testing.T) {
 		"what are the remaining blockers",
 		"where are the migrations",
 	} {
-		if got, want := proseParentHeadCount(buildSearchQuery(query), 12), 4; got != want {
+		if got, want := proseParentHeadCount(buildSearchQuery(query)), proseParentListMeritHead; got != want {
 			t.Fatalf("head count on %q = %d, want %d", query, got, want)
 		}
 	}
@@ -550,7 +550,7 @@ func TestProseParentHeadCountReadsAWiderPluralFrame(t *testing.T) {
 		"what are the most recently reported flaky tests",
 		"where are the remaining unmigrated legacy fixtures",
 	} {
-		if got, want := proseParentHeadCount(buildSearchQuery(query), 12), 4; got != want {
+		if got, want := proseParentHeadCount(buildSearchQuery(query)), proseParentListMeritHead; got != want {
 			t.Fatalf("head count on the plural frame %q = %d, want %d", query, got, want)
 		}
 	}
@@ -561,7 +561,7 @@ func TestProseParentHeadCountReadsAWiderPluralFrame(t *testing.T) {
 		"what are the difference between the two approaches",
 		"what are the impact of failing builds",
 	} {
-		if got, want := proseParentHeadCount(buildSearchQuery(query), 12), 6; got != want {
+		if got, want := proseParentHeadCount(buildSearchQuery(query)), proseParentOrdinaryMeritHead; got != want {
 			t.Fatalf("head count on the singular question %q = %d, want %d", query, got, want)
 		}
 	}

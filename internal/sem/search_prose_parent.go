@@ -9,6 +9,14 @@ import (
 const (
 	proseParentRetrievalSignal        = "retrieval_mode=prose-parent"
 	defaultProseParentHeadWindowLines = 80
+	proseParentOrdinaryMeritHead      = 5
+	proseParentListMeritHead          = 3
+	proseParentTermFrontier           = searchPreselectionMaxSelectedFiles
+	// Passage planning is shared per document and only this stable region
+	// horizon is consumable. The fixed 384-region bound is independent of TopK
+	// and repository file selection, so one pathological document cannot make
+	// the greedy planner quadratic in every region it contains.
+	prosePassagePlanCandidateLimit = 384
 )
 
 // proseParent is one retrievable unit of a prose corpus: the regions that share it are ranked
@@ -43,14 +51,15 @@ type proseParent struct {
 // document that heads twelve entries "## note" carries twelve identically-identified sections, and
 // keying by ID alone would collapse them back into the single unit this change exists to split.
 //
-// The unit is keyed by section only for regions of a DOCUMENT. The corpus gate is counted over the
-// whole candidate path mix, so a docs-heavy repository opens it while still containing source
-// files; without this check those files would be keyed by symbol too, and since a source file has
-// many symbols they would each contribute many units. That is not merely off-model — one region per
-// unit is what enforces MaxRegionsPerFile for code, so removing the rule silently uncaps it. A
-// source region therefore keeps falling back to its file, which is exactly its previous behaviour.
+// The unit is keyed by section only for regions of a DOCUMENT. Source candidates retain their
+// ordinary region identity even when documents dominate the candidate mix; selecting a prose
+// retrieval policy must not collapse every callable in one source file into a single result. The
+// selector independently enforces MaxRegionsPerFile for those source regions.
 func proseParentKey(candidate searchCandidate, sectionUnits bool) string {
-	if !sectionUnits || !proseParentPath(candidate.result.FilePath) {
+	if !proseParentPath(candidate.result.FilePath) {
+		return "source:" + searchCandidateLocationKey(candidate)
+	}
+	if !sectionUnits {
 		return candidate.result.FilePath
 	}
 	// The section a region BELONGS TO, resolved from the document's headings by
@@ -206,16 +215,33 @@ func selectSearchCandidates(
 	if len(terms) == 0 {
 		return baseline
 	}
+	// Source evidence has one lazy diversity order of its own. It is not cut to
+	// the caller's TopK before the prose scheduler sees it: a weak source at
+	// ordinary rank 9 must not disappear only because one caller asks for eight
+	// results while another asks for more. The iterator computes only as much of
+	// that stable order as this projection consumes.
+	sourceCandidates := make([]searchCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if !proseParentPath(candidate.result.FilePath) {
+			sourceCandidates = append(sourceCandidates, candidate)
+		}
+	}
+	sourceOrder := newDiverseSearchCandidateOrder(sourceCandidates, maxPerFile)
 
 	selectedKeys := map[string]bool{}
-	selectedPaths := map[string]bool{}
+	selectedProsePaths := map[string]bool{}
+	selectedSourcePaths := map[string]int{}
 	// documentTarget is how many distinct documents this selection can represent at all. Until it
 	// is met, EVERY pass below admits only units from documents that have none yet — see the
 	// breadth rule at appendParent.
-	documentTarget := minInt(topK, proseParentDocumentCount(parents))
+	documentTarget := proseParentProseDocumentCount(parents)
 	selected := make([]searchCandidate, 0, minInt(topK, len(parents)))
 	appendParent := func(parent *proseParent, fallback searchCandidate) bool {
 		if parent == nil || selectedKeys[parent.key] || len(selected) == topK {
+			return false
+		}
+		isProse := proseParentPath(parent.path)
+		if !isProse && selectedSourcePaths[parent.path] >= maxPerFile {
 			return false
 		}
 		// BREADTH BEFORE DEPTH. A question is often answered by the one document nobody's terms
@@ -225,7 +251,7 @@ func selectSearchCandidates(
 		// score ranking hands every slot to whichever document's sections dominate the score list.
 		// It binds every pass, not just the first, because the per-term coverage pass is where a
 		// weakly-scoring document has always been admitted.
-		if sectionUnits && len(selectedPaths) < documentTarget && selectedPaths[parent.path] {
+		if sectionUnits && isProse && len(selectedProsePaths) < documentTarget && selectedProsePaths[parent.path] {
 			return false
 		}
 		candidate := fallback
@@ -233,21 +259,17 @@ func selectSearchCandidates(
 			candidate = *parent.best
 		}
 		candidate.result.Signals = appendUnique(candidate.result.Signals, proseParentRetrievalSignal)
-		// Passages, and therefore multi-resolution promotion, are for DOCUMENTS. The corpus gate is
-		// counted over the whole path mix, so a docs-heavy repository admits its source files here
-		// too; planning passages for them would hand a code file extra result slots through
-		// promotion, which is the same uncapping that section keying caused and which
-		// MaxRegionsPerFile is supposed to prevent. A code region stays a single ranked region.
-		if proseParentPath(candidate.result.FilePath) {
-			candidate.prosePassagePlan = planProseParentPassages(documents[parent.path], candidate, q, maxInt(0, topK-1))
-		}
 		selectedKeys[parent.key] = true
-		selectedPaths[parent.path] = true
+		if isProse {
+			selectedProsePaths[parent.path] = true
+		} else {
+			selectedSourcePaths[parent.path]++
+		}
 		selected = append(selected, candidate)
 		return true
 	}
 
-	headParents := proseParentHeadCount(q, topK)
+	headParents := proseParentHeadCount(q)
 	// The head: the best region of each document, in the ordinary region ranking's order.
 	// Unchanged — with section units the breadth rule already restricts it to one region per
 	// document, so `continue` only skips a candidate this pass was never going to take.
@@ -255,7 +277,7 @@ func selectSearchCandidates(
 		if len(selected) >= headParents {
 			break
 		}
-		if sectionUnits && selectedPaths[candidate.result.FilePath] {
+		if sectionUnits && proseParentPath(candidate.result.FilePath) && selectedProsePaths[candidate.result.FilePath] {
 			continue
 		}
 		appendParent(parents[proseParentKey(candidate, sectionUnits)], candidate)
@@ -275,22 +297,34 @@ func selectSearchCandidates(
 		}
 	}
 
-	termLists := proseParentTermLists(candidates, parents, terms, topK, sectionUnits)
-	for depth := 0; len(selected) < topK; depth++ {
-		sawDepth := false
-		for _, list := range termLists {
-			if depth >= len(list) {
-				continue
+	termLists := proseParentTermLists(candidates, parents, terms, minInt(len(parents), proseParentTermFrontier), sectionUnits)
+	coverage := proseParentCoverageOrder(termLists)
+	coverageIndex := 0
+	sourceExhausted := len(sourceCandidates) == 0
+	// After the protected merit head, source evidence and prose coverage share
+	// the tail instead of either class receiving a finite quota. Source goes
+	// first because graph/usage evidence can be lexically weak; prose then gets
+	// an equal recurring chance to represent the repository's documents.
+	for len(selected) < topK && (!sourceExhausted || coverageIndex < len(coverage)) {
+		for !sourceExhausted {
+			candidate, ok := sourceOrder.next()
+			if !ok {
+				sourceExhausted = true
+				break
 			}
-			sawDepth = true
-			seed := list[depth]
-			appendParent(seed.parent, *seed.candidate)
-			if len(selected) == topK {
+			if appendParent(parents[proseParentKey(candidate, sectionUnits)], candidate) {
 				break
 			}
 		}
-		if !sawDepth {
+		if len(selected) == topK {
 			break
+		}
+		for coverageIndex < len(coverage) {
+			seed := coverage[coverageIndex]
+			coverageIndex++
+			if appendParent(seed.parent, *seed.candidate) {
+				break
+			}
 		}
 	}
 	for _, candidate := range baseline {
@@ -304,6 +338,59 @@ func selectSearchCandidates(
 			break
 		}
 		appendParent(parents[proseParentKey(candidate, sectionUnits)], candidate)
+	}
+	return attachSharedProsePassagePlans(selected, documents, q)
+}
+
+// proseParentCoverageOrder flattens per-term merit lists in stable round-robin
+// depth. It is built once independently of TopK so every projection sees the
+// same prose-coverage sequence.
+func proseParentCoverageOrder(lists [][]proseParentSeed) []proseParentSeed {
+	var ordered []proseParentSeed
+	for depth := 0; ; depth++ {
+		sawDepth := false
+		for _, list := range lists {
+			if depth >= len(list) {
+				continue
+			}
+			sawDepth = true
+			ordered = append(ordered, list[depth])
+		}
+		if !sawDepth {
+			return ordered
+		}
+	}
+}
+
+// attachSharedProsePassagePlans computes one bounded plan per document and
+// attaches that shared order to every selected section. Final fusion can drop
+// an earlier section, so ownership is deliberately assigned later by
+// dropSelectedProsePassages over the results that will actually be returned.
+func attachSharedProsePassagePlans(
+	selected []searchCandidate,
+	documents map[string]*proseParent,
+	q searchQuery,
+) []searchCandidate {
+	plans := make(map[string][]SearchPassage)
+	for index := range selected {
+		path := selected[index].result.FilePath
+		if !proseParentPath(path) {
+			continue
+		}
+		plan, known := plans[path]
+		if !known {
+			document := documents[path]
+			if document != nil {
+				limit := minInt(len(document.candidates), prosePassagePlanCandidateLimit)
+				// The shared plan contains the complete document rather than
+				// excluding document.best. Final selection may retain a different
+				// section; dropSelectedProsePassages removes whichever primaries
+				// actually survived and assigns every other region exactly once.
+				plan = planCompleteProseDocumentPassages(document, q, limit)
+			}
+			plans[path] = plan
+		}
+		selected[index].prosePassagePlan = append([]SearchPassage(nil), plan...)
 	}
 	return selected
 }
@@ -528,14 +615,11 @@ func proseListPredicate(word string) bool {
 	}
 }
 
-func proseParentHeadCount(q searchQuery, topK int) int {
-	if topK <= 0 {
-		return 0
-	}
+func proseParentHeadCount(q searchQuery) int {
 	if proseQueryRequestsMultipleParents(q) {
-		return maxInt(1, topK/3)
+		return proseParentListMeritHead
 	}
-	return (topK + 1) / 2
+	return proseParentOrdinaryMeritHead
 }
 
 func proseParents(candidates []searchCandidate, sectionUnits bool) map[string]*proseParent {
@@ -563,6 +647,16 @@ func proseParentDocumentCount(parents map[string]*proseParent) int {
 	paths := make(map[string]bool, len(parents))
 	for _, parent := range parents {
 		paths[parent.path] = true
+	}
+	return len(paths)
+}
+
+func proseParentProseDocumentCount(parents map[string]*proseParent) int {
+	paths := make(map[string]bool, len(parents))
+	for _, parent := range parents {
+		if proseParentPath(parent.path) {
+			paths[parent.path] = true
+		}
 	}
 	return len(paths)
 }
@@ -659,9 +753,15 @@ func proseParentTermLists(
 	termLists := make([][]proseParentSeed, len(terms))
 	for termIndex, bestByParent := range bestByTerm {
 		for key, candidate := range bestByParent {
-			termLists[termIndex] = insertProseParentSeed(termLists[termIndex], proseParentSeed{
+			termLists[termIndex] = append(termLists[termIndex], proseParentSeed{
 				parent: parents[key], candidate: candidate,
-			}, limit)
+			})
+		}
+		sort.Slice(termLists[termIndex], func(left, right int) bool {
+			return proseParentSeedLess(termLists[termIndex][left], termLists[termIndex][right])
+		})
+		if len(termLists[termIndex]) > limit {
+			termLists[termIndex] = termLists[termIndex][:limit]
 		}
 	}
 	return termLists
@@ -838,26 +938,6 @@ func proseParentSeedLess(left, right proseParentSeed) bool {
 		return left.parent.key < right.parent.key
 	}
 	return searchCandidateLess(*left.candidate, *right.candidate)
-}
-
-func insertProseParentSeed(list []proseParentSeed, seed proseParentSeed, limit int) []proseParentSeed {
-	if limit <= 0 {
-		return list
-	}
-	// Selection cannot observe a term seed beyond top-k: reaching that depth
-	// means the preceding top-k distinct parents were already admitted.
-	position := sort.Search(len(list), func(index int) bool {
-		return proseParentSeedLess(seed, list[index])
-	})
-	if len(list) == limit && position == limit {
-		return list
-	}
-	if len(list) < limit {
-		list = append(list, proseParentSeed{})
-	}
-	copy(list[position+1:], list[position:])
-	list[position] = seed
-	return list
 }
 
 func searchCandidateScoreLess(left, right searchCandidate) bool {

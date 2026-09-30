@@ -397,7 +397,7 @@ func TestSearchRepositoryDeepSearchSkipsEmptyFiles(t *testing.T) {
 	}
 }
 
-func TestSelectHybridCandidatesBalancesSparseDepthAndFileDiversity(t *testing.T) {
+func TestSelectHybridCandidatesProjectsStableDiverseReverseOrdering(t *testing.T) {
 	semantic := make([]searchCandidate, 100)
 	sparse := make([]searchCandidate, 100)
 	for index := range semantic {
@@ -423,6 +423,22 @@ func TestSelectHybridCandidatesBalancesSparseDepthAndFileDiversity(t *testing.T)
 	if selected[0].result.FilePath != semantic[0].result.FilePath {
 		t.Fatalf("hybrid ranking did not preserve a semantic head: %#v", selected[0])
 	}
+	for _, topK := range []int{8, 16, 64} {
+		projected := selectHybridCandidates(semantic, sparse, topK)
+		if !reflect.DeepEqual(candidateIdentityPrefix(projected), candidateIdentityPrefix(selected[:topK])) {
+			t.Fatalf("top-k %d changed reverse-order hybrid prefix", topK)
+		}
+		sparseCount := 0
+		for _, candidate := range projected {
+			if containsString(candidate.result.Signals, "sparse-region") {
+				sparseCount++
+			}
+		}
+		wantSparse := topK * deepSearchSparseNumerator / deepSearchSparseDenominator
+		if sparseCount != wantSparse {
+			t.Fatalf("top-k %d sparse share = %d, want exact 5/8 share %d", topK, sparseCount, wantSparse)
+		}
+	}
 	sparseCount := 0
 	files := map[string]bool{}
 	for _, candidate := range selected {
@@ -431,8 +447,9 @@ func TestSelectHybridCandidatesBalancesSparseDepthAndFileDiversity(t *testing.T)
 			sparseCount++
 		}
 	}
-	if sparseCount <= len(selected)/2 || sparseCount >= len(selected)*3/4 {
-		t.Fatalf("hybrid sparse count = %d, want a majority with a semantic reserve", sparseCount)
+	wantSparse := len(selected) * deepSearchSparseNumerator / deepSearchSparseDenominator
+	if sparseCount != wantSparse {
+		t.Fatalf("hybrid sparse count = %d, want exact 5/8 share %d", sparseCount, wantSparse)
 	}
 	if len(files) < 90 {
 		t.Fatalf("hybrid selection covered only %d distinct files", len(files))
@@ -496,7 +513,7 @@ func TestBuildSparseSearchQueryUsesLexicalSubtokens(t *testing.T) {
 	}
 }
 
-func TestSelectHybridCandidatesBoundsSparseFusionAtTopK(t *testing.T) {
+func TestSelectHybridCandidatesScoresStableBoundedSparseEvidenceBeforeProjection(t *testing.T) {
 	semantic := []searchCandidate{{
 		result: SearchResult{FilePath: "strong.go", StartLine: 1, EndLine: 10},
 		score:  100,
@@ -518,10 +535,16 @@ func TestSelectHybridCandidatesBoundsSparseFusionAtTopK(t *testing.T) {
 	sparse[100].result.EndLine = 1080
 
 	selected := selectHybridCandidates(semantic, sparse, 100)
-	for _, candidate := range selected {
-		if candidate.result.FilePath == "strong.go" && candidate.result.StartLine == 1001 {
-			t.Fatal("sparse candidate below TopK participated in reciprocal-rank fusion")
-		}
+	deeper := selectHybridCandidates(semantic, sparse, 102)
+	if !reflect.DeepEqual(candidateIdentityPrefix(selected), candidateIdentityPrefix(deeper[:len(selected)])) {
+		t.Fatal("bounded sparse evidence scoring changed the earlier projection")
+	}
+	found := false
+	for _, candidate := range deeper {
+		found = found || (candidate.result.FilePath == "strong.go" && candidate.result.StartLine == 1001)
+	}
+	if !found {
+		t.Fatal("stable sparse evidence horizon lost a lower rank with semantic file agreement")
 	}
 }
 
@@ -927,22 +950,9 @@ func NeedleTarget() bool { return true }
 	}
 }
 
-func TestDefaultSearchIndexedFilesScalesWithRequestedDepth(t *testing.T) {
-	tests := []struct {
-		topK int
-		want int
-	}{
-		{topK: 1, want: defaultSearchMaxIndexedFiles},
-		{topK: defaultSearchTopK, want: defaultSearchMaxIndexedFiles},
-		{topK: 40, want: 120},
-		{topK: 100, want: deepSearchMaxIndexedFiles},
-		{topK: 1_000, want: deepSearchMaxIndexedFiles},
-		{topK: int(^uint(0) >> 1), want: deepSearchMaxIndexedFiles},
-	}
-	for _, test := range tests {
-		if got := defaultSearchIndexedFiles(test.topK); got != test.want {
-			t.Fatalf("defaultSearchIndexedFiles(%d) = %d, want %d", test.topK, got, test.want)
-		}
+func TestDefaultSearchIndexedFilesIsIndependentOfRequestedDepth(t *testing.T) {
+	if got := defaultSearchIndexedFiles(); got != defaultSearchMaxIndexedFiles {
+		t.Fatalf("defaultSearchIndexedFiles() = %d, want %d", got, defaultSearchMaxIndexedFiles)
 	}
 }
 
@@ -1012,7 +1022,7 @@ func TestDeepOmittedLimitNeverExceedsAbsoluteProgressiveCeiling(t *testing.T) {
 		SearchOptions{
 			Worktree:                true,
 			Profile:                 ProfileSyntaxOnly,
-			MaxIndexedFiles:         defaultSearchIndexedFiles(100),
+			MaxIndexedFiles:         defaultSearchIndexedFiles(),
 			progressivePreselection: true,
 		},
 		ProviderSnapshotOptions{NoNetwork: true, Worktree: true, Profile: ProfileSyntaxOnly},
