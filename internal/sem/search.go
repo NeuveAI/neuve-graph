@@ -1662,6 +1662,9 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 	results = assignSearchSections(results, q)
 	ranked := append([]SearchResult(nil), results...)
 	results, resultBytes, dropped, _ := fitSearchResultsToBudget(results, q, options.MaxContextBytes)
+	rankingContextBudget := options.MaxContextBytes
+	var rankedTestContract searchRankedTestContractPlan
+	rankedTestContractPlanned := false
 	// The fitter decides HOW MANY results fit; the allocator decides how the bytes they are
 	// allowed are spent. It runs second, on the already-seated results, so a hit whose
 	// complete enclosing symbol fits is returned whole — removing the follow-up file read
@@ -1718,11 +1721,42 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 	// bodyHeadRanks narrows the BODY head only; the never-demoted head stays at
 	// searchEnclosureHeadRanks. Passing one value for both is what made --body-head-ranks=2
 	// tersify ranks 3-5 as well, contradicting the paragraph above.
-	results, completeSymbols, locators := allocateSearchSnippets(
+	ordinaryResults, ordinaryCompleteSymbols, ordinaryLocators := allocateSearchSnippets(
 		seated, enclosures, plainEnclosures, options.MaxContextBytes,
 		resolvedSearchSnippetGrowth(seated, options.MaxContextBytes),
 		bodyHeadRanks, searchEnclosureHeadRanks, tailSnippetLines,
 	)
+	results, completeSymbols, locators := ordinaryResults, ordinaryCompleteSymbols, ordinaryLocators
+	// A test region already ranked below the protected head may replace itself with one bounded
+	// contract view. Price that replacement against the ordinary allocation, then accept a lower-
+	// budget rerun only when it narrows head context without changing any tail result.
+	anchors := searchTypeCardAnchor(
+		ordinaryResults, symbolsByID, symbolsByFile, searchEnclosureHeadRanks,
+	)
+	graphContract := buildSearchContractContext(
+		ordinaryResults, anchors, q, snapshot.Relations, symbolsByID, symbolsByFile, read, false,
+	)
+	if graphContract.test == nil {
+		if plan, ok := planSearchRankedTestContract(
+			ordinaryResults, seated, q, read, options.MaxContextBytes,
+		); ok {
+			if plan.delta == 0 || options.MaxContextBytes <= 0 {
+				rankedTestContract, rankedTestContractPlanned = plan, true
+			} else {
+				reservedBudget := options.MaxContextBytes - plan.delta
+				reservedResults, reservedCompleteSymbols, reservedLocators := allocateSearchSnippets(
+					seated, enclosures, plainEnclosures, reservedBudget,
+					resolvedSearchSnippetGrowth(seated, reservedBudget),
+					bodyHeadRanks, searchEnclosureHeadRanks, tailSnippetLines,
+				)
+				if searchRankedTestReservationIsSafe(ordinaryResults, reservedResults, reservedBudget) {
+					results, completeSymbols, locators = reservedResults, reservedCompleteSymbols, reservedLocators
+					rankingContextBudget = reservedBudget
+					rankedTestContract, rankedTestContractPlanned = plan, true
+				}
+			}
+		}
+	}
 	// THE RE-ANCHOR FUNDING INVARIANT, the same one seatForcedSearchUnits enforces for forced units: a
 	// body a hit gained only because it was re-anchored may be paid for out of free budget, never out of
 	// another rank's existing allocation. Re-anchoring moves the ANCHOR; it is not a licence to
@@ -1739,7 +1773,7 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 	// and costs nothing.
 	if control, exempt, gated := unreanchoredSearchEnclosures(seated, enclosures); gated {
 		plan, bodies, demoted := allocateSearchSnippets(
-			seated, control, plainEnclosures, options.MaxContextBytes, searchEnclosureGrowthBytes,
+			seated, control, plainEnclosures, rankingContextBudget, searchEnclosureGrowthBytes,
 			bodyHeadRanks, searchEnclosureHeadRanks, tailSnippetLines,
 		)
 		if !searchAllocationPreservesSource(plan, results, exempt) {
@@ -1752,12 +1786,12 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 	// still unclaimed on the ranks that are still locators, in rank order. Purely additive.
 	if budgetDriven {
 		var expanded int
-		results, expanded = spendRemainingSearchBudget(results, results, enclosures, options.MaxContextBytes)
+		results, expanded = spendRemainingSearchBudget(results, results, enclosures, rankingContextBudget)
 		completeSymbols += expanded
 	}
 	stats.CompleteSymbols = completeSymbols
 	stats.LocatorSnippets = locators
-	results, _, _ = allocateProseParentPassages(results, prosePassagePlans, options.MaxContextBytes)
+	results, _, _ = allocateProseParentPassages(results, prosePassagePlans, rankingContextBudget)
 	// Truncation is measured against the ranking, by rank, so it has to be read off the
 	// allocator's output BEFORE the related-site block renumbers the payload.
 	truncated := countBudgetTruncatedResults(ranked, results)
@@ -1791,7 +1825,7 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 			anchorIndexes = append(anchorIndexes, site.anchorIndex)
 		}
 		results, stats.CalleeHopSites = mergeSearchCalleeHopSites(
-			results, entries, anchorIndexes, options.MaxContextBytes,
+			results, entries, anchorIndexes, rankingContextBudget,
 			minInt(searchEnclosureTailSnippetLines, options.MaxSnippetLines),
 			maxInt(fullUnitRanks, 1),
 		)
@@ -1804,7 +1838,7 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 	// counter still describes what the allocator did, and before sectioning, so it can only ever
 	// touch candidate fix sites. See search_span_merge.go for the bounds that keep it from
 	// evicting a hit to pay for a bridge.
-	if merged, spans, absorbed := mergeSameFileSearchSpans(results, read, options.MaxContextBytes); spans > 0 {
+	if merged, spans, absorbed := mergeSameFileSearchSpans(results, read, rankingContextBudget); spans > 0 {
 		results = merged
 		stats.MergedSpans = spans
 		stats.CompleteSymbols = maxInt(0, stats.CompleteSymbols-absorbed)
@@ -1817,7 +1851,7 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 		sites := selectSearchRelatedSites(
 			results, anchors, q, snapshot.Relations, symbolsByID, symbolsByFile, read, searchRelatedSiteLimit,
 		)
-		results, stats.RelatedSites = mergeSearchRelatedSites(results, sites, read, options.MaxContextBytes)
+		results, stats.RelatedSites = mergeSearchRelatedSites(results, sites, read, rankingContextBudget)
 	}
 	// The three context blocks below share one budget. Their construction order is FIXED and
 	// load-bearing — see the policy in search_blocks.go. In short:
@@ -1841,7 +1875,7 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 			options.IncludeTypeCard,
 		)
 		results, typeCard, coverageNote, stats.CoveringTests, stats.TypeCardEntries =
-			mergeSearchContractContext(results, context, options.MaxContextBytes)
+			mergeSearchContractContext(results, context, rankingContextBudget)
 	}
 	var signatureTypes []SearchSignatureType
 	if options.IncludeSignatureTypes {
@@ -1955,7 +1989,15 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 		if len(typeCard) > 0 {
 			reserved += serializedSearchResultBytes(typeCard)
 		}
-		results = expandProseResolution(results, options.TopK, options.MaxContextBytes, reserved)
+		results = expandProseResolution(results, options.TopK, rankingContextBudget, reserved)
+	}
+	if rankedTestContractPlanned && stats.CoveringTests == 0 {
+		if promoted, ok := applySearchRankedTestContract(
+			results, rankedTestContract, options.MaxContextBytes,
+		); ok {
+			results = promoted
+			stats.CoveringTests = 1
+		}
 	}
 	stats.CandidatesSelected = len(results)
 	stats.ProsePassages, stats.ProsePassageBytes = searchPassageStats(results)
