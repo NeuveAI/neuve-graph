@@ -235,7 +235,7 @@ func (index *searchNeedleIndex) locate(needle string, paths []string, perFile, m
 		scan.matchingPaths = append(scan.matchingPaths, filePath)
 		scan.files++
 		sampled := 0
-		for offset, line := range strings.Split(content, "\n") {
+		for offset, line := range physicalSourceLines(content) {
 			if !strings.Contains(line, needle) {
 				continue
 			}

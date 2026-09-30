@@ -225,7 +225,7 @@ func buildSearchLiteralCluster(
 	if !ok {
 		return nil
 	}
-	body := searchLiteralAnchorLines(strings.Split(lines, "\n"), anchor)
+	body := searchLiteralAnchorLines(physicalSourceLines(lines), anchor)
 	priced := priceSearchLiteralCandidates(rankSearchLiteralCandidates(searchLiteralCandidates(body), q), index)
 	for attempt, candidate := range priced {
 		if attempt >= searchLiteralCandidateLimit {

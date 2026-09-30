@@ -79,6 +79,24 @@ func relatedClass(id, name, path string, start, end int) SymbolRecord {
 	}
 }
 
+func TestSearchRelatedFileCacheKeepsReadableEmptyFileCached(t *testing.T) {
+	reads := 0
+	cache := newSearchRelatedFileCache(func(path string) (string, bool) {
+		reads++
+		return "", path == "empty.go"
+	}, 1)
+
+	for attempt := 0; attempt < 2; attempt++ {
+		lines, ok := cache.get("empty.go")
+		if !ok || lines == nil || len(lines) != 0 {
+			t.Fatalf("attempt %d: get readable empty file = %#v, %t; want non-nil zero lines and true", attempt+1, lines, ok)
+		}
+	}
+	if reads != 1 {
+		t.Fatalf("readable empty file was read %d times, want one cached read", reads)
+	}
+}
+
 func relatedEdge(kind, from, to string) RelationRecord {
 	return RelationRecord{RecordType: "relation", FromID: from, ToID: to, Type: kind, Confidence: 0.9}
 }

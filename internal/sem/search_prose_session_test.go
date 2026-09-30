@@ -52,7 +52,7 @@ closing note
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertSearchResultGolden(t, response.Results, "6efd6795a9f0d1f2969f167676c81e22f6cd9aaa74ec7270c6d5f98e10ec9878")
+	assertSearchResultGolden(t, response.Results, "e2527b9e1b113dbd11bf213e53351eee7cb3bcca1764743072a437e2d5e16b8a")
 	wantHead := []string{
 		"sessions/distractor-00.md",
 		"sessions/distractor-01.md",
@@ -117,7 +117,7 @@ func TestSearchRepositoryRanksSafePluralMarkdownSession(t *testing.T) {
 	// document matches, rather than the document's globally best `# Ambers` heading: with the
 	// section as the ranked unit, the region that earned the slot is the region returned. Same
 	// rank, same score, same five regions.
-	assertSearchResultGolden(t, response.Results, "72795b2d906d1b141b4b040d82d8ef4e7d69d1a652bc16e72cbdb804524be5fc")
+	assertSearchResultGolden(t, response.Results, "c63d6496a6c0a80396b7ea9d6fdd9cc0a3d10b69b8c218a3524c67bcb20f3f21")
 	for _, result := range response.Results {
 		if result.FilePath == "sessions/focus.md" &&
 			containsString(result.Signals, "retrieval_mode=prose-parent") {
@@ -163,7 +163,7 @@ func TestSearchRepositoryRanksSafeSingularEvidenceForPluralQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertSearchResultGolden(t, response.Results, "186bc7d9a4265a3cce3f49a7b0d953d64bd37ceeb121de18f91cc5c22baa43aa")
+	assertSearchResultGolden(t, response.Results, "2af1480afed7f55dd4e13131e5f2e732eeb39a88338141ea49119ee9f78bc947")
 	for _, result := range response.Results {
 		if result.FilePath == "sessions/focus.md" &&
 			containsString(result.Signals, "retrieval_mode=prose-parent") {
@@ -566,7 +566,7 @@ func TestSearchRepositoryDoesNotConflateUnsafeProseSuffixes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertSearchResultGolden(t, response.Results, "f656311a14a2817e340eaa0fdeae3abc4f36c9f481712684c722c830c2f725b3")
+	assertSearchResultGolden(t, response.Results, "62fb330f73720bf8aee6aecc090f2058069ca41c54e158e0633923ac22370143")
 	for _, result := range response.Results {
 		if result.FilePath == "sessions/focus.md" {
 			t.Fatalf("unsafe gas/gases suffix promoted focus session: %#v", response.Results)
@@ -805,7 +805,7 @@ func TestSearchRepositoryProseParentOrderIsExactlyDeterministic(t *testing.T) {
 		}
 		if run == 0 {
 			first = encoded
-			assertSearchResultGolden(t, response.Results, "3e0c28f472059df45dd2ffaf2528bbf0c28fc6de55336f19591315f28f4a5c7c")
+			assertSearchResultGolden(t, response.Results, "438571e7f7e9f76c0e6dbfbd649ed5fc9d052c51f98c309dd2858a695886d08f")
 			continue
 		}
 		if !reflect.DeepEqual(encoded, first) {

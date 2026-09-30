@@ -213,6 +213,31 @@ func Send(value []byte) error { return nil }
 	}
 }
 
+func TestSearchRepositoryDoesNotReportTerminalNewlineAsSourceLine(t *testing.T) {
+	repo := t.TempDir()
+	content := "package sample\n" + strings.Repeat("// argument roundtrip\n", 38)
+	write(t, repo, "source/roundtrip.go", content)
+
+	response, err := SearchRepository(t.Context(), repo, "test", "argument roundtrip", SearchOptions{
+		Worktree: true,
+		Profile:  ProfileSyntaxOnly,
+		TopK:     1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Results) != 1 {
+		t.Fatalf("results = %#v, want the roundtrip fixture", response.Results)
+	}
+	result := response.Results[0]
+	if result.FilePath != "source/roundtrip.go" || result.StartLine != 1 || result.EndLine != 39 {
+		t.Fatalf("result range = %s:%d-%d, want source/roundtrip.go:1-39", result.FilePath, result.StartLine, result.EndLine)
+	}
+	if result.SnippetEndLine > 39 {
+		t.Fatalf("snippet ends at line %d, beyond the 39 physical source lines", result.SnippetEndLine)
+	}
+}
+
 func TestSearchRepositoryPreservesDistinctRegionsInOneFile(t *testing.T) {
 	repo := t.TempDir()
 	write(t, repo, "timing/wheel.go", `package timing
@@ -342,6 +367,32 @@ func TestSearchRepositoryBuildsSparseRegionsOnlyForDeepSearch(t *testing.T) {
 	for _, result := range deep.Results {
 		if containsString(result.Signals, "sparse-region") && result.Snippet == "" {
 			t.Fatalf("sparse result was not hydrated: %#v", result)
+		}
+	}
+}
+
+func TestSearchRepositoryDeepSearchSkipsEmptyFiles(t *testing.T) {
+	repo := t.TempDir()
+	for index := 0; index < defaultSearchMaxIndexedFiles+1; index++ {
+		write(t, repo, fmt.Sprintf("empty/file%03d.go", index), "")
+	}
+	write(t, repo, "source/target.go", "package source\n// sparse retrieval needle\n")
+
+	response, err := SearchRepository(t.Context(), repo, "test", "sparse retrieval needle", SearchOptions{
+		Worktree: true,
+		Profile:  ProfileSyntaxOnly,
+		TopK:     defaultSearchTopK + 1,
+		Deep:     true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Results) == 0 || response.Results[0].FilePath != "source/target.go" {
+		t.Fatalf("deep search results = %#v, want the non-empty matching file first", response.Results)
+	}
+	for _, result := range response.Results {
+		if strings.HasPrefix(result.FilePath, "empty/") {
+			t.Fatalf("empty file produced a search result: %#v", result)
 		}
 	}
 }

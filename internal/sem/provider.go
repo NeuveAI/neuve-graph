@@ -1571,6 +1571,19 @@ func sourceLineCount(content string) int {
 	return lines
 }
 
+// physicalSourceLines splits source using the same physical-line convention as
+// sourceLineCount: a terminal newline ends the preceding line but does not create
+// another line, while blank lines before that terminator remain present. Empty
+// readable source returns a non-nil slice because source caches reserve nil for
+// unreadable content.
+func physicalSourceLines(content string) []string {
+	lineCount := sourceLineCount(content)
+	if lineCount == 0 {
+		return []string{}
+	}
+	return strings.Split(content, "\n")[:lineCount]
+}
+
 func topLevelBlockFromLines(lines []string, symbols []SymbolRecord) string {
 	if len(lines) == 0 {
 		return ""

@@ -207,7 +207,7 @@ func (cache *searchRelatedFileCache) get(path string) ([]string, bool) {
 		cache.lines[path] = nil
 		return nil, false
 	}
-	lines := strings.Split(content, "\n")
+	lines := physicalSourceLines(content)
 	cache.lines[path] = lines
 	return lines, true
 }

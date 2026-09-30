@@ -1001,6 +1001,49 @@ func TestWarmCommittedSearchMatchesExhaustiveResultsWithoutFullContentRescan(t *
 	}
 }
 
+func TestCommittedSearchCachePreservesPhysicalSourceRange(t *testing.T) {
+	repo := t.TempDir()
+	git(t, repo, "init")
+	git(t, repo, "config", "user.name", "Entire Graph Test")
+	git(t, repo, "config", "user.email", "graph@example.com")
+	content := "package sample\n" + strings.Repeat("// argument roundtrip\n", 38)
+	write(t, repo, "source/roundtrip.go", content)
+	git(t, repo, "add", ".")
+	git(t, repo, "commit", "-m", "roundtrip fixture")
+
+	cacheDir := t.TempDir()
+	search := func() SearchResponse {
+		response, err := SearchRepository(t.Context(), repo, "test-version", "argument roundtrip", SearchOptions{
+			Profile:  ProfileSyntaxOnly,
+			TopK:     1,
+			CacheDir: cacheDir,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(response.Results) != 1 {
+			t.Fatalf("results = %#v, want the roundtrip fixture", response.Results)
+		}
+		result := response.Results[0]
+		if result.FilePath != "source/roundtrip.go" || result.StartLine != 1 || result.EndLine != 39 {
+			t.Fatalf("result range = %s:%d-%d, want source/roundtrip.go:1-39", result.FilePath, result.StartLine, result.EndLine)
+		}
+		return response
+	}
+
+	cold := search()
+	warm := search()
+	if cold.Stats.IndexCacheHit {
+		t.Fatal("first committed search unexpectedly hit the cache")
+	}
+	if !warm.Stats.IndexCacheHit {
+		t.Fatal("second committed search did not exercise the cache path")
+	}
+	if !reflect.DeepEqual(cold.Results, warm.Results) {
+		t.Fatalf("cached range or ranking differs from the cold search:\ncold=%#v\nwarm=%#v", cold.Results, warm.Results)
+	}
+}
+
 func TestWarmCommittedSearchKeepsLexicalMatchesFromPartialFailureFiles(t *testing.T) {
 	repo := t.TempDir()
 	git(t, repo, "init")

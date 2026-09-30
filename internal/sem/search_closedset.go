@@ -640,7 +640,7 @@ func (index *searchNeedleIndex) readLines(filePath string) ([]string, bool) {
 	if !ok || strings.IndexByte(content, 0) >= 0 {
 		return nil, false
 	}
-	return strings.Split(content, "\n"), true
+	return physicalSourceLines(content), true
 }
 
 // searchClosedSetSites finds the switch/match statements over a set.

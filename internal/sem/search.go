@@ -1418,7 +1418,7 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 		if !ok {
 			continue
 		}
-		lines := strings.Split(content, "\n")
+		lines := physicalSourceLines(content)
 		candidates = append(candidates, candidatesForFile(
 			q, filePath, fileLanguages[filePath], lines, symbolsByFile[filePath], options,
 		)...)
@@ -1441,8 +1441,8 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 			if !ok || len(content) > maxSparseSearchFileBytes || strings.IndexByte(content, 0) >= 0 {
 				continue
 			}
-			lines := strings.Split(strings.TrimSuffix(content, "\n"), "\n")
-			if len(lines) == 1 && lines[0] == "" {
+			lines := physicalSourceLines(content)
+			if len(lines) == 0 || (len(lines) == 1 && lines[0] == "") {
 				continue
 			}
 			language := ""
@@ -2713,8 +2713,8 @@ func preselectSearchFiles(
 			return searchFileCandidate{}, false
 		}
 		if options.Deep && len(sparseQuery.terms) > 0 && len(content) <= maxSparseSearchFileBytes {
-			lines := strings.Split(strings.TrimSuffix(content, "\n"), "\n")
-			if len(lines) > 1 || lines[0] != "" {
+			lines := physicalSourceLines(content)
+			if len(lines) > 0 && (len(lines) > 1 || lines[0] != "") {
 				language := ""
 				if spec, detected := languageForContent(filePath, content); detected {
 					language = spec.language
@@ -3666,7 +3666,7 @@ func hydrateSparseCandidates(candidates []searchCandidate, read contentReader) i
 				missing[filePath] = true
 				continue
 			}
-			lines = strings.Split(strings.TrimSuffix(content, "\n"), "\n")
+			lines = physicalSourceLines(content)
 			cache[filePath] = lines
 			if candidate.result.Language == "" {
 				if spec, detected := languageForContent(filePath, content); detected {
@@ -4647,7 +4647,7 @@ func expandGraphCandidates(seeds []searchCandidate, q searchQuery, relations []R
 				if !readable {
 					continue
 				}
-				lines = strings.Split(content, "\n")
+				lines = physicalSourceLines(content)
 				contentCache[symbol.FilePath] = lines
 			}
 			start, end := clampRegion(symbol.StartLine, symbol.EndLine, len(lines))
@@ -4900,7 +4900,7 @@ func expandIdentifierUsageCandidates(
 		if !ok || strings.IndexByte(content, 0) >= 0 {
 			continue
 		}
-		lines := strings.Split(content, "\n")
+		lines := physicalSourceLines(content)
 		for seedIndex, seed := range selectedSeeds {
 			if rawUsageCounts[seedIndex] == maxRawUsagesPerSeed {
 				continue
@@ -5094,7 +5094,7 @@ func expandSameContainerNeighborCandidates(
 		if !ok || strings.IndexByte(content, 0) >= 0 {
 			continue
 		}
-		lines := strings.Split(content, "\n")
+		lines := physicalSourceLines(content)
 		for _, neighborIndex := range []int{index - 1, index + 1} {
 			if neighborIndex < 0 || neighborIndex >= len(siblings) {
 				continue
@@ -5213,7 +5213,7 @@ func expandSameFileBridgeCandidates(
 		if !ok || strings.IndexByte(content, 0) >= 0 {
 			continue
 		}
-		lines := strings.Split(content, "\n")
+		lines := physicalSourceLines(content)
 		for leftIndex := 0; leftIndex+1 < len(regions); leftIndex++ {
 			for rightIndex := leftIndex + 1; rightIndex < len(regions); rightIndex++ {
 				left, right := regions[leftIndex], regions[rightIndex]

@@ -514,7 +514,7 @@ func planSearchEnclosures(
 				unreadable[result.FilePath] = true
 				continue
 			}
-			lines = strings.Split(content, "\n")
+			lines = physicalSourceLines(content)
 			fileLines[result.FilePath] = lines
 		}
 		if index < forceRanks {

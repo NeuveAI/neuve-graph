@@ -163,7 +163,7 @@ func buildSearchContainerMap(
 		if !ok || strings.IndexByte(content, 0) >= 0 {
 			continue
 		}
-		return searchContainerMapFor(result, anchor, fileSymbols, countLines(content))
+		return searchContainerMapFor(result, anchor, fileSymbols, sourceLineCount(content))
 	}
 	return nil
 }
@@ -671,17 +671,6 @@ func searchContainerMapKeyword(token string) bool {
 		return true
 	}
 	return false
-}
-
-func countLines(content string) int {
-	if content == "" {
-		return 0
-	}
-	lines := strings.Count(content, "\n")
-	if !strings.HasSuffix(content, "\n") {
-		lines++
-	}
-	return lines
 }
 
 // searchContainerMapCost is what a map costs the caller: the larger of its two wire forms, so a

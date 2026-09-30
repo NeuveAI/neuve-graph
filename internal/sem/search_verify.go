@@ -1727,7 +1727,7 @@ func deriveSearchVerifyCargo(dir string, subject searchVerifySubject, evidence *
 // dependency on a parser to read one line is a worse trade than a scanner that gives up.
 func searchVerifyTomlPackageName(content string) (string, bool) {
 	inPackage := false
-	for _, line := range strings.Split(content, "\n") {
+	for _, line := range physicalSourceLines(content) {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "[") {
 			inPackage = trimmed == "[package]"
@@ -2205,7 +2205,7 @@ func deriveSearchVerifyMake(dir string, subject searchVerifySubject, evidence *s
 // searchMakefileHasTarget reports whether a Makefile declares a target at the start of a line. A
 // mention inside a recipe or a variable is not a target.
 func searchMakefileHasTarget(content, target string) bool {
-	for _, line := range strings.Split(content, "\n") {
+	for _, line := range physicalSourceLines(content) {
 		if !strings.HasPrefix(line, target) {
 			continue
 		}
@@ -2456,7 +2456,7 @@ func searchVerifyNameWords(symbol string) []string {
 // prefix is accepted, because that is the only prefix `go test -run` selects.
 func searchVerifyGoTestNames(content string) []string {
 	var names []string
-	for _, line := range strings.Split(content, "\n") {
+	for _, line := range physicalSourceLines(content) {
 		trimmed := strings.TrimSpace(line)
 		if !strings.HasPrefix(trimmed, "func Test") {
 			continue
@@ -2481,7 +2481,7 @@ func searchVerifyGoTestNames(content string) []string {
 func searchVerifyRustTestNames(content string) []string {
 	var names []string
 	marked := false
-	for _, line := range strings.Split(content, "\n") {
+	for _, line := range physicalSourceLines(content) {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#[test") || strings.HasPrefix(trimmed, "#[tokio::test") {
 			marked = true
@@ -2884,7 +2884,7 @@ func searchVerifyTestLineExact(content, testName string) (int, bool) {
 	// fmt-2457: that is how FMT_RANGES_TEST_ENABLE_C_STYLE_ARRAY got defined for a case guarded by
 	// FMT_RANGES_TEST_ENABLE_JOIN. Ambiguous means unsatisfiable.
 	matches := 0
-	for _, candidate := range strings.Split(content, "\n") {
+	for _, candidate := range physicalSourceLines(content) {
 		trimmed := strings.TrimSpace(candidate)
 		if searchVerifyDeclarationLine(trimmed) && strings.Contains(trimmed, testName) {
 			matches++
@@ -2903,7 +2903,7 @@ func searchVerifyGuardFor(content string, line int) searchVerifyGuard {
 	if content == "" || line <= 0 {
 		return searchVerifyGuard{}
 	}
-	lines := strings.Split(content, "\n")
+	lines := physicalSourceLines(content)
 	if line > len(lines) {
 		line = len(lines)
 	}
@@ -2997,7 +2997,7 @@ func searchVerifyTestLine(content, testName string) int {
 	// that satisfies the wrong condition, which is a worse failure than finding no guard at all.
 	words := searchVerifyNameWords(testName)
 	best, bestMatches := 0, -1
-	for index, line := range strings.Split(content, "\n") {
+	for index, line := range physicalSourceLines(content) {
 		trimmed := strings.TrimSpace(line)
 		if !searchVerifyDeclarationLine(trimmed) {
 			continue

@@ -118,7 +118,7 @@ func mergeSameFileSearchSpans(results []SearchResult, read contentReader, budget
 				unreadable[anchor.FilePath] = true
 				continue
 			}
-			lines = strings.Split(content, "\n")
+			lines = physicalSourceLines(content)
 			fileLines[anchor.FilePath] = lines
 		}
 		survivor, span, ok := mergedSearchSpanResult(results, run, lines)

@@ -159,7 +159,7 @@ func reanchorSearchDocComments(
 				unreadable[result.FilePath] = true
 				continue
 			}
-			lines = strings.Split(content, "\n")
+			lines = physicalSourceLines(content)
 			fileLines[result.FilePath] = lines
 		}
 		// THE GATE, and it is the whole scope of this pass: only a hit ANCHORED IN PROSE is moved.
