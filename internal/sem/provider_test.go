@@ -362,6 +362,324 @@ export function run(options: Options): string {
 	}
 }
 
+func TestTypeScriptAliasedNamedImportCallResolvesOriginalMember(t *testing.T) {
+	repo := t.TempDir()
+	writeFile(t, repo, "src/entry.ts", `import { queryRepository as executeQueryRepository } from './real'
+
+export function main(): string {
+  return executeQueryRepository()
+}
+
+executeQueryRepository()
+`)
+	writeFile(t, repo, "src/real.ts", `export function queryRepository(): string {
+  return 'real'
+}
+`)
+	writeFile(t, repo, "src/decoy.ts", `export function queryRepository(): string {
+  return 'decoy'
+}
+`)
+
+	snapshot, err := BuildProviderSnapshotWithOptions(t.Context(), repo, "test-version", ProviderSnapshotOptions{Worktree: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := runCallsFrom(snapshot, "main")
+	if len(calls) != 1 {
+		t.Fatalf("main CALLS = %d, want exactly one imported target: %#v", len(calls), calls)
+	}
+	if !hasRelationBySymbolNameAndFile(snapshot, "CALLS", "main", "src/entry.ts", "queryRepository", "src/real.ts") {
+		t.Fatalf("aliased import did not resolve to src/real.ts#queryRepository: %#v", calls)
+	}
+	if calls[0].Resolution != "import_resolved" {
+		t.Fatalf("aliased import resolution = %q, want import_resolved: %#v", calls[0].Resolution, calls[0])
+	}
+	topLevelTarget := ""
+	for _, symbol := range snapshot.Symbols {
+		if symbol.FilePath == "src/real.ts" && symbol.Name == "queryRepository" {
+			topLevelTarget = symbol.ID
+		}
+	}
+	if topLevelTarget == "" {
+		t.Fatal("missing src/real.ts#queryRepository symbol")
+	}
+	topLevelFound := false
+	for _, relation := range snapshot.Relations {
+		if relation.Type == "CALLS" && relation.FromID == fileID(snapshot.Header.RepoKey, "src/entry.ts") && relation.ToID == topLevelTarget {
+			topLevelFound = true
+		}
+	}
+	if !topLevelFound {
+		t.Fatalf("top-level aliased import did not resolve to src/real.ts#queryRepository: %#v", relationsOfType(snapshot.Relations, "CALLS"))
+	}
+}
+
+func TestTypeScriptAliasedNamedImportCallRespectsLexicalShadows(t *testing.T) {
+	repo := t.TempDir()
+	writeFile(t, repo, "src/entry.ts", `import { queryRepository as executeQueryRepository } from './real'
+
+export function parameterShadow(executeQueryRepository: () => string): string {
+  return executeQueryRepository()
+}
+
+export function localShadow(replacement: () => string): string {
+  {
+    const executeQueryRepository = replacement
+    return executeQueryRepository()
+  }
+}
+
+export function importedCall(): string {
+  return executeQueryRepository()
+}
+`)
+	writeFile(t, repo, "src/real.ts", `export function queryRepository(): string {
+  return 'real'
+}
+`)
+
+	snapshot, err := BuildProviderSnapshotWithOptions(t.Context(), repo, "test-version", ProviderSnapshotOptions{Worktree: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasRelationBySymbolNameAndFile(snapshot, "CALLS", "importedCall", "src/entry.ts", "queryRepository", "src/real.ts") {
+		t.Fatalf("unshadowed alias did not resolve to imported queryRepository: %#v", relationsOfType(snapshot.Relations, "CALLS"))
+	}
+	for _, from := range []string{"parameterShadow", "localShadow"} {
+		if hasRelationBySymbolNameAndFile(snapshot, "CALLS", from, "src/entry.ts", "queryRepository", "src/real.ts") {
+			t.Errorf("%s lexical binding did not suppress imported queryRepository: %#v", from, runCallsFrom(snapshot, from))
+		}
+	}
+}
+
+func TestTypeScriptAliasedCallableArgumentRespectsLexicalShadows(t *testing.T) {
+	repo := t.TempDir()
+	writeFile(t, repo, "src/entry.ts", `import { queryRepository as executeQueryRepository } from './real'
+
+function consume(callback: () => string): string {
+  return callback()
+}
+
+export function shadowedArgument(executeQueryRepository: () => string): string {
+  return consume(executeQueryRepository)
+}
+
+export function mixedUses(replacement: () => string): string {
+  {
+    const executeQueryRepository = replacement
+    executeQueryRepository()
+  }
+  return consume(executeQueryRepository)
+}
+
+export function callbackOnly(): string {
+  return consume(executeQueryRepository)
+}
+`)
+	writeFile(t, repo, "src/real.ts", `export function queryRepository(): string {
+  return 'real'
+}
+`)
+
+	snapshot, err := BuildProviderSnapshotWithOptions(t.Context(), repo, "test-version", ProviderSnapshotOptions{Worktree: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	importedCallCount := func(from string) int {
+		count := 0
+		for _, relation := range runCallsFrom(snapshot, from) {
+			for _, symbol := range snapshot.Symbols {
+				if relation.ToID == symbol.ID && symbol.FilePath == "src/real.ts" && symbol.Name == "queryRepository" {
+					count++
+				}
+			}
+		}
+		return count
+	}
+	if got := importedCallCount("shadowedArgument"); got != 0 {
+		t.Errorf("shadowed callable argument imported CALLS = %d, want 0: %#v", got, runCallsFrom(snapshot, "shadowedArgument"))
+	}
+	for _, from := range []string{"mixedUses", "callbackOnly"} {
+		if got := importedCallCount(from); got != 1 {
+			t.Errorf("%s imported CALLS = %d, want exactly 1: %#v", from, got, runCallsFrom(snapshot, from))
+		}
+	}
+}
+
+func TestTypeScriptTopLevelAliasedCallableArgumentRespectsLexicalShadows(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		topLevel  string
+		wantCalls int
+	}{
+		{
+			name: "shadowed argument only",
+			topLevel: `{
+  function executeQueryRepository(): string { return 'local' }
+  consume(executeQueryRepository)
+}
+`,
+			wantCalls: 0,
+		},
+		{
+			name: "shadowed direct call and unshadowed argument",
+			topLevel: `{
+  function executeQueryRepository(): string { return 'local' }
+  executeQueryRepository()
+}
+consume(executeQueryRepository)
+`,
+			wantCalls: 1,
+		},
+		{
+			name:      "unshadowed argument only",
+			topLevel:  "consume(executeQueryRepository)\n",
+			wantCalls: 1,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repo := t.TempDir()
+			writeFile(t, repo, "src/entry.ts", `import { queryRepository as executeQueryRepository } from './real'
+
+function consume(callback: () => string): string {
+  return callback()
+}
+
+`+test.topLevel)
+			writeFile(t, repo, "src/real.ts", `export function queryRepository(): string {
+  return 'real'
+}
+`)
+
+			snapshot, err := BuildProviderSnapshotWithOptions(t.Context(), repo, "test-version", ProviderSnapshotOptions{Worktree: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := ""
+			for _, symbol := range snapshot.Symbols {
+				if symbol.FilePath == "src/real.ts" && symbol.Name == "queryRepository" {
+					target = symbol.ID
+				}
+			}
+			if target == "" {
+				t.Fatal("missing src/real.ts#queryRepository symbol")
+			}
+			calls := 0
+			for _, relation := range snapshot.Relations {
+				if relation.Type == "CALLS" && relation.FromID == fileID(snapshot.Header.RepoKey, "src/entry.ts") && relation.ToID == target {
+					calls++
+				}
+			}
+			if calls != test.wantCalls {
+				t.Fatalf("top-level imported CALLS = %d, want %d: %#v", calls, test.wantCalls, relationsOfType(snapshot.Relations, "CALLS"))
+			}
+		})
+	}
+}
+
+func TestTypeScriptGroupedAliasExpressionIsNotACall(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		body       string
+		fromSymbol string
+	}{
+		{
+			name: "unshadowed function expression",
+			body: `export function grouped(): () => string {
+  return (executeQueryRepository)
+}
+`,
+			fromSymbol: "grouped",
+		},
+		{
+			name: "shadowed function expression",
+			body: `export function groupedShadow(executeQueryRepository: () => string): () => string {
+  return (executeQueryRepository)
+}
+`,
+			fromSymbol: "groupedShadow",
+		},
+		{
+			name: "unshadowed top-level expression",
+			body: `void (executeQueryRepository)
+`,
+		},
+		{
+			name: "shadowed top-level expression",
+			body: `{
+  function executeQueryRepository(): string { return 'local' }
+  void (executeQueryRepository)
+}
+`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repo := t.TempDir()
+			writeFile(t, repo, "src/entry.ts", `import { queryRepository as executeQueryRepository } from './real'
+
+`+test.body)
+			writeFile(t, repo, "src/real.ts", `export function queryRepository(): string {
+  return 'real'
+}
+`)
+
+			snapshot, err := BuildProviderSnapshotWithOptions(t.Context(), repo, "test-version", ProviderSnapshotOptions{Worktree: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := ""
+			for _, symbol := range snapshot.Symbols {
+				if symbol.FilePath == "src/real.ts" && symbol.Name == "queryRepository" {
+					target = symbol.ID
+				}
+			}
+			if target == "" {
+				t.Fatal("missing src/real.ts#queryRepository symbol")
+			}
+			fromID := fileID(snapshot.Header.RepoKey, "src/entry.ts")
+			if test.fromSymbol != "" {
+				for _, symbol := range snapshot.Symbols {
+					if symbol.FilePath == "src/entry.ts" && symbol.Name == test.fromSymbol {
+						fromID = symbol.ID
+					}
+				}
+			}
+			for _, relation := range snapshot.Relations {
+				if relation.Type == "CALLS" && relation.FromID == fromID && relation.ToID == target {
+					t.Fatalf("grouped alias expression fabricated imported CALLS: %#v", relation)
+				}
+			}
+		})
+	}
+}
+
+func TestTypeScriptAliasedExternalCallKeepsWrittenEvidenceDetail(t *testing.T) {
+	repo := t.TempDir()
+	writeFile(t, repo, "src/entry.ts", `import { queryRepository as executeQueryRepository } from '@db/client'
+
+export function main(): string {
+  return executeQueryRepository()
+}
+`)
+
+	snapshot, err := BuildProviderSnapshotWithOptions(t.Context(), repo, "test-version", ProviderSnapshotOptions{Worktree: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := runCallsFrom(snapshot, "main")
+	if len(calls) != 1 {
+		t.Fatalf("main CALLS = %d, want exactly one imported external target: %#v", len(calls), calls)
+	}
+	call := calls[0]
+	if call.ToID != externalID("symbol", "@db/client.queryRepository") {
+		t.Fatalf("external alias target = %q, want exported member @db/client.queryRepository", call.ToID)
+	}
+	if len(call.Evidence) != 1 || call.Evidence[0].Detail != "executeQueryRepository" {
+		t.Fatalf("external alias evidence = %#v, want written local call-site spelling", call.Evidence)
+	}
+}
+
 func TestCPlusPlusLocalIncludesResolveToFiles(t *testing.T) {
 	repo := t.TempDir()
 	writeFile(t, repo, "include/fmt/format.h", `#pragma once

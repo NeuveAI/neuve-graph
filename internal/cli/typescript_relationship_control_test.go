@@ -20,13 +20,9 @@ func TestTypeScriptNeighborsHeadUsesCommittedImportInsteadOfCleanSmudgedDecoy(t 
 	requireTypeScriptCommittedAndWorktreeTargets(t, repo)
 }
 
-// Phase 3 preserves the unchanged engine baseline. Enable this eval explicitly
-// when developing Phase 4: its correct endpoint expectations expose the current
-// inability to carry an imported TypeScript member through a local alias.
+// An aliased named import must retain the exported member name while the source
+// view still decides which imported file supplies that member.
 func TestTypeScriptAliasedImportRelationshipEval(t *testing.T) {
-	if os.Getenv("ENTIRE_GRAPH_RUN_PHASE4_TYPESCRIPT_ALIAS_EVAL") != "1" {
-		t.Skip("Phase 4 engine development eval; set ENTIRE_GRAPH_RUN_PHASE4_TYPESCRIPT_ALIAS_EVAL=1 to expose the current alias-resolution gap")
-	}
 	repo := newTypeScriptCheckoutFilterControl(t, true)
 	requireTypeScriptCommittedAndWorktreeTargets(t, repo)
 }

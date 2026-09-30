@@ -3827,6 +3827,42 @@ func resolvePythonAliasImportTargets(local string, from SymbolRecord, contexts [
 	return targets, external, handled
 }
 
+// resolveJavaScriptAliasImportTargets carries a named import's exported member
+// through its local binding. The generic call pass sees only the local spelling
+// in `import { exported as local }` and cannot find candidates under that name;
+// the module path remains authoritative when the workspace contains another
+// declaration with the exported member's name.
+func resolveJavaScriptAliasImportTargets(local string, from SymbolRecord, bindings []jsImportBinding, symbolsByShortName map[string][]SymbolRecord, importingPath string, manifestImports manifestImportResolver, knownFiles map[string]bool, readContent contentReader) (targets []resolvedCallTarget, external []RelationRecord, handled bool) {
+	seen := map[string]bool{}
+	for _, binding := range bindings {
+		if binding.Namespace || binding.Imported == "" || binding.Imported == "default" || binding.Imported == local {
+			continue
+		}
+		handled = true
+		imports := resolvedImportedNameModules(importingPath, map[string][]string{
+			binding.Imported: {binding.Module},
+		}, manifestImports, knownFiles, readContent)
+		resolved := resolveImportedCallTargets(binding.Imported, from, sharedTypeCandidates(from, symbolsByShortName[binding.Imported]), imports, false)
+		if len(resolved) == 0 {
+			resolved, _ = resolveUniqueRawImportedCallTarget(binding.Imported, from, symbolsByShortName[binding.Imported], [][]string{imports[binding.Imported]}, false)
+		}
+		if len(resolved) == 0 {
+			external = append(external, importedExternalCallRelationsForNameWithDetail(from, binding.Imported, local, []string{binding.Module})...)
+			continue
+		}
+		for _, target := range resolved {
+			if !seen[target.ID] {
+				seen[target.ID] = true
+				targets = append(targets, target)
+			}
+		}
+	}
+	if len(targets) > 0 {
+		external = nil
+	}
+	return targets, external, handled
+}
+
 // pythonIncompleteAliasContexts is deliberately a fallback for malformed or
 // depth-limited ASTs only. It preserves the original imported member for an
 // external relation, but is never used to recover a local target: incomplete
@@ -5363,8 +5399,10 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 			}
 		}
 		var jsSymbolNamespaces map[string]string
+		var jsImportBindings map[string][]jsImportBinding
 		var jsScan *jsScanState
 		if fileNeedsCallScan && (file.Language == "JavaScript" || file.Language == "TypeScript") {
+			jsImportBindings = importedJavaScriptBindings(content)
 			// One tree-sitter pass yields namespaces, binding scopes, and dotted
 			// call sites for the whole file; every JS/TS scope decision below
 			// shares this state instead of re-deriving it per symbol.
@@ -5653,6 +5691,9 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 					importsForCall := inputs.imports
 					var pythonAliasTargets []resolvedCallTarget
 					var pythonAliasExternal []RelationRecord
+					var jsAliasTargets []resolvedCallTarget
+					var jsAliasExternal []RelationRecord
+					jsAliasHandled := false
 					pythonGenericAllowed := inputs.genericAllowed
 					if file.Language == "Python" {
 						// The raw FFI exception is valid only for imports visible at an
@@ -5670,6 +5711,20 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 							}
 						}
 					}
+					if file.Language == "JavaScript" || file.Language == "TypeScript" {
+						jsAliasTargets, jsAliasExternal, jsAliasHandled = resolveJavaScriptAliasImportTargets(name, from, jsImportBindings[name], symbolsByShortName, file.Path, manifestImports, knownFiles, readContent)
+						if jsAliasHandled && jsScan.parsed && !jsScan.depthTruncated {
+							// The legacy text scanner supplies candidate names, but a
+							// complete AST scan is authoritative about whether the name is
+							// actually a direct call or callable argument reference. Keep
+							// the coarse fallback only when parsing failed or depth limited
+							// the scan; both degraded states are reported as partial failures.
+							if _, visible := jsScan.importAliasUseVisibilityForSymbol(from, name); !visible {
+								jsAliasTargets = nil
+								jsAliasExternal = nil
+							}
+						}
+					}
 					// A container's block spans its members' definition lines, which
 					// look like calls (e.g. `def validate(self):`). Skip the names of
 					// direct children so a class is not credited with calling its own
@@ -5680,6 +5735,9 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 					var targets []resolvedCallTarget
 					suppressExternal := false
 					if file.Language == "Python" && !pythonGenericAllowed {
+						suppressExternal = true
+					} else if jsAliasHandled {
+						targets = jsAliasTargets
 						suppressExternal = true
 					} else if _, namespaceCall := jsNamespaceCalls[name]; namespaceCall {
 						// Same-file namespace members first, then members of a
@@ -5801,7 +5859,11 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 							continue
 						}
 					}
-					if file.Language == "Python" {
+					if jsAliasHandled {
+						for _, relation := range jsAliasExternal {
+							emit(relation)
+						}
+					} else if file.Language == "Python" {
 						for _, relation := range pythonAliasExternal {
 							emit(relation)
 						}
@@ -6247,6 +6309,8 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 					importsForCall := inputs.imports
 					var pythonAliasTargets []resolvedCallTarget
 					var pythonIncompleteAliasExternal []RelationRecord
+					var jsAliasTargets []resolvedCallTarget
+					jsAliasHandled := false
 					pythonGenericAllowed := inputs.genericAllowed
 					if file.Language == "Python" {
 						if pythonBareScopes.complete {
@@ -6259,9 +6323,22 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 							}
 						}
 					}
+					if file.Language == "JavaScript" || file.Language == "TypeScript" {
+						jsAliasTargets, _, jsAliasHandled = resolveJavaScriptAliasImportTargets(name, fileSource, jsImportBindings[name], symbolsByShortName, file.Path, manifestImports, knownFiles, readContent)
+						if jsAliasHandled && jsScan.parsed && !jsScan.depthTruncated {
+							// Match the per-symbol rule above: a complete AST owns the
+							// answer, while failed or truncated scans retain the established
+							// coarse fallback and their observable partial failure.
+							if _, visible := jsScan.topLevelImportAliasUseVisibility(currentFileSymbols, name); !visible {
+								jsAliasTargets = nil
+							}
+						}
+					}
 					var targets []resolvedCallTarget
 					if file.Language == "Python" && !pythonGenericAllowed {
 						targets = nil
+					} else if jsAliasHandled {
+						targets = jsAliasTargets
 					} else if _, namespaceCall := jsNamespaceCalls[name]; namespaceCall {
 						// Same chain as the per-symbol namespace path above; the
 						// file-level pseudo-symbol has no self-call or member names
@@ -9831,6 +9908,10 @@ func methodReturnTypes(from SymbolRecord, typeName, methodName string, methodsBy
 }
 
 func importedExternalCallRelationsForName(from SymbolRecord, name string, modules []string) []RelationRecord {
+	return importedExternalCallRelationsForNameWithDetail(from, name, name, modules)
+}
+
+func importedExternalCallRelationsForNameWithDetail(from SymbolRecord, name, detail string, modules []string) []RelationRecord {
 	if typeLikeKind(from.Kind) || len(modules) == 0 {
 		return nil
 	}
@@ -9842,7 +9923,7 @@ func importedExternalCallRelationsForName(from SymbolRecord, name string, module
 			continue
 		}
 		seen[target] = true
-		relations = append(relations, importedExternalCallRelation(from, target, name))
+		relations = append(relations, importedExternalCallRelation(from, target, detail))
 	}
 	return relations
 }

@@ -31,14 +31,21 @@ import (
 //   - calls: every dotted call site (`A.B.f(...)`, `new A.B.T(...)`) whose
 //     receiver is a plain identifier chain, with its byte position, so
 //     namespace classification can use the call's own lexical context.
+//   - bareCalls: every direct identifier call (`f(...)`, `new T(...)`) with
+//     its byte position, so imported aliases can be checked against lexical
+//     bindings at the actual call site.
+//   - callableArguments: every direct identifier passed as a call argument,
+//     with the same positional scope information.
 type jsScanState struct {
-	namespaces   []jsNamespaceScope
-	namespaceSet map[string]bool
-	bindings     []jsBindingScope
-	calls        []jsDottedCall
-	lineStarts   []int
-	contentLen   int
-	parsed       bool
+	namespaces        []jsNamespaceScope
+	namespaceSet      map[string]bool
+	bindings          []jsBindingScope
+	calls             []jsDottedCall
+	bareCalls         []jsIdentifierUse
+	callableArguments []jsIdentifierUse
+	lineStarts        []int
+	contentLen        int
+	parsed            bool
 	// depthTruncated reports that a relation-phase walk stopped at
 	// maxParseWalkDepth (parser.go). The scope state stays usable — everything
 	// above the limit was collected — but it is incomplete, so the provider
@@ -70,6 +77,11 @@ type jsDottedCall struct {
 	parts     []string
 	startByte int
 	line      int
+}
+
+type jsIdentifierUse struct {
+	name      string
+	startByte int
 }
 
 // newJSScanState parses content with the same grammar/masking choices the
@@ -157,6 +169,10 @@ func buildJSScanState(grammar *sitter.Language, parseSrc []byte, content string)
 		state.namespaceSet[scope.Name] = true
 	}
 	sort.Slice(state.calls, func(i, j int) bool { return state.calls[i].startByte < state.calls[j].startByte })
+	sort.Slice(state.bareCalls, func(i, j int) bool { return state.bareCalls[i].startByte < state.bareCalls[j].startByte })
+	sort.Slice(state.callableArguments, func(i, j int) bool {
+		return state.callableArguments[i].startByte < state.callableArguments[j].startByte
+	})
 	for _, declaration := range walker.declarationBindings {
 		if state.namespaceMergesDeclaration(declaration) {
 			continue
@@ -308,6 +324,55 @@ func (s *jsScanState) topLevelNamespaceCalls(symbols []SymbolRecord) map[string]
 		}
 	}
 	return out
+}
+
+// importAliasUseVisibilityForSymbol reports whether a direct call or callable
+// argument reference with name occurs in the symbol and whether at least one
+// such use reaches the file import without a nearer lexical binding of the
+// same local name.
+func (s *jsScanState) importAliasUseVisibilityForSymbol(symbol SymbolRecord, name string) (seen, visible bool) {
+	if s == nil {
+		return false, false
+	}
+	start, end := s.symbolByteRange(symbol)
+	return s.importAliasUseVisibility(name, start, end, nil)
+}
+
+// topLevelImportAliasUseVisibility applies the same check to the byte-exact
+// source complement used by the file-level call pass.
+func (s *jsScanState) topLevelImportAliasUseVisibility(symbols []SymbolRecord, name string) (seen, visible bool) {
+	if s == nil {
+		return false, false
+	}
+	return s.importAliasUseVisibility(name, 0, s.contentLen, s.symbolByteSpans(symbols))
+}
+
+func (s *jsScanState) importAliasUseVisibility(name string, start, end int, excluded jsByteSpans) (seen, visible bool) {
+	for _, uses := range [][]jsIdentifierUse{s.bareCalls, s.callableArguments} {
+		first := sort.Search(len(uses), func(i int) bool { return uses[i].startByte >= start })
+		for _, use := range uses[first:] {
+			if use.startByte >= end {
+				break
+			}
+			if use.name != name || excluded.contains(use.startByte) {
+				continue
+			}
+			seen = true
+			if !s.bindingShadowsName(name, use.startByte) {
+				visible = true
+			}
+		}
+	}
+	return seen, visible
+}
+
+func (s *jsScanState) bindingShadowsName(name string, position int) bool {
+	for _, binding := range s.bindings {
+		if binding.Name == name && binding.startByte < position && position < binding.endByte {
+			return true
+		}
+	}
+	return false
 }
 
 type jsByteSpans []struct{ start, end int }
@@ -664,15 +729,34 @@ func (w *jsScopeWalker) addDottedCall(function, arguments *sitter.Node) {
 	if !validNode(function) || !validNode(arguments) || arguments.Type() != "arguments" {
 		return
 	}
+	w.addCallableArgumentIdentifiers(arguments)
 	parts, truncated := jsMemberChainPartsAt(function, w.src, 0)
 	if truncated {
 		w.state.depthTruncated = true
+	}
+	if len(parts) == 1 {
+		w.state.bareCalls = append(w.state.bareCalls, jsIdentifierUse{name: parts[0], startByte: int(function.StartByte())})
+		return
 	}
 	if len(parts) < 2 {
 		return
 	}
 	start := int(function.StartByte())
 	w.state.calls = append(w.state.calls, jsDottedCall{parts: parts, startByte: start, line: w.state.lineOf(start)})
+}
+
+func (w *jsScopeWalker) addCallableArgumentIdentifiers(arguments *sitter.Node) {
+	for i := 0; i < int(arguments.NamedChildCount()); i++ {
+		argument := arguments.NamedChild(i)
+		if !validNode(argument) || argument.Type() != "identifier" {
+			continue
+		}
+		name := argument.Content(w.src)
+		if name == "" || jsCallableArgumentIgnored(name) {
+			continue
+		}
+		w.state.callableArguments = append(w.state.callableArguments, jsIdentifierUse{name: name, startByte: int(argument.StartByte())})
+	}
 }
 
 // jsMemberChainParts flattens a member expression into its identifier path
