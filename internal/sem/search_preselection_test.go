@@ -82,6 +82,59 @@ func TestFuseSearchPreselectionEvidenceUsesOriginalScoreBeforePathTieBreak(t *te
 	}
 }
 
+func TestMergeSearchPreselectionFilesPreservesBaseAndUsesOnlySpareCapacity(t *testing.T) {
+	evidence := []searchPreselectionEvidence{
+		{Path: "fused/first.go"},
+		{Path: "base/second.go"},
+		{Path: "fused/third.go"},
+		{Path: "base/first.go"},
+	}
+	cohort := mergeSearchPreselectionFiles(
+		[]string{"base/first.go", "base/second.go"}, evidence, 3,
+	)
+	got := evidencePaths(cohort.Files)
+	want := []string{"base/first.go", "base/second.go", "fused/first.go"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("merged files = %#v, want preserved base plus one fused addition %#v", got, want)
+	}
+	if cohort.RRFFrontier != 1 {
+		t.Fatalf("RRF frontier = %d, want one consumed fused candidate", cohort.RRFFrontier)
+	}
+}
+
+func TestProgressivePreselectionMeasuresConfidenceAtMergedRRFFrontier(t *testing.T) {
+	evidence := []searchPreselectionEvidence{
+		{Path: "rrf-a/one.go", rrfScore: 0.95, MatchedTerms: []bool{true}},
+		{Path: "rrf-b/two.go", rrfScore: 0.90, MatchedTerms: []bool{true}},
+		{Path: "rrf-c/three.go", rrfScore: 0.85, MatchedTerms: []bool{true}},
+		{Path: "rrf-d/four.go", rrfScore: 0.80, MatchedTerms: []bool{true}},
+		{Path: "rrf-e/five.go", rrfScore: 0.40, MatchedTerms: []bool{true}},
+		{Path: "rrf-f/six.go", rrfScore: 0.35, MatchedTerms: []bool{true}},
+		{Path: "rrf-g/seven.go", rrfScore: 0.30, MatchedTerms: []bool{true}},
+		{Path: "rrf-h/eight.go", rrfScore: 0.25, MatchedTerms: []bool{true}},
+		{Path: "base-a/one.go", rrfScore: 0.20, MatchedTerms: []bool{true}},
+		{Path: "base-b/two.go", rrfScore: 0.15, MatchedTerms: []bool{true}},
+		{Path: "base-c/three.go", rrfScore: 0.10, MatchedTerms: []bool{true}},
+		{Path: "base-d/four.go", rrfScore: 0.05, MatchedTerms: []bool{true}},
+	}
+	base := []string{"base-a/one.go", "base-b/two.go", "base-c/three.go", "base-d/four.go"}
+	got := selectProgressiveSearchFiles(evidence, []bool{true}, preselectionTestQuery("alpha"), base, 4)
+	wantFiles := []string{
+		"base-a/one.go", "base-b/two.go", "base-c/three.go", "base-d/four.go",
+		"rrf-a/one.go", "rrf-b/two.go", "rrf-c/three.go", "rrf-d/four.go",
+	}
+	if !reflect.DeepEqual(got.Files, wantFiles) {
+		t.Fatalf("files = %#v, want crossed base/RRF order %#v", got.Files, wantFiles)
+	}
+	if got.Passes != 2 || got.Examined != 12 || !got.Widened || got.Bounded {
+		t.Fatalf("assessment = %#v, want conservative base pass then one RRF widening pass", got)
+	}
+	wantConfidence := 1 - 0.40/0.80
+	if math.Abs(got.Confidence-wantConfidence) > 1e-15 {
+		t.Fatalf("confidence = %.17g, want frontier-4 confidence %.17g", got.Confidence, wantConfidence)
+	}
+}
+
 func TestProgressivePreselectionStopsAtConfidentCoveredDiverseBase(t *testing.T) {
 	q := preselectionTestQuery("alpha", "beta")
 	evidence := fuseSearchPreselectionEvidence([]searchPreselectionEvidence{
@@ -91,7 +144,7 @@ func TestProgressivePreselectionStopsAtConfidentCoveredDiverseBase(t *testing.T)
 		{Path: "tools/task.go", OriginalScore: 6, PathScore: 6, ContentScore: 6, ConstraintScore: 6, MatchedTerms: []bool{true, true}},
 		{Path: "archive/old.go", OriginalScore: 1, PathScore: 1, MatchedTerms: []bool{true, true}},
 	})
-	got := selectProgressiveSearchFiles(evidence, []bool{true, true}, q, 4)
+	got := selectProgressiveSearchFiles(evidence, []bool{true, true}, q, nil, 4)
 	if got.Passes != 1 || got.Widened || got.Bounded {
 		t.Fatalf("assessment = %#v, want a single confident base pass", got)
 	}
@@ -114,7 +167,7 @@ func TestProgressivePreselectionWidensForLowConfidence(t *testing.T) {
 			MatchedTerms:  []bool{true},
 		})
 	}
-	got := selectProgressiveSearchFiles(fuseSearchPreselectionEvidence(evidence), []bool{true}, q, 4)
+	got := selectProgressiveSearchFiles(fuseSearchPreselectionEvidence(evidence), []bool{true}, q, nil, 4)
 	if got.Passes != 2 || got.Examined != 12 || !got.Widened || got.Bounded || len(got.Files) != 8 {
 		t.Fatalf("assessment = %#v, want widths 4 then 8", got)
 	}
@@ -132,7 +185,7 @@ func TestProgressivePreselectionWidensForCoverage(t *testing.T) {
 			MatchedTerms:  matched,
 		})
 	}
-	got := selectProgressiveSearchFiles(fuseSearchPreselectionEvidence(evidence), []bool{true, true}, q, 4)
+	got := selectProgressiveSearchFiles(fuseSearchPreselectionEvidence(evidence), []bool{true, true}, q, nil, 4)
 	if got.Passes != 2 || !got.Widened || got.Coverage != 1 {
 		t.Fatalf("assessment = %#v, want widened complete coverage", got)
 	}
@@ -150,7 +203,7 @@ func TestProgressivePreselectionWidensForDirectoryDiversity(t *testing.T) {
 		{Path: "tools/task.go", OriginalScore: 3, ConstraintScore: 5, MatchedTerms: []bool{true}},
 		{Path: "docs/notes.go", OriginalScore: 2, PathScore: 1, MatchedTerms: []bool{true}},
 	}
-	got := selectProgressiveSearchFiles(fuseSearchPreselectionEvidence(evidence), []bool{true}, q, 4)
+	got := selectProgressiveSearchFiles(fuseSearchPreselectionEvidence(evidence), []bool{true}, q, nil, 4)
 	if got.Passes != 2 || !got.Widened || got.Diversity != 1 {
 		t.Fatalf("assessment = %#v, want widening to available directories", got)
 	}
@@ -167,7 +220,7 @@ func TestProgressivePreselectionStopsAtFourXBound(t *testing.T) {
 			MatchedTerms:  []bool{true, false},
 		})
 	}
-	got := selectProgressiveSearchFiles(fuseSearchPreselectionEvidence(evidence), []bool{true, true}, q, 2)
+	got := selectProgressiveSearchFiles(fuseSearchPreselectionEvidence(evidence), []bool{true, true}, q, nil, 2)
 	if len(got.Files) != 8 || got.Examined != 14 || !got.Bounded || got.Coverage >= 1 {
 		t.Fatalf("assessment = %#v, want the four-times cap with incomplete coverage", got)
 	}

@@ -85,8 +85,8 @@ type SearchOptions struct {
 	// unfunded by omission.
 	OmitsRepoIgnoreDisclosureFloor bool
 	// progressivePreselection is internal policy, not a caller override. The
-	// standard cold default may widen adaptively; explicit and TopK-adaptive
-	// MaxIndexedFiles values remain exact compatibility limits.
+	// standard cold default may widen adaptively; an explicit MaxIndexedFiles
+	// value remains an exact compatibility limit.
 	progressivePreselection bool
 	// afterCachePolicyCapture is a deterministic test seam for policy-file
 	// mutation between transaction capture and the first cache lookup. It is
@@ -208,8 +208,9 @@ type SearchOptions struct {
 	// property of a search discontinuous at that boundary: the git-tree-grep preselector
 	// was disabled, every file in the repo was read, the indexed-file pool shrank, region
 	// deduplication stopped and the reported score stopped being a relevance score. Asking
-	// for one more result is not a request to change retrieval strategy, so the strategy is
-	// now an explicit choice and top-k only changes how many rows come back.
+	// for one more result is not a request to switch retrieval strategy, so deep search is
+	// now an explicit choice. Top-k may scale the same strategy's legacy base cohort, while
+	// progressive selection remains under one absolute total-file ceiling.
 	Deep bool
 	// SingleResolution turns OFF multi-resolution prose retrieval: the finer regions of a prose
 	// document stay in each result's `passages` field instead of being promoted to results of their
@@ -1095,12 +1096,11 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 	if options.MaxRegionsPerFile <= 0 {
 		options.MaxRegionsPerFile = defaultSearchMaxRegionsPerFile
 	}
-	if options.MaxIndexedFiles <= 0 {
+	maxIndexedFilesOmitted := options.MaxIndexedFiles <= 0
+	if maxIndexedFilesOmitted {
 		options.MaxIndexedFiles = defaultSearchIndexedFiles(options.TopK)
-		options.progressivePreselection = options.MaxIndexedFiles == defaultSearchMaxIndexedFiles
-	} else {
-		options.progressivePreselection = false
 	}
+	options.progressivePreselection = maxIndexedFilesOmitted
 	if options.Profile == "" {
 		// Fast, not syntax-only: graph-aware ranking (caller-degree boosts and
 		// relation expansion) needs call/construct edges over the indexed
@@ -2068,13 +2068,15 @@ func openSearchContentReader(
 }
 
 func defaultSearchIndexedFiles(topK int) int {
-	// Shallow interactive searches keep the original cold-start bound. Deeper
-	// rankings need a wider file pool or preselection becomes the recall limit
-	// before TopK and per-file diversity can take effect.
+	// This is the legacy BASE cohort, not the total progressive selection.
+	// Shallow interactive searches keep the original cold-start base. Deeper
+	// rankings may use a wider base before TopK and per-file diversity take
+	// effect, while omitted-limit progressive selection still has a fixed total
+	// ceiling of searchPreselectionMaxSelectedFiles (384).
 	//
 	// Do NOT raise these bounds hoping for recall: MEASURED THE OPPOSITE. On 52
 	// SWE-bench Multilingual instances disjoint from the tuning suite, distilled
-	// queries, top-k 20 — gold-file recall by pool size:
+	// queries, top-k 20 — gold-file recall by exact base pool size:
 	//
 	//	 96 (default)  76.9%
 	//	256            73.1%   (-2 instances)
@@ -2786,6 +2788,12 @@ func preselectSearchFiles(
 			legacyFiles = append(legacyFiles, file)
 		}
 	}
+	sort.Slice(legacyFiles, func(i, j int) bool {
+		if legacyFiles[i].legacyScore != legacyFiles[j].legacyScore {
+			return legacyFiles[i].legacyScore > legacyFiles[j].legacyScore
+		}
+		return legacyFiles[i].path < legacyFiles[j].path
+	})
 	progressive := options.progressivePreselection && len(legacyFiles) > options.MaxIndexedFiles
 	if progressive {
 		evidence := make([]searchPreselectionEvidence, len(files))
@@ -2799,8 +2807,13 @@ func preselectSearchFiles(
 				MatchedTerms:    append([]bool(nil), file.matchedTerms...),
 			}
 		}
+		baseCount := minInt(options.MaxIndexedFiles, len(legacyFiles))
+		baseFiles := make([]string, baseCount)
+		for index := range baseFiles {
+			baseFiles[index] = legacyFiles[index].path
+		}
 		assessment := selectProgressiveSearchFiles(
-			fuseSearchPreselectionEvidence(evidence), matchedAnywhere, q, options.MaxIndexedFiles,
+			fuseSearchPreselectionEvidence(evidence), matchedAnywhere, q, baseFiles, options.MaxIndexedFiles,
 		)
 		selection.files = assessment.Files
 		selection.preselectionPasses = assessment.Passes
@@ -2810,12 +2823,6 @@ func preselectSearchFiles(
 		selection.preselectionWidened = assessment.Widened
 		selection.preselectionBounded = assessment.Bounded
 	} else {
-		sort.Slice(legacyFiles, func(i, j int) bool {
-			if legacyFiles[i].legacyScore != legacyFiles[j].legacyScore {
-				return legacyFiles[i].legacyScore > legacyFiles[j].legacyScore
-			}
-			return legacyFiles[i].path < legacyFiles[j].path
-		})
 		if len(legacyFiles) > options.MaxIndexedFiles {
 			legacyFiles = legacyFiles[:options.MaxIndexedFiles]
 		}

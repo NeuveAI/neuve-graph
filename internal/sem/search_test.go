@@ -97,7 +97,7 @@ func Match%02d() string { return "needle" }
 			t.Fatalf("selection = %#v, want a deterministic capped progressive selection", selection)
 		}
 		if len(selection.files) > 8 {
-			t.Fatalf("selected files = %d, want at most four times the base", len(selection.files))
+			t.Fatalf("selected files = %d, want the smaller relative ceiling of four times this base", len(selection.files))
 		}
 		if run == 0 {
 			first = append([]string(nil), selection.files...)
@@ -946,7 +946,7 @@ func TestDefaultSearchIndexedFilesScalesWithRequestedDepth(t *testing.T) {
 	}
 }
 
-func TestSearchRepositoryAppliesAdaptiveAndExplicitFileLimits(t *testing.T) {
+func TestSearchRepositoryKeepsOmittedLimitProgressiveAndExplicitLimitExact(t *testing.T) {
 	repo := t.TempDir()
 	for index := 0; index < 130; index++ {
 		write(t, repo, fmt.Sprintf("docs/file_%03d.md", index), "adaptive retrieval needle\n")
@@ -960,11 +960,11 @@ func TestSearchRepositoryAppliesAdaptiveAndExplicitFileLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if adaptive.Stats.FilesIndexed != 120 {
-		t.Fatalf("adaptive files indexed = %d, want 120", adaptive.Stats.FilesIndexed)
+	if adaptive.Stats.FilesIndexed != 130 {
+		t.Fatalf("adaptive files indexed = %d, want widened corpus of 130", adaptive.Stats.FilesIndexed)
 	}
-	if adaptive.Stats.PreselectionWidened || adaptive.Stats.PreselectionBounded {
-		t.Fatalf("adaptive hard limit unexpectedly widened: %#v", adaptive.Stats)
+	if !adaptive.Stats.PreselectionWidened || adaptive.Stats.PreselectionBounded {
+		t.Fatalf("omitted limit did not widen to the available corpus: %#v", adaptive.Stats)
 	}
 
 	explicit, err := SearchRepository(t.Context(), repo, "test", "adaptive retrieval needle", SearchOptions{
@@ -981,6 +981,48 @@ func TestSearchRepositoryAppliesAdaptiveAndExplicitFileLimits(t *testing.T) {
 	}
 	if explicit.Stats.PreselectionWidened || explicit.Stats.PreselectionBounded {
 		t.Fatalf("explicit hard limit unexpectedly widened: %#v", explicit.Stats)
+	}
+}
+
+func TestDeepOmittedLimitNeverExceedsAbsoluteProgressiveCeiling(t *testing.T) {
+	repo := t.TempDir()
+	for index := 0; index < 500; index++ {
+		write(t, repo, fmt.Sprintf("docs/file_%03d.md", index), "deep progressive ceiling needle\n")
+	}
+
+	response, err := SearchRepository(t.Context(), repo, "test", "deep progressive ceiling needle", SearchOptions{
+		Worktree:        true,
+		Profile:         ProfileSyntaxOnly,
+		TopK:            100,
+		MaxContextBytes: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Stats.FilesIndexed != searchPreselectionMaxSelectedFiles {
+		t.Fatalf("indexed files = %d, want absolute progressive ceiling %d", response.Stats.FilesIndexed, searchPreselectionMaxSelectedFiles)
+	}
+	if !response.Stats.PreselectionWidened || !response.Stats.PreselectionBounded {
+		t.Fatalf("deep omitted limit did not report bounded widening: %#v", response.Stats)
+	}
+
+	q := buildSearchQuery("deep progressive ceiling needle")
+	selection, err := preselectSearchFiles(
+		t.Context(), repo, q, buildSparseSearchQuery("deep progressive ceiling needle"),
+		SearchOptions{
+			Worktree:                true,
+			Profile:                 ProfileSyntaxOnly,
+			MaxIndexedFiles:         defaultSearchIndexedFiles(100),
+			progressivePreselection: true,
+		},
+		ProviderSnapshotOptions{NoNetwork: true, Worktree: true, Profile: ProfileSyntaxOnly},
+		ProviderSnapshot{}, false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selection.files) != searchPreselectionMaxSelectedFiles {
+		t.Fatalf("selected files = %d, want absolute progressive ceiling %d", len(selection.files), searchPreselectionMaxSelectedFiles)
 	}
 }
 

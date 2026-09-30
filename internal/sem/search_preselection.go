@@ -7,10 +7,12 @@ import (
 )
 
 const (
-	searchPreselectionRRFConstant       = 60
-	searchPreselectionMaxWideningFactor = 4
-	searchPreselectionMinConfidence     = 0.15
-	searchPreselectionDirectoryTarget   = 3
+	searchPreselectionRRFConstant        = 60
+	searchPreselectionMaxWideningFactor  = 4
+	searchPreselectionMaxSelectedFiles   = searchPreselectionMaxWideningFactor * defaultSearchMaxIndexedFiles
+	searchPreselectionBaseOnlyConfidence = 0
+	searchPreselectionMinConfidence      = 0.15
+	searchPreselectionDirectoryTarget    = 3
 )
 
 // searchPreselectionEvidence holds independent, file-level signals gathered
@@ -87,13 +89,16 @@ func fuseSearchPreselectionEvidence(evidence []searchPreselectionEvidence) []sea
 	return fused
 }
 
-// selectProgressiveSearchFiles picks the smallest deterministic prefix that
-// has a decisive boundary, covers every observed term, and spans the available
-// top-level directories. It widens only a cold index's input, capped at 4x.
+// selectProgressiveSearchFiles keeps the deterministic legacy base, then adds
+// non-duplicate RRF candidates until the merged cohort has a decisive RRF
+// frontier, covers every observed term, and spans the available top-level
+// directories. The total may reach four times a small base but never exceeds
+// the production-wide absolute ceiling of 384 files.
 func selectProgressiveSearchFiles(
 	evidence []searchPreselectionEvidence,
 	matchedAnywhere []bool,
 	q searchQuery,
+	baseFiles []string,
 	baseLimit int,
 ) searchPreselectionAssessment {
 	if baseLimit <= 0 || len(evidence) == 0 {
@@ -104,18 +109,25 @@ func selectProgressiveSearchFiles(
 	} else {
 		evidence = append([]searchPreselectionEvidence(nil), evidence...)
 	}
-	limit := minInt(baseLimit, len(evidence))
-	ceiling := minInt(searchPreselectionMaxWideningFactor*baseLimit, len(evidence))
+	ceiling := minInt(
+		searchPreselectionMaxSelectedFiles,
+		minInt(searchPreselectionMaxWideningFactor*baseLimit, len(evidence)),
+	)
+	limit := minInt(baseLimit, ceiling)
 	assessment := searchPreselectionAssessment{}
 	for {
-		selected := evidence[:limit]
+		cohort := mergeSearchPreselectionFiles(baseFiles, evidence, limit)
+		selected := cohort.Files
 		assessment.Passes++
 		assessment.Examined += len(selected)
 		assessment.Files = make([]string, len(selected))
 		for index, item := range selected {
 			assessment.Files[index] = item.Path
 		}
-		assessment.Confidence = searchPreselectionConfidence(evidence, limit)
+		assessment.Confidence = searchPreselectionBaseOnlyConfidence
+		if cohort.RRFFrontier > 0 {
+			assessment.Confidence = searchPreselectionConfidence(evidence, cohort.RRFFrontier)
+		}
 		assessment.Coverage = searchPreselectionCoverage(selected, matchedAnywhere, q)
 		assessment.Diversity = searchPreselectionDiversity(selected, evidence)
 		if assessment.Confidence >= searchPreselectionMinConfidence &&
@@ -125,7 +137,7 @@ func selectProgressiveSearchFiles(
 		}
 		if limit >= ceiling {
 			assessment.Widened = assessment.Passes > 1
-			assessment.Bounded = ceiling == searchPreselectionMaxWideningFactor*baseLimit
+			assessment.Bounded = ceiling < len(evidence)
 			return assessment
 		}
 		nextLimit := minInt(ceiling, limit*2)
@@ -135,6 +147,55 @@ func selectProgressiveSearchFiles(
 		}
 		limit = nextLimit
 	}
+}
+
+type searchPreselectionCohort struct {
+	Files       []searchPreselectionEvidence
+	RRFFrontier int
+}
+
+// mergeSearchPreselectionFiles keeps the exact legacy cohort as the base and
+// spends only widened capacity on non-duplicate fused candidates. Widening may
+// add evidence; it must never exchange an already-admitted base file for a
+// different scoring channel's candidate.
+func mergeSearchPreselectionFiles(
+	baseFiles []string,
+	evidence []searchPreselectionEvidence,
+	limit int,
+) searchPreselectionCohort {
+	if limit <= 0 {
+		return searchPreselectionCohort{}
+	}
+	byPath := make(map[string]searchPreselectionEvidence, len(evidence))
+	for _, item := range evidence {
+		byPath[item.Path] = item
+	}
+	selected := make([]searchPreselectionEvidence, 0, minInt(limit, len(evidence)))
+	seen := make(map[string]struct{}, minInt(limit, len(evidence)))
+	appendItem := func(item searchPreselectionEvidence) {
+		if len(selected) >= limit {
+			return
+		}
+		if _, exists := seen[item.Path]; exists {
+			return
+		}
+		seen[item.Path] = struct{}{}
+		selected = append(selected, item)
+	}
+	for _, path := range baseFiles {
+		if item, ok := byPath[path]; ok {
+			appendItem(item)
+		}
+	}
+	rrfFrontier := 0
+	for index, item := range evidence {
+		if len(selected) >= limit {
+			break
+		}
+		rrfFrontier = index + 1
+		appendItem(item)
+	}
+	return searchPreselectionCohort{Files: selected, RRFFrontier: rrfFrontier}
 }
 
 func searchPreselectionFused(evidence []searchPreselectionEvidence) bool {

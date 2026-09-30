@@ -56,7 +56,7 @@ func searchAtTopK(t *testing.T, repo string, topK int, deep bool) SearchResponse
 func TestSearchIsContinuousAcrossTheTopKBoundary(t *testing.T) {
 	repo := continuityRepo(t)
 	at10 := searchAtTopK(t, repo, defaultSearchTopK, false)
-	for _, topK := range []int{defaultSearchTopK + 1, defaultSearchTopK + 2, 20} {
+	for _, topK := range []int{defaultSearchTopK + 1, defaultSearchTopK + 2, 20, 32, 33} {
 		response := searchAtTopK(t, repo, topK, false)
 
 		if response.Stats.PreselectionBackend != at10.Stats.PreselectionBackend {
@@ -85,6 +85,57 @@ func TestSearchIsContinuousAcrossTheTopKBoundary(t *testing.T) {
 		assertNotReciprocalRankScores(t, topK, response)
 		assertDistinctRegions(t, topK, response)
 	}
+}
+
+func TestOmittedAndExplicitFileLimitsStayContinuousAcrossTopK32And33(t *testing.T) {
+	repo := t.TempDir()
+	for index := 0; index < 140; index++ {
+		write(t, repo, fmt.Sprintf("pkg/handler%03d.go", index), fmt.Sprintf(`package pkg
+
+// RetryDelivery%03d retries webhook delivery with exponential backoff.
+func RetryDelivery%03d(attempt int) int { return attempt }
+`, index, index))
+	}
+	search := func(topK, maxIndexedFiles int) SearchResponse {
+		t.Helper()
+		response, err := SearchRepository(t.Context(), repo, "test",
+			"retry webhook delivery with exponential backoff", SearchOptions{
+				Worktree:        true,
+				Profile:         ProfileSyntaxOnly,
+				TopK:            topK,
+				MaxIndexedFiles: maxIndexedFiles,
+				MaxContextBytes: 0,
+			})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+	assertPrefix := func(label string, at32, at33 SearchResponse) {
+		t.Helper()
+		if len(at32.Results) < 32 || len(at33.Results) < 32 {
+			t.Fatalf("%s result counts = %d/%d, want at least 32", label, len(at32.Results), len(at33.Results))
+		}
+		for index := 0; index < 32; index++ {
+			left, right := at32.Results[index], at33.Results[index]
+			if left.FilePath != right.FilePath || left.StartLine != right.StartLine || left.SymbolName != right.SymbolName {
+				t.Fatalf("%s changed rank %d across top-k 32/33: %#v -> %#v", label, index+1, left, right)
+			}
+		}
+	}
+
+	omitted32, omitted33 := search(32, 0), search(33, 0)
+	if !omitted32.Stats.PreselectionWidened || !omitted33.Stats.PreselectionWidened {
+		t.Fatalf("omitted limits did not keep progressive policy across 32/33: %#v / %#v", omitted32.Stats, omitted33.Stats)
+	}
+	assertPrefix("omitted limit", omitted32, omitted33)
+
+	explicit32, explicit33 := search(32, 96), search(33, 96)
+	if explicit32.Stats.PreselectionWidened || explicit33.Stats.PreselectionWidened ||
+		explicit32.Stats.FilesIndexed != 96 || explicit33.Stats.FilesIndexed != 96 {
+		t.Fatalf("explicit limit was not exact across 32/33: %#v / %#v", explicit32.Stats, explicit33.Stats)
+	}
+	assertPrefix("explicit limit", explicit32, explicit33)
 }
 
 // TestCommittedSearchKeepsTheFastBackendAtEveryTopK covers the half of the regression that
