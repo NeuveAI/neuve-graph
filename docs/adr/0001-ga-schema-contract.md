@@ -116,27 +116,39 @@ as a need to refresh derived semantic data. History consumers must also migrate
 previously persisted entity deltas rather than merely append newly parsed ones.
 
 This is one global revision for parser identity rules across all languages.
-The value is a decimal revision encoded as a string, currently `"2"`. Consumers
+The value is a decimal revision encoded as a string, currently `"3"`. Consumers
 compare the complete opaque string for equality rather than relying on numeric
 ordering. The field name supplies its meaning; the value names no language or
 feature. A bump invalidates both snapshot and search
 cache namespaces even when the source tree and provider release are unchanged.
 It does not change the individual symbol-ID format.
 
-The current revision `"2"` includes trail 154's JS/TS callable-scope
-corrections and trail 163's anonymous default-export corrections. Callable exports
-previously classified as classes receive corrected function IDs, phantom exports
-in comments and literals are removed, and corrected source ranges/signatures can
-affect entity history. The original token `js-ts-callable-scope-1` and the interim
-`js-ts-callable-scope-2` are historical values, not separate language revisions.
+Revision `"3"` narrows synthetic tool-boundary identity to callable declarations
+whose qualified-name words include `tool` and at least one of `handler`,
+`execute`, or `schema`. Non-callable symbols and callables whose bodies merely
+mention those words no longer produce synthetic `tool` children or
+`HANDLES_TOOL` relations. Ordinary source-symbol IDs retain their existing
+`compound-v1` format; the affected entity-set change is the removal or addition
+of synthetic tool IDs and their derived relations.
 
-Consumers upgrading from either historical token must refresh derived snapshots
-and recompute persisted entity deltas using the current parser, preserving source
-commits, checkpoint/session provenance, and authored memory. A revision mismatch
-is the migration trigger; changing the producer token alone does not implement
-the consumer migration. Verify consumer support before deploying this revision.
-Future changes that re-key existing symbols in any language must revise this token
-and document the corresponding consumer migration; ordinary body edits do not.
+Revision `"2"` included trail 154's JS/TS callable-scope corrections and trail
+163's anonymous default-export corrections. Callable exports previously
+classified as classes received corrected function IDs, phantom exports in
+comments and literals were removed, and corrected source ranges/signatures could
+affect entity history. The original token `js-ts-callable-scope-1` and the
+interim `js-ts-callable-scope-2` are historical values, not separate language
+revisions.
+
+Consumers upgrading from `"2"` or either historical token must refresh derived
+snapshots and recompute persisted entity deltas using the current provider,
+preserving source commits, checkpoint/session provenance, and authored memory.
+This removes stale synthetic tool entities and lets newly eligible callable-name
+boundaries enter history under revision `"3"`. A revision mismatch is the
+migration trigger; changing the producer token alone does not implement the
+consumer migration. Verify consumer support before deploying this revision.
+Future changes that re-key existing symbols or change emitted entity membership
+in any language must revise this token and document the corresponding consumer
+migration; ordinary body edits do not.
 
 ### Compact snapshot reader compatibility
 

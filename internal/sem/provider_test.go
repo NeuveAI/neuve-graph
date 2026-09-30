@@ -238,6 +238,129 @@ export function handleRoute() {
 	}
 }
 
+func TestBuildProviderSnapshotAnchorsToolBoundariesInCallableNames(t *testing.T) {
+	repo := t.TempDir()
+	writeFile(t, repo, "src/browsing-agent-loop.ts", `export function runBrowsingAgentLoop() {
+  const schema = { command: "execute" }
+  const tool = { execute: () => schema }
+  return tool.execute()
+}
+
+export function executeToolHandler() {
+  return true
+}
+`)
+	writeFile(t, repo, "auth.py", `class AuthService:
+    def execute_tool_handler(self):
+        return {"tool": "execute", "schema": {}}
+`)
+	writeFile(t, repo, "README.md", `# Tool schema
+
+Execute the handler described by this document.
+`)
+
+	snapshot, err := BuildProviderSnapshot(t.Context(), repo, "test-version")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var tools []SymbolRecord
+	var markdownSection SymbolRecord
+	for _, symbol := range snapshot.Symbols {
+		if symbol.Kind == "tool" {
+			tools = append(tools, symbol)
+		}
+		if symbol.Kind == "section" && symbol.FilePath == "README.md" {
+			markdownSection = symbol
+		}
+	}
+	ordinary := symbolByKindAndName(snapshot.Symbols, "function", "runBrowsingAgentLoop")
+	if ordinary.ID == "" {
+		t.Fatalf("missing runBrowsingAgentLoop function in %#v", snapshot.Symbols)
+	}
+	if markdownSection.ID == "" {
+		t.Fatalf("missing README section in %#v", snapshot.Symbols)
+	}
+	wantTools := map[string]string{
+		"AuthService.execute_tool_handler": "method",
+		"executeToolHandler":               "function",
+	}
+	if len(tools) != len(wantTools) {
+		t.Fatalf("tool boundaries = %#v, want %v", tools, wantTools)
+	}
+	toolsByName := map[string]SymbolRecord{}
+	for _, tool := range tools {
+		if _, ok := wantTools[tool.QualifiedName]; !ok {
+			t.Fatalf("unexpected tool boundary: %#v", tool)
+		}
+		toolsByName[tool.QualifiedName] = tool
+	}
+	var handlesTools []RelationRecord
+	for _, relation := range snapshot.Relations {
+		if relation.Type == "HANDLES_TOOL" {
+			handlesTools = append(handlesTools, relation)
+		}
+	}
+	if len(handlesTools) != len(wantTools) {
+		t.Fatalf("HANDLES_TOOL relations = %#v, want one for each real handler", handlesTools)
+	}
+	for qualifiedName, sourceKind := range wantTools {
+		source := symbolByKindAndName(snapshot.Symbols, sourceKind, qualifiedName)
+		tool := toolsByName[qualifiedName]
+		if source.ID == "" || tool.ID == "" {
+			t.Fatalf("missing source or tool for %s: source=%#v tool=%#v", qualifiedName, source, tool)
+		}
+		var handlesTool *RelationRecord
+		for index := range handlesTools {
+			relation := &handlesTools[index]
+			if relation.FromID == source.ID && relation.ToID == tool.ID {
+				handlesTool = relation
+				break
+			}
+		}
+		if handlesTool == nil {
+			t.Fatalf("missing %s -> tool HANDLES_TOOL relation: %#v", qualifiedName, handlesTools)
+		}
+		if handlesTool.Reason != "tool boundary inferred from callable symbol name" || len(handlesTool.Evidence) != 1 {
+			t.Fatalf("HANDLES_TOOL evidence = %#v, want callable name evidence", handlesTool)
+		}
+		evidence := handlesTool.Evidence[0]
+		if evidence.Kind != "symbol_name" || evidence.FilePath != source.FilePath ||
+			evidence.StartLine != source.StartLine || evidence.EndLine != source.StartLine || evidence.Detail != qualifiedName {
+			t.Fatalf("HANDLES_TOOL evidence = %#v, want exact declaration name at %s:%d", evidence, source.FilePath, source.StartLine)
+		}
+	}
+}
+
+func TestCanonicalIdentifierWords(t *testing.T) {
+	t.Parallel()
+	cases := map[string][]string{
+		"AuthService.execute_tool_handler": {"auth", "service", "execute", "tool", "handler"},
+		"executeToolHandler":               {"execute", "tool", "handler"},
+		"HTTPToolSchema":                   {"http", "tool", "schema"},
+		"runBrowsingAgentLoop":             {"run", "browsing", "agent", "loop"},
+	}
+	for input, want := range cases {
+		if got := canonicalIdentifierWords(input); !reflect.DeepEqual(got, want) {
+			t.Errorf("canonicalIdentifierWords(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestToolBoundaryCallableKind(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"function", "method", "constructor", "procedure", "subroutine", "macro", "closure", "lambda", "operator"} {
+		if !toolBoundaryCallableKind(kind) {
+			t.Errorf("%q should be eligible for a tool boundary", kind)
+		}
+	}
+	for _, kind := range []string{"class", "interface", "section", "document", "variable", "field", "accessor", "initializer", "destructor"} {
+		if toolBoundaryCallableKind(kind) {
+			t.Errorf("%q must not be eligible for a tool boundary", kind)
+		}
+	}
+}
+
 func TestGoModuleImportsResolveThroughGoMod(t *testing.T) {
 	repo := t.TempDir()
 	writeFile(t, repo, "go.mod", "module example.com/acme/service\n\ngo 1.22\n")

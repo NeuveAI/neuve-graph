@@ -320,7 +320,22 @@ Relation vocabulary:
   (`emit`/`publish`/`dispatch` and `on`/`subscribe`/`addEventListener`). Emitter
   and listener of the same name share an `external:channel:<name>` node. Weak
   naming-pattern detections: low confidence (0.6) with a `WEAK_PATTERN` code.
-- `HANDLES_TOOL`
+- `HANDLES_TOOL` — a conservative, language-agnostic callable-name heuristic.
+  The source must be a callable kind (`function`, `method`, `constructor`,
+  `procedure`, `subroutine`, `macro`, `closure`, `lambda`, or `operator`). Its
+  qualified name is split at qualification separators, snake-case separators,
+  and camel-case boundaries; the resulting exact lowercase vocabulary must
+  contain `tool` and at least one of `handler`, `execute`, or `schema`. Function
+  bodies do not participate in classification. A match creates a synthetic
+  `tool` child with the callable's qualified name and emits a pattern-resolved
+  `HANDLES_TOOL` edge from the callable to that child at confidence `0.85`, with
+  reason `tool boundary inferred from callable symbol name` and one-line
+  `symbol_name` evidence at the callable declaration; `Evidence.Detail` carries
+  the qualified name.
+  Non-callable documents, sections, containers, and variables cannot become
+  tool boundaries. This intentionally prefers precision over recall: a tool
+  implementation that does not advertise this vocabulary in its callable
+  identity is not inferred.
 - `RESOURCE_DEPENDS_ON` — a Terraform/HCL block (resource/module) that
   references another block (e.g. `aws_vpc.main.id`, `var.cidr`) depends on it.
   Blocks are indexed by their referenceable name and references resolved within
@@ -560,9 +575,10 @@ reproduce every Git-only policy and excluded files can therefore be present.
 - relation support per profile (`relation_support_by_profile`): the relation
   types each indexing profile emits (`full`, `fast`, `syntax-only`).
 - heuristic relation types (`heuristic_relation_types`): relations such as
-  `HANDLES_ROUTE` and `HANDLES_TOOL` that are detected by file-path and body
-  patterns rather than per-language grammar, so they are not attributed to a
-  single language.
+  `HANDLES_ROUTE` and `HANDLES_TOOL` that are detected by repository-local
+  path, declaration-name, or source patterns rather than per-language grammar,
+  so they are not attributed to a single language. `HANDLES_TOOL` specifically
+  uses callable declaration-name words and never body vocabulary.
 - unsupported-but-detected language hints when available
 - whether optional local-only features are available
 - whether any feature would require network access

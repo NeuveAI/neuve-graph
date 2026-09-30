@@ -16,7 +16,7 @@ func TestVersionAdvertisesParserIdentity(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &info); err != nil {
 		t.Fatal(err)
 	}
-	if info["identity_revision"] != "2" {
+	if info["identity_revision"] != "3" {
 		t.Fatalf("identity=%v", info)
 	}
 }

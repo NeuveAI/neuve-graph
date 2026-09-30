@@ -43,8 +43,9 @@ const (
 	ProviderName          = "entire-graph"
 	StableSymbolIDVersion = "compound-v1"
 	// IdentityRevision is a global, opaque revision of parser identity rules across
-	// all languages. Change it when corrections re-key existing symbols.
-	IdentityRevision     = "2"
+	// all languages. Change it when corrections re-key existing symbols or change
+	// emitted entity membership.
+	IdentityRevision     = "3"
 	defaultMaxParseBytes = 4 * 1024 * 1024
 	// defaultMaxSourceFiles bounds how many files one snapshot will list. The
 	// per-file indexes a snapshot keeps (one file record and its retained symbols)
@@ -744,8 +745,9 @@ func languageTiers(languageSet map[string]struct{}) map[string]string {
 // produced structurally from parsed entities for every language; IMPORTS is
 // added only where importsFor has a language-specific scanner. HANDLES_ROUTE
 // and HANDLES_TOOL are reported separately in HeuristicRelationTypes because
-// they are detected by file-path and body patterns rather than per-language
-// grammar, so they are not attributed to individual languages here.
+// they are detected by repository-local path, declaration-name, or source
+// patterns rather than per-language grammar, so they are not attributed to
+// individual languages here. HANDLES_TOOL never inspects body vocabulary.
 func relationSupportByLanguage() map[string][]string {
 	importCapable := map[string]bool{}
 	for ext, spec := range supportedLanguageSpecs() {
@@ -2087,7 +2089,6 @@ func entitySymbols(repoKey, path, language string, entities []Entity) []SymbolRe
 
 func syntheticBoundarySymbols(repoKey, path, language, content string, fileSymbols []SymbolRecord) []SymbolRecord {
 	var symbols []SymbolRecord
-	lines := strings.Split(content, "\n")
 	if route := webRouteBoundary(path); route != "" {
 		source := routeBoundarySource(path, language, fileSymbols)
 		symbols = append(symbols, SymbolRecord{
@@ -2109,11 +2110,7 @@ func syntheticBoundarySymbols(repoKey, path, language, content string, fileSymbo
 		})
 	}
 	for _, source := range fileSymbols {
-		block := symbolBlockFromLines(lines, source)
-		if exact, ok := exactSymbolSource(content, source); ok {
-			block = exact
-		}
-		if !looksLikeToolHandler(source, block) {
+		if !looksLikeToolHandler(source) {
 			continue
 		}
 		symbols = append(symbols, SymbolRecord{
@@ -4891,15 +4888,15 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 					ToID:          symbol.ID,
 					Type:          "HANDLES_TOOL",
 					Confidence:    0.85,
-					Reason:        "tool boundary inferred from handler symbol body",
+					Reason:        "tool boundary inferred from callable symbol name",
 					RelationScope: "file",
 					Resolution:    "pattern",
 					TargetKind:    "symbol",
 					Evidence: []Evidence{{
-						Kind:      "symbol_body",
+						Kind:      "symbol_name",
 						FilePath:  symbol.FilePath,
 						StartLine: symbol.StartLine,
-						EndLine:   symbol.EndLine,
+						EndLine:   symbol.StartLine,
 						Detail:    symbol.QualifiedName,
 					}},
 					WarningCodes: []string{},
@@ -28384,10 +28381,31 @@ func applicationWorkflowBoundary(path string) string {
 	}
 }
 
-func looksLikeToolHandler(symbol SymbolRecord, block string) bool {
-	value := strings.ToLower(symbol.QualifiedName + "\n" + block)
-	tokens := tokenSet(value)
-	return tokens["tool"] && (tokens["handler"] || tokens["execute"] || tokens["schema"])
+func looksLikeToolHandler(symbol SymbolRecord) bool {
+	if !toolBoundaryCallableKind(symbol.Kind) {
+		return false
+	}
+	name := symbol.QualifiedName
+	if name == "" {
+		name = symbol.Name
+	}
+	tokens := canonicalIdentifierWords(name)
+	return slices.Contains(tokens, "tool") &&
+		(slices.Contains(tokens, "handler") || slices.Contains(tokens, "execute") || slices.Contains(tokens, "schema"))
+}
+
+// toolBoundaryCallableKind is deliberately narrower than the set of symbols
+// that search can display as an editable unit. Tool boundaries describe an
+// invocable handler, so containers, documents, fields, accessors, initializers,
+// and destructors are not eligible sources even when their descendants mention
+// tool vocabulary.
+func toolBoundaryCallableKind(kind string) bool {
+	switch kind {
+	case "function", "method", "constructor", "procedure", "subroutine", "macro", "closure", "lambda", "operator":
+		return true
+	default:
+		return false
+	}
 }
 
 func symbolBlock(content string, symbol SymbolRecord) string {

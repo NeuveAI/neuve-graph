@@ -94,6 +94,69 @@ func TestNeighborsCallEdgeIsTraversableInBothDirections(t *testing.T) {
 	}
 }
 
+func TestNeighborsOrdinaryCallableBodyVocabularyDoesNotRequireKindDisambiguation(t *testing.T) {
+	repo := t.TempDir()
+	git(t, repo, "init")
+	git(t, repo, "config", "user.name", "Entire Graph Test")
+	git(t, repo, "config", "user.email", "graph@example.com")
+	const file = "apps/embeds/server/services/browsing-agent-loop.ts"
+	write(t, repo, file, `export async function runWithOptionalCommandQueueWatcher() {}
+
+export async function runBrowsingAgentLoop() {
+  const schema = { command: "execute" }
+  const tool = { execute: () => schema }
+  await runWithOptionalCommandQueueWatcher()
+  return tool.execute()
+}
+`)
+	git(t, repo, "add", ".")
+	git(t, repo, "commit", "-m", "fixture")
+
+	var out bytes.Buffer
+	if err := Run(t.Context(), Options{Version: "0.1.0", Env: EntireEnv{RepoRoot: repo}, Stdout: &out}, []string{
+		"neighbors", "--repo", repo, "--symbol", "runBrowsingAgentLoop", "--file", file,
+		"--direction", "out", "--relation", "CALLS", "--format", "json", "--head",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var response neighborResponse
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatalf("decode neighbors json: %v\n%s", err, out.String())
+	}
+	if response.DisambiguationRequired || response.FocusMatchesTotal != 1 || len(response.Matches) != 1 {
+		t.Fatalf("ordinary callable required kind disambiguation: %#v", response)
+	}
+	focus := response.Matches[0]
+	if focus.Symbol.Kind != "function" || focus.Symbol.Name != "runBrowsingAgentLoop" {
+		t.Fatalf("focus = %#v, want runBrowsingAgentLoop function", focus.Symbol)
+	}
+	var wrapperCall *neighborEdge
+	for index := range focus.Outgoing {
+		edge := &focus.Outgoing[index]
+		if edge.Relation == "CALLS" && edge.Endpoint.Name == "runWithOptionalCommandQueueWatcher" {
+			wrapperCall = edge
+			break
+		}
+	}
+	if wrapperCall == nil {
+		t.Fatalf("runBrowsingAgentLoop CALLS wrapper missing: %#v", focus.Outgoing)
+	}
+	if wrapperCall.Resolution != "exact" || wrapperCall.Endpoint.QualifiedName != "runWithOptionalCommandQueueWatcher" {
+		t.Fatalf("wrapper CALLS resolution = %#v, want exact qualified endpoint", wrapperCall)
+	}
+	qualifiedEvidence := false
+	for _, evidence := range wrapperCall.Evidence {
+		if evidence.Kind == "call_site" && evidence.FilePath == file && evidence.StartLine >= focus.Symbol.StartLine &&
+			evidence.EndLine <= focus.Symbol.EndLine && strings.Contains(evidence.Detail, "runWithOptionalCommandQueueWatcher") {
+			qualifiedEvidence = true
+			break
+		}
+	}
+	if !qualifiedEvidence {
+		t.Fatalf("wrapper CALLS evidence = %#v, want qualified evidence inside caller span %#v", wrapperCall.Evidence, focus.Symbol)
+	}
+}
+
 func hasEndpointNamed(edges []neighborEdge, name string) bool {
 	for _, edge := range edges {
 		if edge.Endpoint.Name == name {
