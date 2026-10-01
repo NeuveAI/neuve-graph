@@ -1,7 +1,9 @@
 package sem
 
 import (
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -576,6 +578,85 @@ func mergeTestSite(id string, start int) searchRelatedSite {
 		kind:   searchRelatedNearDupe,
 		symbol: relatedFunction(id, id, "src/text/format.go", start, start+6),
 		line:   start,
+	}
+}
+
+func TestSearchRelatedResultPreservesOnlyDeclaredLanguage(t *testing.T) {
+	t.Parallel()
+	site := searchRelatedSite{
+		kind: searchRelatedSibling,
+		symbol: SymbolRecord{
+			Kind: "function", Name: "parse", QualifiedName: "Parser.parse",
+			FilePath: "src/parser.ts", StartLine: 2, EndLine: 4, Language: "ArbitraryProviderLanguage",
+		},
+		line: 3,
+	}
+	want := SearchResult{
+		FilePath: "src/parser.ts", StartLine: 2, EndLine: 4, FocusLine: 3,
+		SnippetStartLine: 3, SnippetEndLine: 3, Language: "ArbitraryProviderLanguage",
+		Kind: "function", QualifiedName: "Parser.parse", Signals: []string{"related:sibling"},
+		Section: searchSectionRelated, Snippet: "target line",
+	}
+	got, ok := searchRelatedResult(site, []string{"before", "start", "target line", "end"})
+	if !ok || !reflect.DeepEqual(got, want) {
+		t.Fatalf("related result = %#v, %t; want %#v, true", got, ok, want)
+	}
+
+	site.symbol.Language = ""
+	withoutLanguage, ok := searchRelatedResult(site, []string{"before", "start", "target line", "end"})
+	if !ok {
+		t.Fatal("related result with absent provider language was dropped")
+	}
+	encoded, err := json.Marshal(withoutLanguage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"language"`) {
+		t.Fatalf("empty provider language was serialized: %s", encoded)
+	}
+}
+
+func TestMergeSearchRelatedSitesPricesDeclaredLanguageWithoutChangingProtectedResults(t *testing.T) {
+	t.Parallel()
+	fixture := cloneFamilyFixture()
+	results := mergeTestResults(searchEnclosureHeadRanks, "protected")
+	results[1].Section = searchSectionDocs
+	results[1].Language = "Documentation"
+	results[2].QualifiedName = "pkg.third"
+	results[2].Signals = []string{"body", "exact-name"}
+	results = append(results, SearchResult{
+		Rank: len(results) + 1, FilePath: results[0].FilePath,
+		StartLine: 100, EndLine: 140, FocusLine: 110,
+		SnippetStartLine: 110, SnippetEndLine: 111,
+		Signals: []string{"body"}, Snippet: strings.Repeat("tail", 200),
+	})
+	before := append([]SearchResult(nil), results...)
+	site := mergeTestSite("alpha", 3)
+	site.symbol.Language = "ProviderDeclared"
+
+	merged, count := mergeSearchRelatedSites(results, []searchRelatedSite{site}, fixture.reader(), serializedSearchResultBytes(results))
+	if count != 1 || len(merged) != len(results) {
+		t.Fatalf("merge = %d related results across %d rows; want one replacement across %d", count, len(merged), len(results))
+	}
+	if serializedSearchResultBytes(merged) > serializedSearchResultBytes(results) {
+		t.Fatalf("declared language escaped the existing byte ceiling: %d > %d", serializedSearchResultBytes(merged), serializedSearchResultBytes(results))
+	}
+	if !reflect.DeepEqual(merged[:searchEnclosureHeadRanks], before[:searchEnclosureHeadRanks]) {
+		t.Fatalf("protected primary/docs results changed:\n got: %#v\nwant: %#v", merged[:searchEnclosureHeadRanks], before[:searchEnclosureHeadRanks])
+	}
+	related := merged[len(merged)-1]
+	if related.Language != "ProviderDeclared" || related.FilePath != site.symbol.FilePath ||
+		related.StartLine != site.symbol.StartLine || related.EndLine != site.symbol.EndLine ||
+		related.FocusLine != site.line || related.Section != searchSectionRelated ||
+		!reflect.DeepEqual(related.Signals, []string{"related:near-dupe"}) {
+		t.Fatalf("related locator lost provider identity/range/role metadata: %#v", related)
+	}
+
+	tooLarge := site
+	tooLarge.symbol.Language = strings.Repeat("provider-declared-", 200)
+	unmerged, count := mergeSearchRelatedSites(results, []searchRelatedSite{tooLarge}, fixture.reader(), serializedSearchResultBytes(results))
+	if count != 0 || !reflect.DeepEqual(unmerged, before) {
+		t.Fatalf("over-budget language was not priced by the allocator: count=%d results=%#v", count, unmerged)
 	}
 }
 

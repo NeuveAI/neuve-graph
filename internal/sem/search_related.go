@@ -768,8 +768,10 @@ func sortedSearchRelatedIDs(ids map[string]bool) []string {
 //
 // It is deliberately the CHEAPEST entry the schema allows. Everything a locator does not need is
 // left out — no symbol id (a stable id is ~110 bytes in Java and the name is what a follow-up
-// query takes), no language, and only one of the two name fields. The block is funded out of the
-// tail of the ranking, so every byte an entry does not spend is a ranked hit that survives.
+// query takes), and only one of the two name fields. Provider-declared language is retained when
+// present because callers use it to qualify semantic capabilities; the allocator prices those
+// bytes with the rest of the entry. The block is funded out of the tail of the ranking, so every
+// byte an entry does not spend is a ranked hit that survives.
 func searchRelatedResult(site searchRelatedSite, lines []string) (SearchResult, bool) {
 	start, end := clampRegion(site.symbol.StartLine, site.symbol.EndLine, len(lines))
 	if start == 0 {
@@ -786,6 +788,7 @@ func searchRelatedResult(site searchRelatedSite, lines []string) (SearchResult, 
 		FocusLine:        focus,
 		SnippetStartLine: focus,
 		SnippetEndLine:   focus,
+		Language:         site.symbol.Language,
 		Kind:             site.symbol.Kind,
 		Signals:          []string{searchRelatedSignalPrefix + string(site.kind)},
 		Section:          searchSectionRelated,
