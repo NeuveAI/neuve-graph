@@ -33,6 +33,25 @@ pre-supplement count. Rank is the authoritative policy order; `score` reports
 the underlying relevance evidence and need not descend after stable policy
 interleaving or additive enrichment.
 
+## Ranked test source windows
+
+Repository queries may enlarge one already-ranked, symbol-less test source window within
+the protected first five results. This does not promote a result or name an anonymous test
+callback. The primary rank, score, identity, and original signals stay unchanged; the
+existing excerpt must remain an exact contiguous subset of the enlarged source.
+
+| Constraint | Observable outcome |
+| --- | --- |
+| Content evidence in a ranked test artifact | Eligible for an in-place source window |
+| Named symbol, path-only match, or explicit test query | Ordinary result unchanged |
+| Source window exceeds 60 lines or 2 KiB growth | Bounded excerpt labelled `head-window`, never a new complete-symbol claim |
+| Main context ceiling has insufficient free bytes after type-card and signature-type blocks | Ordinary result unchanged |
+| Another result or duplicate from the same file | Rank and evidence unchanged |
+
+The supplemental ranked-test contract behavior remains separate: it can allocate
+one unprotected tail result as a covering-test contract. Head windows never use that
+supplemental section or displace protected fix sites.
+
 ## What a response contains
 
 The default format is JSON, one object per query:

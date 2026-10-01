@@ -214,6 +214,41 @@ func searchRankedTestHasContentEvidence(result SearchResult) bool {
 // searchRankedTestContractResult renders a whole artifact up to the established 60-line read
 // bound, or an honestly labelled focus window when line or byte bounds require clipping.
 func searchRankedTestContractResult(result SearchResult, lines []string) (SearchResult, bool) {
+	return searchRankedTestContractWindow(result, lines, false)
+}
+
+// expandSearchRankedHeadTestContract preserves the protected ranking and its original evidence.
+// Only already-ranked symbol-less test content can receive one bounded source window, funded
+// from bytes remaining after the other main-ceiling blocks have been charged.
+func expandSearchRankedHeadTestContract(results []SearchResult, q searchQuery, read contentReader, hardBudget int) []SearchResult {
+	if searchQuerySupplied(q, searchTestIntentWords...) {
+		return results
+	}
+	cache := newSearchRelatedFileCache(read, 1)
+	for index := 0; index < min(searchEnclosureHeadRanks, len(results)); index++ {
+		original := results[index]
+		if !searchRankedTestContractCandidate(original) {
+			continue
+		}
+		lines, ok := cache.get(original.FilePath)
+		if !ok {
+			continue
+		}
+		entry, ok := searchRankedTestContractWindow(original, lines, true)
+		if !ok || !searchRankedTestSnippetIsExactSubset(entry, original) ||
+			(entry.SnippetStartLine == original.SnippetStartLine && entry.SnippetEndLine == original.SnippetEndLine) {
+			continue
+		}
+		out := slices.Clone(results)
+		out[index] = entry
+		if hardBudget <= 0 || serializedSearchResultBytes(out) <= hardBudget {
+			return out
+		}
+	}
+	return results
+}
+
+func searchRankedTestContractWindow(result SearchResult, lines []string, preservePrimary bool) (SearchResult, bool) {
 	if len(lines) == 0 || result.FilePath == "" {
 		return SearchResult{}, false
 	}
@@ -230,6 +265,17 @@ func searchRankedTestContractResult(result SearchResult, lines []string) (Search
 		start, end = clipSearchUnitToCap(start, end, focus, searchHeadWindowLines)
 	}
 	build := func(from, to int, clipped bool) SearchResult {
+		if preservePrimary {
+			entry := result
+			entry.StartLine, entry.EndLine = from, to
+			entry.SnippetStartLine, entry.SnippetEndLine = from, to
+			entry.Snippet = strings.Join(lines[from-1:to], "\n")
+			entry.Signals = slices.Clone(result.Signals)
+			if !slices.Contains(entry.Signals, searchHeadWindowSignal) {
+				entry.Signals = append(entry.Signals, searchHeadWindowSignal)
+			}
+			return entry
+		}
 		signals := []string{searchRelatedSignalPrefix + searchCoveringTestSignal}
 		if clipped {
 			signals = append(signals, searchHeadWindowSignal)

@@ -30,6 +30,33 @@ endpoint records. Consumers should ignore unknown record types within the
 supported major schema version, and should not assume every relation target
 is a symbol.
 
+## Static callable ownership
+
+Graph relationships describe static source dependencies. `resolution: exact`
+means that the target symbol identity was resolved exactly; it does not prove
+that a call executes, executes synchronously, or executes in every invocation.
+
+| Source shape | Symbol and ownership | Observed relationship |
+| --- | --- | --- |
+| `const api = { stop: () => helper() }` | Named object `api` contains method `api.stop` | `api.stop CALLS helper` |
+| `return { stop: () => defer(function () { helper() }) }` inside `make` | `make` lexically contains property method `make.stop` | `make.stop CALLS defer` and `make.stop CALLS helper` under the existing named lexical source policy |
+| `const api = { value: initialize(), stop: () => helper() }` | The object initializer and the named property are separate sources | `api CALLS initialize`; `api.stop CALLS helper` |
+
+An anonymous callback without its own symbol stays within the nearest named
+callable's source dependency observation. This preserves useful lexical context
+but cannot establish that the enclosing callable invokes the callback. Existing
+named enclosing functions can also retain nested source observations; this is
+not an exhaustive runtime call graph.
+
+A property's qualified name on an anonymous object records its lexical context.
+For example, a returned object inside a class's construction expression can
+produce `Service.stop`; this is not a declared static method of `Service`.
+`CONTAINS` makes that lexical context queryable. Such anonymous-object properties
+are excluded from named receiver resolution, and function-local named objects
+must remain within their lexical source scope. Statically named objects such as
+`api` can supply actual receiver paths. Computed property names and indirect
+callable values remain outside this bounded extraction.
+
 ## Streaming NDJSON
 
 The `snapshot`/`symbols`/`edges` commands stream records to stdout as they are

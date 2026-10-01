@@ -249,6 +249,8 @@ func TestBuildProviderSnapshotAnchorsToolBoundariesInCallableNames(t *testing.T)
 export function executeToolHandler() {
   return true
 }
+
+export const executeToolSchema = { execute: "schema", tool: "data" }
 `)
 	writeFile(t, repo, "auth.py", `class AuthService:
     def execute_tool_handler(self):
@@ -282,8 +284,9 @@ Execute the handler described by this document.
 		t.Fatalf("missing README section in %#v", snapshot.Symbols)
 	}
 	wantTools := map[string]string{
-		"AuthService.execute_tool_handler": "method",
-		"executeToolHandler":               "function",
+		"AuthService.execute_tool_handler":  "method",
+		"executeToolHandler":                "function",
+		"runBrowsingAgentLoop.tool.execute": "method",
 	}
 	if len(tools) != len(wantTools) {
 		t.Fatalf("tool boundaries = %#v, want %v", tools, wantTools)
@@ -294,6 +297,10 @@ Execute the handler described by this document.
 			t.Fatalf("unexpected tool boundary: %#v", tool)
 		}
 		toolsByName[tool.QualifiedName] = tool
+	}
+	data := symbolByKindAndName(snapshot.Symbols, "variable", "executeToolSchema")
+	if data.ID == "" {
+		t.Fatal("non-callable tool vocabulary control was not extracted")
 	}
 	var handlesTools []RelationRecord
 	for _, relation := range snapshot.Relations {
@@ -310,6 +317,9 @@ Execute the handler described by this document.
 		if source.ID == "" || tool.ID == "" {
 			t.Fatalf("missing source or tool for %s: source=%#v tool=%#v", qualifiedName, source, tool)
 		}
+		if tool.ContainerID != source.ID {
+			t.Fatalf("tool %s owner = %q, want real callable %q", qualifiedName, tool.ContainerID, source.ID)
+		}
 		var handlesTool *RelationRecord
 		for index := range handlesTools {
 			relation := &handlesTools[index]
@@ -321,6 +331,9 @@ Execute the handler described by this document.
 		if handlesTool == nil {
 			t.Fatalf("missing %s -> tool HANDLES_TOOL relation: %#v", qualifiedName, handlesTools)
 		}
+		if handlesTool.Resolution != "pattern" || handlesTool.Confidence != 0.85 {
+			t.Fatalf("tool-name heuristic claimed stronger certainty: %#v", handlesTool)
+		}
 		if handlesTool.Reason != "tool boundary inferred from callable symbol name" || len(handlesTool.Evidence) != 1 {
 			t.Fatalf("HANDLES_TOOL evidence = %#v, want callable name evidence", handlesTool)
 		}
@@ -328,6 +341,11 @@ Execute the handler described by this document.
 		if evidence.Kind != "symbol_name" || evidence.FilePath != source.FilePath ||
 			evidence.StartLine != source.StartLine || evidence.EndLine != source.StartLine || evidence.Detail != qualifiedName {
 			t.Fatalf("HANDLES_TOOL evidence = %#v, want exact declaration name at %s:%d", evidence, source.FilePath, source.StartLine)
+		}
+	}
+	for _, relation := range handlesTools {
+		if relation.FromID == ordinary.ID || relation.FromID == data.ID || relation.FromID == markdownSection.ID {
+			t.Fatalf("body vocabulary or non-callable control became a tool handler: %#v", relation)
 		}
 	}
 }

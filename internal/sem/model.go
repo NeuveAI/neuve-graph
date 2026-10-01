@@ -30,6 +30,12 @@ type Entity struct {
 	// being downgraded as ambiguous. Private, like the other parse metadata, so
 	// the frozen schema is unchanged.
 	bodyless bool
+	// objectLiteral marks a statically named object that contains callables.
+	// The object is their container, not a callable that executes their bodies.
+	objectLiteral bool
+	// lexicalObjectProperty is a callable property on an anonymous object.
+	// Its qualified name records lexical context, not a named receiver binding.
+	lexicalObjectProperty bool
 	// cPlusPlusOwners are the declaration's legal lexical C++ owner spellings,
 	// including bounded aliases produced by omitting inline namespaces. Graph
 	// QualifiedName remains based on the immediate container for stable IDs.

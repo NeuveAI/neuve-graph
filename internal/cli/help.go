@@ -197,6 +197,7 @@ var commandDocs = []commandDoc{
 			{name: "--line", arg: "n", desc: "Disambiguate by line"},
 			{name: "--kind", arg: "kind", desc: "Disambiguate by symbol kind"},
 			{name: "--relation", arg: "CALLS", def: "CALLS", desc: "Relation family to follow"},
+			{name: "--selection", arg: "exact|family", def: "family", desc: "Exact relation type or declared family (CALLS includes CONSTRUCTS)"},
 			{name: "--direction", arg: "both|in|out", def: "both", desc: "in = callers, out = callees"},
 			{name: "--depth", arg: "1|2", def: "1", desc: "Hops to traverse"},
 			{name: "--limit", arg: "n", def: "20", desc: "Max neighbors per direction"},

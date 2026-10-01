@@ -116,12 +116,32 @@ as a need to refresh derived semantic data. History consumers must also migrate
 previously persisted entity deltas rather than merely append newly parsed ones.
 
 This is one global revision for parser identity rules across all languages.
-The value is a decimal revision encoded as a string, currently `"3"`. Consumers
+The value is a decimal revision encoded as a string, currently `"4"`. Consumers
 compare the complete opaque string for equality rather than relying on numeric
 ordering. The field name supplies its meaning; the value names no language or
 feature. A bump invalidates both snapshot and search
 cache namespaces even when the source tree and provider release are unchanged.
 It does not change the individual symbol-ID format.
+
+Revision `"4"` adds statically named object-property callables and their named
+object containers using existing `method` and `variable` kinds. Their names
+retain the actual object binding path and nearest named lexical scope. Unaffected
+declarations retain their names and `compound-v1` IDs. Recognized property-bound
+named function expressions consolidate under the property's identity; named
+expressions beneath computed or refused keys retain their existing identity.
+Nested helpers under newly recognized property callables acquire their truthful
+callable scope. Anonymous
+objects with duplicate keys use the existing signature/occurrence distinction.
+This does not promise identity stability across insertion of identical
+declarations in an anonymous scope.
+
+Consumers upgrading from revision `"3"` must refresh derived snapshots and
+recompute persisted entity deltas with revision `"4"`, preserving source commits,
+checkpoint/session provenance, and authored memory. Snapshot and record-cache
+namespaces are invalidated by the revision token. The frozen public schema is
+unchanged. The [static callable ownership contract](../snapshot-format.md#static-callable-ownership)
+explains why a lexical name is not a receiver binding or a runtime invocation
+claim.
 
 Revision `"3"` narrows synthetic tool-boundary identity to callable declarations
 whose qualified-name words include `tool` and at least one of `handler`,

@@ -30,6 +30,7 @@ type neighborFlags struct {
 	Format          string
 	Profile         string
 	Relation        string
+	Selection       string
 	Direction       string
 	Depth           int
 	Limit           int
@@ -88,12 +89,14 @@ type neighborFocus struct {
 }
 
 type neighborResponse struct {
-	FormatVersion int    `json:"format_version"`
-	RepoRoot      string `json:"repo_root"`
-	Commit        string `json:"commit,omitempty"`
-	Tree          string `json:"tree,omitempty"`
-	Profile       string `json:"profile"`
-	Relation      string `json:"relation"`
+	FormatVersion     int      `json:"format_version"`
+	RepoRoot          string   `json:"repo_root"`
+	Commit            string   `json:"commit,omitempty"`
+	Tree              string   `json:"tree,omitempty"`
+	Profile           string   `json:"profile"`
+	Relation          string   `json:"relation"`
+	Selection         string   `json:"selection"`
+	SelectedRelations []string `json:"selected_relations"`
 	// Direction echoes which half of the adjacency was asked for. Without it a
 	// reader cannot tell an empty section from a section that was never queried.
 	Direction     string `json:"direction"`
@@ -198,7 +201,7 @@ func runNeighbors(ctx context.Context, opts Options, args []string) error {
 
 func parseNeighborFlags(args []string) (neighborFlags, error) {
 	flags := neighborFlags{
-		Format: "json", Profile: "full", Relation: "CALLS", Direction: "both",
+		Format: "json", Profile: "full", Relation: "CALLS", Selection: "family", Direction: "both",
 		Depth: 1, Limit: defaultNeighborLimit, Worktree: true,
 		MaxContextBytes: defaultNeighborContextBytes,
 	}
@@ -266,6 +269,12 @@ func parseNeighborFlags(args []string) (neighborFlags, error) {
 				return flags, valueErr
 			}
 			flags.Direction = item
+		case "--selection":
+			item, valueErr := value()
+			if valueErr != nil {
+				return flags, valueErr
+			}
+			flags.Selection = item
 		case "--depth":
 			parsed, next, parseErr := searchPositiveIntFlag(args, index)
 			if parseErr != nil {
@@ -329,6 +338,9 @@ func parseNeighborFlags(args []string) (neighborFlags, error) {
 	if flags.Relation == "" {
 		return flags, errors.New("neighbors --relation cannot be empty")
 	}
+	if flags.Selection != "exact" && flags.Selection != "family" {
+		return flags, errors.New("neighbors --selection must be exact or family")
+	}
 	return flags, nil
 }
 
@@ -391,6 +403,8 @@ func buildNeighborResponseFromReader(
 		Tree:                  snapshot.Header.Tree,
 		Profile:               snapshot.Header.Profile,
 		Relation:              flags.Relation,
+		Selection:             neighborSelection(flags),
+		SelectedRelations:     neighborSelectedRelations(flags),
 		Direction:             flags.Direction,
 		Query:                 flags.Symbol,
 		File:                  ref.File,
@@ -429,8 +443,12 @@ func buildNeighborResponseFromReader(
 	outgoingByFocus := make(map[string][]neighborEdge, len(focuses))
 	incomingTotals := make(map[string]int, len(focuses))
 	outgoingTotals := make(map[string]int, len(focuses))
+	selectedRelations := make(map[string]bool)
+	for _, relation := range response.SelectedRelations {
+		selectedRelations[relation] = true
+	}
 	for _, relation := range snapshot.Relations {
-		if !neighborRelationMatches(flags.Relation, relation.Type) {
+		if !selectedRelations[relation.Type] {
 			continue
 		}
 		if flags.Direction != "out" && focusIDs[relation.ToID] {
@@ -558,7 +576,7 @@ func annotateNeighborCallSites(response *neighborResponse, read lineReader) {
 }
 
 // isCallRelation reports whether a relation type is a call, so only call edges
-// get a call site. The set mirrors neighborRelationMatches' call family.
+// get a call site. The set mirrors the provider's declared CALLS family.
 func isCallRelation(relationType string) bool {
 	switch relationType {
 	case "CALLS", "CONSTRUCTS", "ASYNC_CALLS":
@@ -613,11 +631,20 @@ func isConventionalTestPath(path string) bool {
 		strings.HasSuffix(stem, "TestCase")
 }
 
-func neighborRelationMatches(requested, actual string) bool {
-	// Constructors are callable dependencies. The provider schema keeps
-	// CONSTRUCTS distinct, while the focused call-neighborhood view includes
-	// them so "callees" does not silently omit direct constructor invocations.
-	return actual == requested || (requested == "CALLS" && actual == "CONSTRUCTS")
+func neighborSelection(flags neighborFlags) string {
+	if flags.Selection == "exact" {
+		return "exact"
+	}
+	return "family"
+}
+
+func neighborSelectedRelations(flags neighborFlags) []string {
+	if neighborSelection(flags) == "family" {
+		if family, ok := sem.RelationFamilies()[flags.Relation]; ok {
+			return family
+		}
+	}
+	return []string{flags.Relation}
 }
 
 func endpointForExternal(external sem.ExternalRecord) neighborEndpoint {

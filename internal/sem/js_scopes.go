@@ -285,6 +285,10 @@ func (s *jsScanState) bindingShadowsNamespaceReceiver(root string, position int,
 // within the symbol's source range (nested callables included, matching the
 // symbol's block text).
 func (s *jsScanState) namespaceCallsForSymbol(symbol SymbolRecord) map[string]struct{} {
+	return s.namespaceCallsForSymbolExcluding(symbol, nil)
+}
+
+func (s *jsScanState) namespaceCallsForSymbolExcluding(symbol SymbolRecord, excluded jsByteSpans) map[string]struct{} {
 	if s == nil || len(s.namespaces) == 0 {
 		return nil
 	}
@@ -294,6 +298,9 @@ func (s *jsScanState) namespaceCallsForSymbol(symbol SymbolRecord) map[string]st
 	for _, call := range s.calls[first:] {
 		if call.startByte >= end {
 			break
+		}
+		if excluded.contains(call.startByte) {
+			continue
 		}
 		if qualified := s.qualifiedNamespaceCall(call); qualified != "" {
 			out[qualified] = struct{}{}
@@ -331,11 +338,15 @@ func (s *jsScanState) topLevelNamespaceCalls(symbols []SymbolRecord) map[string]
 // such use reaches the file import without a nearer lexical binding of the
 // same local name.
 func (s *jsScanState) importAliasUseVisibilityForSymbol(symbol SymbolRecord, name string) (seen, visible bool) {
+	return s.importAliasUseVisibilityForSymbolExcluding(symbol, name, nil)
+}
+
+func (s *jsScanState) importAliasUseVisibilityForSymbolExcluding(symbol SymbolRecord, name string, excluded jsByteSpans) (seen, visible bool) {
 	if s == nil {
 		return false, false
 	}
 	start, end := s.symbolByteRange(symbol)
-	return s.importAliasUseVisibility(name, start, end, nil)
+	return s.importAliasUseVisibility(name, start, end, excluded)
 }
 
 // topLevelImportAliasUseVisibility applies the same check to the byte-exact

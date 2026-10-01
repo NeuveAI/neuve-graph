@@ -45,7 +45,7 @@ const (
 	// IdentityRevision is a global, opaque revision of parser identity rules across
 	// all languages. Change it when corrections re-key existing symbols or change
 	// emitted entity membership.
-	IdentityRevision     = "3"
+	IdentityRevision     = "4"
 	defaultMaxParseBytes = 4 * 1024 * 1024
 	// defaultMaxSourceFiles bounds how many files one snapshot will list. The
 	// per-file indexes a snapshot keeps (one file record and its retained symbols)
@@ -359,7 +359,9 @@ type SymbolRecord struct {
 	// Call resolution uses it to tell an overload set apart from genuinely
 	// ambiguous same-name definitions. Private, so the frozen schema and the
 	// compound-v1 IDs are unchanged.
-	bodyless bool
+	bodyless              bool
+	objectLiteral         bool
+	lexicalObjectProperty bool
 	// cPlusPlusOwners carry legal lexical namespace/class owner spellings used
 	// only to match a bodyless declaration to its out-of-line C++ definition.
 	cPlusPlusOwners         []string
@@ -420,6 +422,8 @@ type CapabilityReport struct {
 	InventoryOnlyLanguages          []string            `json:"inventory_only_languages"`
 	ParserVersions                  map[string]string   `json:"parser_versions"`
 	SupportedRelationTypes          []string            `json:"supported_relation_types"`
+	RelationSelectionModes          []string            `json:"relation_selection_modes"`
+	RelationFamilies                map[string][]string `json:"relation_families"`
 	RelationSupportByLanguage       map[string][]string `json:"relation_support_by_language"`
 	RelationSupportByProfile        map[string][]string `json:"relation_support_by_profile"`
 	HeuristicRelationTypes          []string            `json:"heuristic_relation_types"`
@@ -669,6 +673,8 @@ func Capabilities() CapabilityReport {
 		UnsupportedButDetectedLanguages: []string{},
 		ParserVersions:                  parserVersions(),
 		SupportedRelationTypes:          append([]string(nil), relationTypes...),
+		RelationSelectionModes:          []string{"exact", "family"},
+		RelationFamilies:                RelationFamilies(),
 		RelationSupportByLanguage:       relationSupportByLanguage(),
 		RelationSupportByProfile:        relationSupportByProfile(),
 		HeuristicRelationTypes:          []string{"HANDLES_ROUTE", "HTTP_CALLS", "EMITS", "LISTENS_ON", "HANDLES_TOOL", "SIMILAR_TO", "TESTS"},
@@ -693,6 +699,16 @@ func Capabilities() CapabilityReport {
 			"network_discovery": false,
 		},
 	}
+}
+
+// RelationFamilies declares the relation sets used by focused traversal.
+func RelationFamilies() map[string][]string {
+	families := make(map[string][]string, len(relationTypes))
+	for _, relation := range relationTypes {
+		families[relation] = []string{relation}
+	}
+	families["CALLS"] = []string{"CALLS", "CONSTRUCTS"}
+	return families
 }
 
 func sortedSetKeys(set map[string]struct{}) []string {
@@ -2068,6 +2084,8 @@ func entitySymbols(repoKey, path, language string, entities []Entity) []SymbolRe
 			sourceStartByte:         entity.sourceStartByte,
 			sourceEndByte:           entity.sourceEndByte,
 			bodyless:                entity.bodyless,
+			objectLiteral:           entity.objectLiteral,
+			lexicalObjectProperty:   entity.lexicalObjectProperty,
 			cPlusPlusOwners:         append([]string(nil), entity.cPlusPlusOwners...),
 			cPlusPlusDefinitionName: entity.cPlusPlusDefinitionName,
 			cLinkage:                entity.cLinkage,
@@ -4913,7 +4931,7 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 					childNamesByContainer[symbol.ContainerID] = map[string]bool{}
 				}
 				childNamesByContainer[symbol.ContainerID][symbol.Name] = true
-				if (needsReceiverCalls || needsOverrides) && symbol.Kind == "method" {
+				if (needsReceiverCalls || needsOverrides) && symbol.Kind == "method" && !symbol.lexicalObjectProperty {
 					if methodsByContainer[symbol.ContainerID] == nil {
 						methodsByContainer[symbol.ContainerID] = map[string]SymbolRecord{}
 					}
@@ -5458,9 +5476,14 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 				return result
 			}
 			block := symbolBlockFromLines(lines, from)
+			var objectCallableSpans jsByteSpans
 			if file.Language == "JavaScript" || file.Language == "TypeScript" || file.Language == "Julia" {
 				if exact, ok := exactSymbolSource(content, from); ok {
 					block = exact
+					if from.objectLiteral {
+						objectCallableSpans = jsObjectCallableSpans(from, currentFileSymbols)
+						block = jsMaskObjectCallables(block, from.sourceStartByte, objectCallableSpans)
+					}
 				}
 			}
 			if fileNeedsCallScan && !typeLikeKind(from.Kind) && file.Language == "Erlang" {
@@ -5571,7 +5594,7 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 					// by their receiver-aware resolution paths below. Shadowing and
 					// namespace context come from the AST-derived scan state at each
 					// call site's own position.
-					for name := range jsScan.namespaceCallsForSymbol(from) {
+					for name := range jsScan.namespaceCallsForSymbolExcluding(from, objectCallableSpans) {
 						callNames[name] = struct{}{}
 						jsNamespaceCalls[name] = struct{}{}
 					}
@@ -5729,7 +5752,7 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 							// actually a direct call or callable argument reference. Keep
 							// the coarse fallback only when parsing failed or depth limited
 							// the scan; both degraded states are reported as partial failures.
-							if _, visible := jsScan.importAliasUseVisibilityForSymbol(from, name); !visible {
+							if _, visible := jsScan.importAliasUseVisibilityForSymbolExcluding(from, name, objectCallableSpans); !visible {
 								jsAliasTargets = nil
 								jsAliasExternal = nil
 							}
@@ -9098,7 +9121,7 @@ func receiverQualifiedMethodTarget(from SymbolRecord, call receiverCall, candida
 	var matches []SymbolRecord
 	var sameFile []SymbolRecord
 	for _, candidate := range candidates {
-		if candidate.ID == from.ID || candidate.Kind != "method" {
+		if candidate.ID == from.ID || candidate.Kind != "method" || candidate.lexicalObjectProperty || !localReachable(from, candidate) {
 			continue
 		}
 		if candidate.QualifiedName != qualified && candidate.Name != qualified {

@@ -59,6 +59,11 @@ entire graph neighbors --repo . --symbol NAME --relation CALLS --direction in   
 entire graph neighbors --repo . --symbol NAME --relation CALLS --direction out  # what NAME calls
 ```
 
+Neighbor selection defaults to the declared relation family: `CALLS` includes
+`CONSTRUCTS`. Pass `--selection exact` when only the requested relation type is
+needed. Capabilities declare the modes and families; JSON echoes the selection
+and selected types. Selection does not change an edge's resolution confidence.
+
 - `--file path` — **required** when the symbol name is ambiguous (multiple defs); the graph returns definitions only until you disambiguate.
 - `--relation CALLS` (default is the call family) — pick another relation to follow it instead.
 - `--direction both|in|out`, `--depth 1|2`, `--limit N`.

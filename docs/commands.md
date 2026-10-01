@@ -31,6 +31,13 @@ default**; `--head` switches to the committed tree.
 | `neighbors` | Direct relations of one symbol (`--relation`, `--direction`, `--depth 1\|2`). Ambiguous names return a definition list; disambiguate with `--file`. |
 | `impact` | One-shot blast radius for a symbol: direct and transitive callers (depth ≤ 2), callees, type consumers, data flows, co-change files, siblings. |
 
+`neighbors --selection family` is the default: `--relation CALLS` follows
+`CALLS` and `CONSTRUCTS`. Use `--selection exact` to follow only the requested
+relation type. Capabilities declare `relation_selection_modes` and
+`relation_families`; JSON echoes `selection` and `selected_relations` for both
+directions and depth modes. Diagnostics and truncation describe the selected
+traversal regardless of the selection mode.
+
 Cache visibility differs by command and format. JSON from `query`, `impact`,
 and `neighbors` includes cache fields. Text output from `impact` and
 `neighbors` starts with an `Index: cache-hit` or `cache-miss` header. Agent

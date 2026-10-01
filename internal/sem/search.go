@@ -2034,6 +2034,8 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 	if len(typeCard) > 0 {
 		containedCallableFundedBlockBytes += serializedSearchResultBytes(typeCard)
 	}
+	results = expandSearchRankedHeadTestContract(results, q, read,
+		searchContainedCallableResultBudget(options.MaxContextBytes, containedCallableFundedBlockBytes))
 	results, stats.ContainedCallablesStatus, stats.ContainedCallablesEmitted,
 		stats.ContainedCallablesDroppedByBudget,
 		stats.ContainedCallablesDroppedByResult = attachSearchContainedCallables(

@@ -4298,9 +4298,15 @@ func walkEntitiesScoped(node *sitter.Node, src []byte, language, scope string, s
 				entity.returnTypeText = returnText
 				entity.signatureTypesKnown = true
 			}
+			if node.Type() == "pair" {
+				entity.paramTypeText, entity.returnTypeText, entity.signatureTypesKnown = astSignatureTypeTexts(node.ChildByFieldName("value"), src)
+			}
 		}
 		if inFunc && (entity.Kind == "function" || entity.Kind == "method") {
 			entity.Local = true // nested inside another function
+		}
+		if node.Type() == "pair" && jsObjectPropertyInStaticBlock(node) {
+			entity.Local = true
 		}
 		*entities = append(*entities, entity)
 		// A C/C++ typedef can bind several names at once; entityFromNode
@@ -4374,8 +4380,8 @@ func walkEntitiesScoped(node *sitter.Node, src []byte, language, scope string, s
 			// unqualified callback in a static block: otherwise A and B would
 			// both emit cb.helper. Marking the body scope callable still makes
 			// its helpers local functions rather than phantom class methods.
-			if functionLocalScopeResets(language) && scope != "" {
-				if strings.HasPrefix(entity.Name, scope+".") {
+			if functionLocalScopeResets(language) && (scope != "" || node.Type() == "pair") {
+				if node.Type() == "pair" || strings.HasPrefix(entity.Name, scope+".") {
 					childScope = entity.Name
 				}
 				childScopeIsCallable = true
@@ -6427,12 +6433,30 @@ func entityFromNode(node *sitter.Node, src []byte, language, scope string) (Enti
 		value := node.ChildByFieldName("value")
 		if functionLikeValue(value) {
 			kind = "function"
+		} else if jsNamedObjectBinding(node, src, language) {
+			kind = "variable"
 		} else if isExportedTopLevelJSVariable(node, language) {
 			kind = "variable"
 		} else {
 			return Entity{}, false
 		}
 		name = nodeName(node, src)
+		if kind == "variable" && jsNamedObjectBinding(node, src, language) {
+			name = jsObjectBindingQualifiedName(node, src, scope)
+		}
+	case "pair":
+		if language != "JavaScript" && language != "TypeScript" {
+			return Entity{}, false
+		}
+		value := node.ChildByFieldName("value")
+		if functionLikeValue(value) {
+			kind = "method"
+		} else if jsObjectContainsNamedCallable(value, src, 0) {
+			kind = "variable"
+		} else {
+			return Entity{}, false
+		}
+		name = jsObjectPropertyQualifiedName(node, src, scope)
 	case "function_expression", "generator_function":
 		// A NAMED function expression that is not the value of a
 		// variable_declarator (that case already captures it) carries a
@@ -6448,8 +6472,10 @@ func entityFromNode(node *sitter.Node, src []byte, language, scope string) (Enti
 		if !validNode(nameNode) {
 			return Entity{}, false
 		}
-		if p := node.Parent(); validNode(p) && p.Type() == "variable_declarator" {
-			return Entity{}, false
+		if p := node.Parent(); validNode(p) {
+			if p.Type() == "variable_declarator" || p.Type() == "pair" && jsObjectPropertyQualifiedName(p, src, scope) != "" {
+				return Entity{}, false
+			}
 		}
 		name = strings.TrimSpace(nameNode.Content(src))
 		kind = "function"
@@ -6467,14 +6493,16 @@ func entityFromNode(node *sitter.Node, src []byte, language, scope string) (Enti
 
 	block := node.Content(src)
 	entity := Entity{
-		Kind:        kind,
-		Name:        name,
-		Signature:   signatureFromNode(node, src),
-		StartLine:   int(node.StartPoint().Row) + 1,
-		EndLine:     int(node.EndPoint().Row) + 1,
-		BodyHash:    hash(normalize(block)),
-		Fingerprint: hash(normalize(entityFingerprintSource(Entity{Name: name, Signature: signatureFromNode(node, src)}, block))),
-		bodyless:    bodyless,
+		Kind:                  kind,
+		Name:                  name,
+		Signature:             signatureFromNode(node, src),
+		StartLine:             int(node.StartPoint().Row) + 1,
+		EndLine:               int(node.EndPoint().Row) + 1,
+		BodyHash:              hash(normalize(block)),
+		Fingerprint:           hash(normalize(entityFingerprintSource(Entity{Name: name, Signature: signatureFromNode(node, src)}, block))),
+		bodyless:              bodyless,
+		objectLiteral:         kind == "variable" && functionLocalScopeResets(language) && validNode(node.ChildByFieldName("value")) && node.ChildByFieldName("value").Type() == "object",
+		lexicalObjectProperty: node.Type() == "pair" && kind == "method" && !jsObjectPropertyHasNamedContainer(node, src),
 	}
 	// F# modules and members carry their declarations/body as direct siblings of
 	// the name (no `body` field or body-like wrapper node), so signatureFromNode

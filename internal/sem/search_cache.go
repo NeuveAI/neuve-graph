@@ -65,7 +65,9 @@ type cachedSearchSnapshot struct {
 	// apart from two genuinely ambiguous same-name definitions, and the selective
 	// derivation reruns that resolution over cached symbols. Without it a cache
 	// hit would downgrade an overloaded call that a cold run resolves exactly.
-	BodylessSymbolIDs []string `json:"bodyless_symbol_ids,omitempty"`
+	BodylessSymbolIDs              []string `json:"bodyless_symbol_ids,omitempty"`
+	ObjectLiteralSymbolIDs         []string `json:"object_literal_symbol_ids,omitempty"`
+	LexicalObjectPropertySymbolIDs []string `json:"lexical_object_property_symbol_ids,omitempty"`
 	// DerivedFrom is the generation of the complete entry this selective view was
 	// derived from, empty on a complete entry. Removing the derived directory
 	// cannot stop a derivation that read the OUTGOING complete snapshot before
@@ -597,6 +599,12 @@ func newCachedSearchSnapshotFrom(providerVersion, commit, tree, derivedFrom stri
 		if symbol.bodyless {
 			cache.BodylessSymbolIDs = append(cache.BodylessSymbolIDs, symbol.ID)
 		}
+		if symbol.objectLiteral {
+			cache.ObjectLiteralSymbolIDs = append(cache.ObjectLiteralSymbolIDs, symbol.ID)
+		}
+		if symbol.lexicalObjectProperty {
+			cache.LexicalObjectPropertySymbolIDs = append(cache.LexicalObjectPropertySymbolIDs, symbol.ID)
+		}
 		if symbol.sourceEndByte > symbol.sourceStartByte {
 			if cache.SymbolByteRanges == nil {
 				cache.SymbolByteRanges = make(map[string]cachedSymbolByteRange)
@@ -640,6 +648,14 @@ func restoreCachedSearchInternals(cache *cachedSearchSnapshot) {
 	for _, id := range cache.BodylessSymbolIDs {
 		bodylessIDs[id] = true
 	}
+	objectLiteralIDs := make(map[string]bool, len(cache.ObjectLiteralSymbolIDs))
+	for _, id := range cache.ObjectLiteralSymbolIDs {
+		objectLiteralIDs[id] = true
+	}
+	lexicalObjectPropertyIDs := make(map[string]bool, len(cache.LexicalObjectPropertySymbolIDs))
+	for _, id := range cache.LexicalObjectPropertySymbolIDs {
+		lexicalObjectPropertyIDs[id] = true
+	}
 	parameterNamesKnownIDs := make(map[string]bool, len(cache.SymbolParameterNamesKnownIDs))
 	for _, id := range cache.SymbolParameterNamesKnownIDs {
 		parameterNamesKnownIDs[id] = true
@@ -648,6 +664,8 @@ func restoreCachedSearchInternals(cache *cachedSearchSnapshot) {
 		symbol := &cache.Snapshot.Symbols[index]
 		symbol.Local = localIDs[symbol.ID]
 		symbol.bodyless = bodylessIDs[symbol.ID]
+		symbol.objectLiteral = objectLiteralIDs[symbol.ID]
+		symbol.lexicalObjectProperty = lexicalObjectPropertyIDs[symbol.ID]
 		if sourceRange, ok := cache.SymbolByteRanges[symbol.ID]; ok && sourceRange.End > sourceRange.Start {
 			symbol.sourceStartByte = sourceRange.Start
 			symbol.sourceEndByte = sourceRange.End
