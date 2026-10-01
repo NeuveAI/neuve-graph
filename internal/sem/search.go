@@ -262,6 +262,19 @@ type SearchPassage struct {
 	Snippet   string `json:"snippet"`
 }
 
+// SearchContainedCallable preserves the provider-declared identity of one complete callable whose
+// declaration is already present in an owning result's snippet. FilePath is inherited from the
+// owner; SymbolID is opaque and exists for provenance and deduplication, never for parsing.
+type SearchContainedCallable struct {
+	SymbolID      string `json:"symbol_id"`
+	SymbolName    string `json:"symbol_name"`
+	QualifiedName string `json:"qualified_name"`
+	Kind          string `json:"kind"`
+	Language      string `json:"language,omitempty"`
+	StartLine     int    `json:"start_line"`
+	EndLine       int    `json:"end_line"`
+}
+
 // SearchResult is a ranked source region suitable for direct agent context.
 type SearchResult struct {
 	Rank int `json:"rank"`
@@ -328,6 +341,9 @@ type SearchResult struct {
 	// deliberately NOT the same test as `CommentFocusLine > 0` — most re-anchored hits already
 	// carried a body, and gating those would evict source the re-anchor never paid for.
 	BodyFromReanchor bool `json:"body_from_reanchor,omitempty"`
+	// ContainedCallables names complete callable declarations whose bytes are already inside this
+	// result's snippet. It adds identity provenance, not another ranked result or source region.
+	ContainedCallables []SearchContainedCallable `json:"contained_callables,omitempty"`
 	// There is deliberately no per-result `Neighbors` list here. "The types this hit is
 	// written in terms of" is answered once, by the signature-type block (search_sigtypes.go),
 	// and "the other places this change lands" by the related-site block
@@ -337,6 +353,13 @@ type SearchResult struct {
 	// enclosing body is the one thing in the payload measured to remove a whole follow-up
 	// turn. Two blocks appending graph neighbors to one payload would also print the same
 	// fact twice. See search_blocks.go for the budget policy this follows.
+}
+
+// SearchContainedCallableDrop attributes budget omissions to a final ranked result without adding
+// bytes to that result. Rank is response-local and one-based.
+type SearchContainedCallableDrop struct {
+	Rank    int `json:"rank"`
+	Dropped int `json:"dropped"`
 }
 
 type SearchStats struct {
@@ -387,10 +410,16 @@ type SearchStats struct {
 	SparseFilesRead         int `json:"sparse_files_content_read"`
 	CandidatesSelected      int `json:"candidates_selected"`
 	ResultBytes             int `json:"result_bytes"`
-	ProsePassages           int `json:"prose_passages,omitempty"`
-	ProsePassageBytes       int `json:"prose_passage_bytes,omitempty"`
-	ContextBudgetBytes      int `json:"context_budget_bytes,omitempty"`
-	ResultsDropped          int `json:"results_dropped_by_budget,omitempty"`
+	// ContainedCallablesStatus is always emitted by providers that support the nested manifest.
+	// Missing means an older producer; truncated means one or more eligible identities did not fit.
+	ContainedCallablesStatus          string                        `json:"contained_callables_status"`
+	ContainedCallablesEmitted         int                           `json:"contained_callables_emitted"`
+	ContainedCallablesDroppedByBudget int                           `json:"contained_callables_dropped_by_budget"`
+	ContainedCallablesDroppedByResult []SearchContainedCallableDrop `json:"contained_callables_dropped_by_result,omitempty"`
+	ProsePassages                     int                           `json:"prose_passages,omitempty"`
+	ProsePassageBytes                 int                           `json:"prose_passage_bytes,omitempty"`
+	ContextBudgetBytes                int                           `json:"context_budget_bytes,omitempty"`
+	ResultsDropped                    int                           `json:"results_dropped_by_budget,omitempty"`
 	// SnippetsTruncated counts results carrying LESS source than the ranker produced for
 	// them, whether the byte fitter compacted them or the snippet allocator demoted them to
 	// a locator. A result grown to a complete symbol body is not truncated.
@@ -1310,6 +1339,7 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 				FilesIndexed:              0,
 				SymbolsConsidered:         symbolsConsidered,
 				ResultBytes:               serializedSearchResultBytes([]SearchResult{}),
+				ContainedCallablesStatus:  searchContainedCallablesComplete,
 				ContextBudgetBytes:        callerContextBytes,
 				IndexCacheHit:             cacheHit,
 				IndexLatencyMS:            preindexLoadLatency.Milliseconds(),
@@ -1523,6 +1553,7 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 		SparseFilesRead:           sparseFilesRead,
 		IndexCacheHit:             cacheHit,
 		IndexLatencyMS:            indexLatency.Milliseconds(),
+		ContainedCallablesStatus:  searchContainedCallablesComplete,
 		PreselectLatencyMS:        preselectLatency.Milliseconds(),
 	}
 	scoreSearchCandidates(candidates, q, fileDF, maxInt(1, len(selectedFiles)))
@@ -1999,6 +2030,17 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 			stats.CoveringTests = 1
 		}
 	}
+	containedCallableFundedBlockBytes := stats.SignatureTypeBytes
+	if len(typeCard) > 0 {
+		containedCallableFundedBlockBytes += serializedSearchResultBytes(typeCard)
+	}
+	results, stats.ContainedCallablesStatus, stats.ContainedCallablesEmitted,
+		stats.ContainedCallablesDroppedByBudget,
+		stats.ContainedCallablesDroppedByResult = attachSearchContainedCallables(
+		results, symbolsByFile, searchContainedCallableResultBudget(
+			options.MaxContextBytes, containedCallableFundedBlockBytes,
+		),
+	)
 	stats.CandidatesSelected = len(results)
 	stats.ProsePassages, stats.ProsePassageBytes = searchPassageStats(results)
 	resultBytes = serializedSearchResultBytes(results)
@@ -7513,6 +7555,9 @@ func (response SearchResponse) Validate() error {
 	if relatedSupplements > searchRelatedSiteLimit || coveringSupplements > searchCoveringTestLimit {
 		return fmt.Errorf("search supplements exceed bounds: %d related, %d covering-test",
 			relatedSupplements, coveringSupplements)
+	}
+	if err := validateSearchContainedCallables(response); err != nil {
+		return err
 	}
 	return nil
 }

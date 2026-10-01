@@ -231,6 +231,7 @@ func TestExpandProseResolutionInsertsPromotionsBeforeSupplements(t *testing.T) {
 	response := SearchResponse{Results: expanded, Stats: SearchStats{
 		ResultBytes:   serializedSearchResultBytes(expanded),
 		ProsePassages: passages, ProsePassageBytes: passageBytes,
+		ContainedCallablesStatus: searchContainedCallablesComplete,
 	}}
 	if err := response.Validate(); err != nil {
 		t.Fatalf("promotion broke primary/supplement ordering: %v", err)

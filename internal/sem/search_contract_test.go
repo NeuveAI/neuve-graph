@@ -49,7 +49,10 @@ func TestSearchResponseValidateEnforcesSupplementOrderingAndBounds(t *testing.T)
 			Section: section, Signals: []string{}, Snippet: "x"}
 	}
 	validate := func(results []SearchResult) error {
-		response := SearchResponse{Results: results, Stats: SearchStats{ResultBytes: serializedSearchResultBytes(results)}}
+		response := SearchResponse{Results: results, Stats: SearchStats{
+			ResultBytes:              serializedSearchResultBytes(results),
+			ContainedCallablesStatus: searchContainedCallablesComplete,
+		}}
 		return response.Validate()
 	}
 	valid := []SearchResult{result(1, searchSectionPrimary), result(2, searchSectionDocs), result(3, searchSectionRelated), result(4, searchSectionCoveringTest)}
