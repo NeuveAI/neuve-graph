@@ -27,7 +27,8 @@ import (
 // nested beneath the complete entry it came from, which would otherwise sit
 // unreachable inside a live version directory and defeat that cleanup rule.
 // v16 retires the diagnostic-count status in favor of source-file health.
-const searchSnapshotCacheVersion = "search-snapshot-v16-" + IdentityRevision
+// v17 retires omissions of source-proven named-declaration self calls.
+const searchSnapshotCacheVersion = "search-snapshot-v17-" + IdentityRevision
 
 type cachedSymbolByteRange struct {
 	Start int `json:"start"`

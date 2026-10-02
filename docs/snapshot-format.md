@@ -48,6 +48,23 @@ but cannot establish that the enclosing callable invokes the callback. Existing
 named enclosing functions can also retain nested source observations; this is
 not an exhaustive runtime call graph.
 
+Named JavaScript/TypeScript function declarations can supply a direct self
+relationship from the existing shared AST scope scan. This bounded correction
+does not imply universal recursion coverage across language adapters.
+
+| Source observation | Self relationship |
+| --- | --- |
+| A direct invocation in the declaration's own body, with its original binding visible | One `CALLS` record to the same symbol ID; evidence points at the first proven invocation, not an exhaustive call-site inventory |
+| Declaration header, construction, callback reference or nested callable's invocation | Does not prove a direct self call owned by this declaration |
+| A shadowing binding or an explicit visible assignment/update to the name, including wrapped targets and destructuring leaves | No new exact self attribution; no value-flow or execution-order inference |
+| Syntax-error recovery, parse timeout or depth-truncated scope state | No new exact self attribution; original diagnostics remain visible |
+| A site under `with` dynamic-scope ambiguity | That site cannot prove the original binding; a later unshadowed site outside it can still supply the witness |
+
+The proof does not cover named expressions, arrow bindings, receiver/property
+recursion or namespace declaration merging. Other adapters retain their existing
+resolution policies and known omissions; absent output is not proof of absent
+source dependency. Symbol IDs, schema and static-dependency meaning stay unchanged.
+
 A property's qualified name on an anonymous object records its lexical context.
 For example, a returned object inside a class's construction expression can
 produce `Service.stop`; this is not a declared static method of `Service`.

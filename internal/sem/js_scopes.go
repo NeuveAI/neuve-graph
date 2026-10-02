@@ -43,9 +43,13 @@ type jsScanState struct {
 	calls             []jsDottedCall
 	bareCalls         []jsIdentifierUse
 	callableArguments []jsIdentifierUse
+	writes            []jsIdentifierUse
 	lineStarts        []int
 	contentLen        int
 	parsed            bool
+	// Existing import fallback uses parsed even for recovery trees. New exact
+	// self attribution additionally requires an error-free, complete AST walk.
+	errorFree bool
 	// depthTruncated reports that a relation-phase walk stopped at
 	// maxParseWalkDepth (parser.go). The scope state stays usable — everything
 	// above the limit was collected — but it is incomplete, so the provider
@@ -68,9 +72,13 @@ type jsNamespaceScope struct {
 }
 
 type jsBindingScope struct {
-	Name      string
-	startByte int
-	endByte   int
+	Name             string
+	startByte        int
+	endByte          int
+	declarationStart int
+	declarationEnd   int
+	bodyStart        int
+	namedFunction    bool
 }
 
 type jsDottedCall struct {
@@ -80,8 +88,12 @@ type jsDottedCall struct {
 }
 
 type jsIdentifierUse struct {
-	name      string
-	startByte int
+	name         string
+	startByte    int
+	directCall   bool
+	ownerStart   int
+	ownerEnd     int
+	dynamicScope bool
 }
 
 // newJSScanState parses content with the same grammar/masking choices the
@@ -158,6 +170,7 @@ func buildJSScanState(grammar *sitter.Language, parseSrc []byte, content string)
 		return state, errors.New("tree-sitter scope parse produced no root node")
 	}
 	state.parsed = true
+	state.errorFree = !root.HasError()
 	walker := &jsScopeWalker{src: parseSrc, state: state}
 	walker.walk(root, jsScopeContext{
 		lexStart:  -1,
@@ -178,9 +191,13 @@ func buildJSScanState(grammar *sitter.Language, parseSrc []byte, content string)
 			continue
 		}
 		state.bindings = append(state.bindings, jsBindingScope{
-			Name:      declaration.name,
-			startByte: declaration.scopeStart,
-			endByte:   declaration.scopeEnd,
+			Name:             declaration.name,
+			startByte:        declaration.scopeStart,
+			endByte:          declaration.scopeEnd,
+			declarationStart: declaration.startByte,
+			declarationEnd:   declaration.endByte,
+			bodyStart:        declaration.bodyStart,
+			namedFunction:    declaration.namedFunction,
 		})
 	}
 	return state, nil
@@ -453,13 +470,17 @@ type jsScopeContext struct {
 	lexStart, lexEnd   int
 	funcStart, funcEnd int
 	namespace          string
+	dynamicScope       bool
 }
 
 type jsDeclarationBinding struct {
-	name       string
-	canonical  string
-	scopeStart int
-	scopeEnd   int
+	name               string
+	canonical          string
+	scopeStart         int
+	scopeEnd           int
+	startByte, endByte int
+	bodyStart          int
+	namedFunction      bool
 }
 
 type jsScopeWalker struct {
@@ -527,9 +548,17 @@ func (w *jsScopeWalker) walk(node *sitter.Node, ctx jsScopeContext, depth int) {
 			w.addPatternBindings(parameter, int(node.StartByte()), int(node.EndByte()))
 		}
 	case "call_expression":
-		w.addDottedCall(node.ChildByFieldName("function"), node.ChildByFieldName("arguments"))
+		w.addDottedCall(node.ChildByFieldName("function"), node.ChildByFieldName("arguments"), ctx, true)
+	case "with_statement":
+		// This path does not resolve object-supplied dynamic bindings. Retain
+		// that ambiguity only for the new exact-self proof at affected sites.
+		ctx.dynamicScope = true
 	case "new_expression":
-		w.addDottedCall(node.ChildByFieldName("constructor"), node.ChildByFieldName("arguments"))
+		w.addDottedCall(node.ChildByFieldName("constructor"), node.ChildByFieldName("arguments"), ctx, false)
+	case "assignment_expression", "augmented_assignment_expression":
+		w.addWrites(node.ChildByFieldName("left"))
+	case "update_expression":
+		w.addWrites(node.ChildByFieldName("argument"))
 	}
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		w.walk(node.NamedChild(i), ctx, depth+1)
@@ -606,11 +635,19 @@ func (w *jsScopeWalker) addDeclarationBinding(node *sitter.Node, ctx jsScopeCont
 	if ctx.namespace != "" {
 		canonical = ctx.namespace + "." + text
 	}
+	bodyStart := -1
+	if body := node.ChildByFieldName("body"); validNode(body) {
+		bodyStart = int(body.StartByte())
+	}
 	w.declarationBindings = append(w.declarationBindings, jsDeclarationBinding{
-		name:       text,
-		canonical:  canonical,
-		scopeStart: ctx.lexStart,
-		scopeEnd:   ctx.lexEnd,
+		name:          text,
+		canonical:     canonical,
+		scopeStart:    ctx.lexStart,
+		scopeEnd:      ctx.lexEnd,
+		startByte:     int(node.StartByte()),
+		endByte:       int(node.EndByte()),
+		bodyStart:     bodyStart,
+		namedFunction: (node.Type() == "function_declaration" || node.Type() == "generator_function_declaration") && validNode(node.ChildByFieldName("body")) && ctx.namespace == "",
 	})
 }
 
@@ -670,6 +707,7 @@ func (w *jsScopeWalker) addForHeadBindings(node *sitter.Node, ctx jsScopeContext
 		}
 	}
 	if kind == "" {
+		w.addWrites(node.ChildByFieldName("left"))
 		return
 	}
 	start, end := int(node.StartByte()), int(node.EndByte())
@@ -690,8 +728,10 @@ func (w *jsScopeWalker) addPatternBindings(pattern *sitter.Node, scopeStart, sco
 // aliases (`key: alias`), defaults, and rest elements. Type annotations and
 // default-value expressions are never entered, so their identifiers cannot
 // leak in as phantom bindings.
+// The private writeState mode additionally unwraps assignment-target syntax
+// for self-call refusal; ordinary declaration callers retain the nil mode.
 func jsPatternBindingNames(pattern *sitter.Node, src []byte) []string {
-	return jsPatternBindingNamesAt(pattern, src, 0)
+	return jsPatternBindingNamesAt(pattern, src, 0, nil)
 }
 
 // depth is capped at maxParseWalkDepth (parser.go). Object/array patterns nest
@@ -702,8 +742,14 @@ func jsPatternBindingNames(pattern *sitter.Node, src []byte) []string {
 // `function g({a:{a:{…}}}) {}` aborts the process with `fatal error: stack
 // overflow`, frames in jsPatternBindingNames; pinned by
 // TestJSPatternBindingsAreBoundedNotFatal.
-func jsPatternBindingNamesAt(pattern *sitter.Node, src []byte, depth int) []string {
-	if !validNode(pattern) || depth >= maxParseWalkDepth {
+func jsPatternBindingNamesAt(pattern *sitter.Node, src []byte, depth int, writeState *jsScanState) []string {
+	if depth >= maxParseWalkDepth {
+		if writeState != nil {
+			writeState.depthTruncated = true
+		}
+		return nil
+	}
+	if !validNode(pattern) {
 		return nil
 	}
 	switch pattern.Type() {
@@ -716,27 +762,38 @@ func jsPatternBindingNamesAt(pattern *sitter.Node, src []byte, depth int) []stri
 	case "formal_parameters", "object_pattern", "array_pattern":
 		var names []string
 		for i := 0; i < int(pattern.NamedChildCount()); i++ {
-			names = append(names, jsPatternBindingNamesAt(pattern.NamedChild(i), src, depth+1)...)
+			names = append(names, jsPatternBindingNamesAt(pattern.NamedChild(i), src, depth+1, writeState)...)
 		}
 		return names
 	case "required_parameter", "optional_parameter":
-		return jsPatternBindingNamesAt(pattern.ChildByFieldName("pattern"), src, depth+1)
+		return jsPatternBindingNamesAt(pattern.ChildByFieldName("pattern"), src, depth+1, writeState)
 	case "assignment_pattern", "object_assignment_pattern":
-		return jsPatternBindingNamesAt(pattern.ChildByFieldName("left"), src, depth+1)
+		return jsPatternBindingNamesAt(pattern.ChildByFieldName("left"), src, depth+1, writeState)
 	case "pair_pattern":
-		return jsPatternBindingNamesAt(pattern.ChildByFieldName("value"), src, depth+1)
+		return jsPatternBindingNamesAt(pattern.ChildByFieldName("value"), src, depth+1, writeState)
 	case "rest_pattern":
 		var names []string
 		for i := 0; i < int(pattern.NamedChildCount()); i++ {
-			names = append(names, jsPatternBindingNamesAt(pattern.NamedChild(i), src, depth+1)...)
+			names = append(names, jsPatternBindingNamesAt(pattern.NamedChild(i), src, depth+1, writeState)...)
 		}
 		return names
+	case "parenthesized_expression", "non_null_expression", "as_expression", "satisfies_expression", "type_assertion":
+		if writeState == nil {
+			return nil
+		}
+		// Assignment-target wrappers do not change which value is written.
+		// Do not descend through their type children or any RHS expression.
+		value := pattern.NamedChild(0)
+		if pattern.Type() == "type_assertion" {
+			value = pattern.NamedChild(int(pattern.NamedChildCount()) - 1)
+		}
+		return jsPatternBindingNamesAt(value, src, depth+1, writeState)
 	default:
 		return nil
 	}
 }
 
-func (w *jsScopeWalker) addDottedCall(function, arguments *sitter.Node) {
+func (w *jsScopeWalker) addDottedCall(function, arguments *sitter.Node, ctx jsScopeContext, direct bool) {
 	if !validNode(function) || !validNode(arguments) || arguments.Type() != "arguments" {
 		return
 	}
@@ -746,7 +803,7 @@ func (w *jsScopeWalker) addDottedCall(function, arguments *sitter.Node) {
 		w.state.depthTruncated = true
 	}
 	if len(parts) == 1 {
-		w.state.bareCalls = append(w.state.bareCalls, jsIdentifierUse{name: parts[0], startByte: int(function.StartByte())})
+		w.state.bareCalls = append(w.state.bareCalls, jsIdentifierUse{name: parts[0], startByte: int(function.StartByte()), directCall: direct, ownerStart: ctx.funcStart, ownerEnd: ctx.funcEnd, dynamicScope: ctx.dynamicScope})
 		return
 	}
 	if len(parts) < 2 {
@@ -754,6 +811,81 @@ func (w *jsScopeWalker) addDottedCall(function, arguments *sitter.Node) {
 	}
 	start := int(function.StartByte())
 	w.state.calls = append(w.state.calls, jsDottedCall{parts: parts, startByte: start, line: w.state.lineOf(start)})
+}
+
+func (w *jsScopeWalker) addWrites(target *sitter.Node) {
+	for _, name := range jsPatternBindingNamesAt(target, w.src, 0, w.state) {
+		w.state.writes = append(w.state.writes, jsIdentifierUse{name: name, startByte: int(target.StartByte())})
+	}
+}
+
+// namedSelfCallEvidence proves only direct calls owned by this named function
+// declaration. Generic name scanners keep their self exclusions: headers,
+// constructors, callback references and nested callables cannot supply proof.
+// Known writes anywhere this binding is visible conservatively disable it;
+// exact static dependency does not claim runtime execution or value-flow proof.
+func (s *jsScanState) namedSelfCallEvidence(symbol SymbolRecord) []Evidence {
+	if !s.parsed || !s.errorFree || s.depthTruncated || symbol.sourceEndByte <= symbol.sourceStartByte {
+		return nil
+	}
+	// Most declaration headers have no actual self invocation. Narrow the
+	// already source-ordered calls first, before any file-wide binding proof.
+	start := sort.Search(len(s.bareCalls), func(i int) bool { return s.bareCalls[i].startByte >= symbol.sourceStartByte })
+	first := -1
+	for i := start; i < len(s.bareCalls) && s.bareCalls[i].startByte < symbol.sourceEndByte; i++ {
+		call := s.bareCalls[i]
+		if call.directCall && !call.dynamicScope && call.name == symbol.Name && call.ownerStart == symbol.sourceStartByte && call.ownerEnd == symbol.sourceEndByte {
+			first = i
+			break
+		}
+	}
+	if first < 0 {
+		return nil
+	}
+	var declaration *jsBindingScope
+	for i := range s.bindings {
+		binding := &s.bindings[i]
+		if binding.namedFunction && binding.Name == symbol.Name && binding.declarationStart == symbol.sourceStartByte && binding.declarationEnd == symbol.sourceEndByte {
+			if declaration != nil {
+				return nil
+			}
+			declaration = binding
+		}
+	}
+	if declaration == nil {
+		return nil
+	}
+	for _, write := range s.writes {
+		if write.name == symbol.Name && write.startByte > declaration.startByte && write.startByte < declaration.endByte && !s.selfBindingShadowed(declaration, write.startByte) {
+			return nil
+		}
+	}
+	for _, call := range s.bareCalls[first:] {
+		if call.startByte >= symbol.sourceEndByte {
+			break
+		}
+		if !call.directCall || call.dynamicScope || call.name != symbol.Name || call.ownerStart != symbol.sourceStartByte || call.ownerEnd != symbol.sourceEndByte || call.startByte <= declaration.bodyStart || s.selfBindingShadowed(declaration, call.startByte) {
+			continue
+		}
+		line := s.lineOf(call.startByte)
+		// One proven site justifies this identity edge. Do not allocate an
+		// additional evidence list proportional to repeated invocations.
+		return []Evidence{{Kind: "call_site", FilePath: symbol.FilePath, StartLine: line, EndLine: line, Detail: symbol.Name}}
+	}
+	return nil
+}
+
+func (s *jsScanState) selfBindingShadowed(declaration *jsBindingScope, position int) bool {
+	for i := range s.bindings {
+		binding := &s.bindings[i]
+		if binding == declaration || binding.Name != declaration.Name {
+			continue
+		}
+		if binding.startByte >= declaration.startByte && binding.endByte <= declaration.endByte && position > binding.startByte && position < binding.endByte {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *jsScopeWalker) addCallableArgumentIdentifiers(arguments *sitter.Node) {

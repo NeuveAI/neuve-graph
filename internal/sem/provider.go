@@ -5717,6 +5717,16 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 				}
 				for _, name := range sortedKeysOf(callNames) {
 					if name == from.Name {
+						if file.Language == "JavaScript" || file.Language == "TypeScript" {
+							if evidence := jsScan.namedSelfCallEvidence(from); len(evidence) > 0 {
+								emit(RelationRecord{
+									RecordType: "relation", FromID: from.ID, ToID: from.ID,
+									Type: "CALLS", Confidence: 0.92, Resolution: "exact", RelationScope: "file", TargetKind: "symbol",
+									Reason:   "direct call expression resolved to its named function declaration",
+									Evidence: evidence, WarningCodes: []string{},
+								})
+							}
+						}
 						continue
 					}
 					inputs := pythonCallImportBinding(name, from, file.Language, pythonBareScopes, symbolsByShortName, callImportsByName, file.Path, manifestImports, knownFiles, readContent)
