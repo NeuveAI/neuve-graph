@@ -31,6 +31,7 @@ type neighborFlags struct {
 	Profile         string
 	Relation        string
 	Selection       string
+	Summary         string
 	Direction       string
 	Depth           int
 	Limit           int
@@ -131,7 +132,8 @@ type neighborResponse struct {
 	Completeness           sem.CompletenessReport `json:"completeness"`
 	// CompletenessScope is the query-relative reading of the diagnostics above.
 	// The full lists stay untouched; this says which of them can matter here.
-	CompletenessScope completenessScope `json:"completeness_scope"`
+	CompletenessScope completenessScope        `json:"completeness_scope"`
+	Summary           *neighborFrontierSummary `json:"summary,omitempty"`
 
 	// endpointTruncated distinguishes a bounded neighbor list from the JSON-only
 	// explicit path expansion. Agent output can express the full Cartesian path
@@ -275,6 +277,15 @@ func parseNeighborFlags(args []string) (neighborFlags, error) {
 				return flags, valueErr
 			}
 			flags.Selection = item
+		case "--summary":
+			item, valueErr := value()
+			if valueErr != nil {
+				return flags, valueErr
+			}
+			if item != "frontier" {
+				return flags, errors.New("neighbors --summary must be frontier")
+			}
+			flags.Summary = item
 		case "--depth":
 			parsed, next, parseErr := searchPositiveIntFlag(args, index)
 			if parseErr != nil {
@@ -340,6 +351,9 @@ func parseNeighborFlags(args []string) (neighborFlags, error) {
 	}
 	if flags.Selection != "exact" && flags.Selection != "family" {
 		return flags, errors.New("neighbors --selection must be exact or family")
+	}
+	if flags.Summary != "" && (flags.Depth != 1 || flags.Direction == "both" || flags.Format != "json") {
+		return flags, errors.New("neighbors --summary frontier requires --depth 1, --direction in or out, and --format json")
 	}
 	return flags, nil
 }
@@ -429,6 +443,9 @@ func buildNeighborResponseFromReader(
 				Outgoing: []neighborEdge{},
 			})
 		}
+		if flags.Summary != "" {
+			response.Summary = buildNeighborFrontier(snapshot, flags, endpoints, response)
+		}
 		return response
 	}
 
@@ -507,6 +524,9 @@ func buildNeighborResponseFromReader(
 			}
 		}
 		response.Matches = append(response.Matches, entry)
+	}
+	if flags.Summary != "" {
+		response.Summary = buildNeighborFrontier(snapshot, flags, endpoints, response)
 	}
 	return response
 }

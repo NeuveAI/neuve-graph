@@ -38,6 +38,32 @@ relation type. Capabilities declare `relation_selection_modes` and
 directions and depth modes. Diagnostics and truncation describe the selected
 traversal regardless of the selection mode.
 
+Add `--summary frontier --depth 1 --direction in|out --format json` to an
+explicit neighbor request to obtain counts for its retained endpoints.
+Capabilities declare `optional_local_only_features.neighbor_frontier_summary`.
+Omitting the option leaves the neighbor payload unchanged. Other depth,
+direction, and format combinations with this option are rejected.
+
+| Summary observation | Meaning and limit |
+| --- | --- |
+| `direct.eligible_edges`, `emitted_edges`, `omitted_edges` | Selected renderable relation records before and after the direct entry cap. Eligible equals emitted plus omitted. |
+| `frontier[].counts` | Selected relation records incident to that retained endpoint in the requested direction, grouped by relation and resolution. These are not distinct downstream entities or runtime calls. |
+| `missing_endpoint_edges` | Selected records whose other endpoint is absent from the snapshot. Counted separately because its eligibility cannot be established. |
+| `external_edges` | Eligible records whose other endpoint is external, also included in the resolution bins. |
+| `returns_to_focus`, `self_edges` | Observed recurrence within those records. They can overlap and do not establish global cycle membership. |
+| `kind: unavailable` | External, inventory-only, or unclassified retained endpoints cannot supply a structural count; no zero is invented. |
+
+The summary echoes its mode, selection, selected relations, direction and depth.
+It uses the enclosing response's repository, commit, tree, profile and diagnostics,
+and applies the request's endpoint filters; `indexed_coverage` retains the snapshot
+health status. A missing or
+ambiguous focus produces `kind: unresolved_focus`. An observed summary lists
+each retained endpoint once, even when several direct records connect it.
+Second-hop endpoint identities and source are not returned. Counts come from
+the same loaded snapshot with one additional scan and no persistent store.
+Partial coverage and zero observed counts do not prove no dependencies or
+sufficient evidence. Choose any subsequent neighbor request explicitly.
+
 Cache visibility differs by command and format. JSON from `query`, `impact`,
 and `neighbors` includes cache fields. Text output from `impact` and
 `neighbors` starts with an `Index: cache-hit` or `cache-miss` header. Agent

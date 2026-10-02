@@ -689,6 +689,7 @@ func Capabilities() CapabilityReport {
 			"git_cochange_edges":         true,
 			"durable_preindex":           true,
 			"focused_neighbors":          true,
+			"neighbor_frontier_summary":  true,
 		},
 		FeaturesRequiringNetworkAccess: map[string]bool{
 			"grammar_download":  false,
