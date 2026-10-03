@@ -88,7 +88,8 @@ through the same writable namespace.
 ### What a cache entry is keyed on
 
 A search-snapshot entry is a function of: the cache format version, the
-checkout path, the repository identity (derived from the Git remote), the
+canonical Git common directory, the scan scope relative to Git's top level,
+the repository namespace, the executable's SHA256 content identity, the
 provider version, the committed `HEAD` tree hash, the profile, the parse-size
 and file-count limits, any file-subset selection, the paths **and contents** of
 `--ignore-file`/`--include-file` inputs in caller order, and the contents of
@@ -100,9 +101,19 @@ term because working-tree snapshots cannot receive persistent keys.
 over graph-shaping inputs.
 
 A provider-record entry binds the same graph-shaping inputs plus the exact
-commit and output mode. Exact commit identity is required because the cached
+commit and output mode, but retains its physical checkout-path discriminator
+and reported provider version rather than the structured cache's logical
+source and executable identity. Exact commit identity is required because the cached
 opaque NDJSON header records it; unlike a structured search snapshot, that
 stream cannot be safely restamped on a same-tree cache hit.
+
+Linked views can reuse structured entries when their validated common
+directory, scan scope, namespace and analysis inputs match. Graph validates
+the saved source binding before replacing the snapshot's serving root and
+commit in memory. Source readers therefore use the current view, even after
+the view that built the artifact has been removed. Unrelated clones and
+different scopes remain distinct. Explicit policy paths retain their physical
+identity and can intentionally prevent sharing across views.
 
 ### Working-tree queries
 
@@ -132,6 +143,11 @@ guide's queries use the working tree, so they do not reuse that entry.
 `index --report <path>` additionally writes a Markdown summary of the built
 graph for human review.
 
+`index --force` rebuilds the complete entry, advances its generation and retires
+derived selective entries. A failed write or invalidation fails the command.
+Ordinary queries treat an unusable cache or unprovable source/build identity
+as a miss and build normally.
+
 ### Observing cache state
 
 - `query` (default JSON): `stats.index_cache_hit`.
@@ -150,6 +166,10 @@ graph for human review.
 `entire graph version` confirms what is active. After an upgrade, the first
 query per repository is cold because cache entries embed the provider version.
 Old entries simply stop matching and can be deleted at leisure.
+
+`version --json` also reports `build_identity`, the lowercase SHA256 digest of
+the native executable. Structured entries bind it so separately built binaries
+reporting the same `dev` version cannot serve each other's saved extraction.
 
 Working-tree queries always rebuild. If a `--head` query rebuilds when you
 expect a hit, check in order: a changed committed tree or `.graphignore`, a

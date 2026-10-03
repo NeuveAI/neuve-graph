@@ -193,3 +193,25 @@ This closes policy, moving-HEAD, remote-identity, environment, and caller-slice 
 
 The final generations are `provider-records-v7` and `search-snapshot-v11`; earlier intermediate
 entries are retired. Working-tree snapshots are never persisted, as recorded by ADR 0004.
+
+## Addendum: structured snapshot sharing across linked views
+
+The authorized Neuve committed snapshot reuse slice on 2026-10-03 replaces the
+structured search cache's physical checkout discriminator with a validated
+canonical Git common directory and exact scan scope relative to Git's top level.
+Repository namespace and every existing analysis and captured-policy input
+remain keyed. The native executable's SHA256 content identity also joins the
+address and envelope so mutable `dev` builds remain distinct. This retires prior
+structured entries under `search-snapshot-v18`.
+
+Graph validates the source binding and executable identity before rebinding the
+saved structured header's root and commit to the active serving view. Query and
+neighbor source readers run only after that rebinding. The existing forced
+preindex transaction publishes the complete snapshot, advances its generation,
+then retires selective artifacts. Its durability failures remain visible.
+
+This supersedes the no-cross-worktree-sharing consequence for structured search
+snapshots only. Opaque provider-record caches keep their existing checkout,
+commit and reported-version contract. Explicit ignore/include paths retain
+physical path identity, so equivalent rule contents at different paths may miss.
+Working-tree bypass and the absence of per-file incrementality remain unchanged.

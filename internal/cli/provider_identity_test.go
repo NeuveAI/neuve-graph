@@ -3,7 +3,10 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"os"
 	"testing"
 )
 
@@ -18,5 +21,17 @@ func TestVersionAdvertisesParserIdentity(t *testing.T) {
 	}
 	if info["identity_revision"] != "4" {
 		t.Fatalf("identity=%v", info)
+	}
+	path, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(content)
+	if info["build_identity"] != hex.EncodeToString(digest[:]) {
+		t.Fatalf("version build identity=%q does not identify executed file", info["build_identity"])
 	}
 }

@@ -16,7 +16,192 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	sitter "github.com/smacker/go-tree-sitter"
 )
+
+type erlangSelfCallWitness struct {
+	StartLine int `json:"start_line"`
+	EndLine   int `json:"end_line"`
+}
+
+func (w erlangSelfCallWitness) contained(start, end int) bool {
+	return w.StartLine >= start && w.StartLine > 0 && w.EndLine >= w.StartLine && w.EndLine <= end
+}
+
+func erlangKnownArgsArity(args *sitter.Node, macroDependent bool) (int, bool) {
+	if !validNode(args) || args.IsMissing() || args.HasError() || macroDependent || args.ChildCount() < 2 {
+		return 0, false
+	}
+	if args.Child(0).Type() != "(" || args.Child(int(args.ChildCount())-1).Type() != ")" {
+		return 0, false
+	}
+	count := 0
+	for i := 0; i < int(args.NamedChildCount()); i++ {
+		if args.NamedChild(i).Type() != "comment" {
+			count++
+		}
+	}
+	return count, true
+}
+
+// Each scoped subtree is visited once. Macro summaries flow upward instead of
+// rescanning every nested call's arguments; anonymous callable bodies are skipped.
+func erlangSelfCallWalk(node *sitter.Node, src []byte, name string, arity, depth int) (erlangSelfCallWitness, bool, bool) {
+	if !validNode(node) || node.IsMissing() || node.Type() == "ERROR" || depth >= maxParseWalkDepth {
+		return erlangSelfCallWitness{}, false, false
+	}
+	if node.Type() == "anonymous_fun" {
+		return erlangSelfCallWitness{}, false, true
+	}
+	macro := strings.HasPrefix(node.Type(), "macro_")
+	var witness erlangSelfCallWitness
+	argsMacro := false
+	args := node.ChildByFieldName("args")
+	for i := 0; i < int(node.NamedChildCount()); i++ {
+		child := node.NamedChild(i)
+		w, m, complete := erlangSelfCallWalk(child, src, name, arity, depth+1)
+		if !complete {
+			return erlangSelfCallWitness{}, false, false
+		}
+		macro = macro || m
+		if validNode(args) && child.StartByte() == args.StartByte() && child.EndByte() == args.EndByte() {
+			argsMacro = m
+		}
+		if w.StartLine > 0 && (witness.StartLine == 0 || w.StartLine < witness.StartLine) {
+			witness = w
+		}
+	}
+	if node.Type() == "call" && name != "" {
+		expr := node.ChildByFieldName("expr")
+		parent := node.Parent()
+		if (!validNode(parent) || parent.Type() != "remote") && validNode(expr) && expr.Type() == "atom" && expr.Content(src) == name {
+			if n, known := erlangKnownArgsArity(args, argsMacro); known && n == arity {
+				w := erlangSelfCallWitness{int(node.StartPoint().Row) + 1, int(node.EndPoint().Row) + 1}
+				if witness.StartLine == 0 || w.StartLine <= witness.StartLine {
+					witness = w
+				}
+			}
+		}
+	}
+	return witness, macro, true
+}
+
+func collectErlangSelfCalls(root *sitter.Node, src []byte, entities []Entity) {
+	type owner struct {
+		name               string
+		arity, oldArity    int
+		known, conditional bool
+		forms              []*sitter.Node
+	}
+	var owners []owner
+	byName := map[string][]int{}
+	conditionalDepth := 0
+	previousFun := false
+	for i := 0; i < int(root.NamedChildCount()); i++ {
+		form := root.NamedChild(i)
+		switch form.Type() {
+		case "pp_ifdef", "pp_ifndef", "pp_if":
+			conditionalDepth++
+			previousFun = false
+			continue
+		case "pp_endif":
+			conditionalDepth--
+			if conditionalDepth < 0 {
+				return
+			}
+			previousFun = false
+			continue
+		}
+		if form.Type() != "fun_decl" {
+			previousFun = false
+			continue
+		}
+		name, oldArity := erlangFunClauseNameArity(form, src)
+		clause := firstNamedChildOfType(form, "function_clause")
+		if !validNode(clause) || name == "" {
+			return
+		}
+		args := clause.ChildByFieldName("args")
+		_, macro, complete := erlangSelfCallWalk(args, src, "", 0, 0)
+		if !complete {
+			return
+		}
+		arity, known := erlangKnownArgsArity(args, macro)
+		if previousFun && len(owners) > 0 && owners[len(owners)-1].name == name && owners[len(owners)-1].oldArity == oldArity {
+			o := &owners[len(owners)-1]
+			o.known = o.known && known && o.arity == arity
+			o.conditional = o.conditional || conditionalDepth > 0
+			o.forms = append(o.forms, form)
+		} else {
+			byName[name] = append(byName[name], len(owners))
+			owners = append(owners, owner{name, arity, oldArity, known, conditionalDepth > 0, []*sitter.Node{form}})
+		}
+		previousFun = true
+	}
+	if conditionalDepth != 0 {
+		return
+	}
+	// Counts are computed once, then each fold uses constant-time ambiguity checks.
+	type counts struct {
+		unknown int
+		arities map[int]int
+	}
+	countsByName := map[string]counts{}
+	for name, indices := range byName {
+		c := counts{arities: map[int]int{}}
+		for _, index := range indices {
+			o := owners[index]
+			if !o.known {
+				c.unknown++
+			} else {
+				c.arities[o.arity]++
+			}
+		}
+		countsByName[name] = c
+	}
+	entityByOrigin := map[int]int{}
+	for i, e := range entities {
+		if e.Kind == "function" {
+			entityByOrigin[e.sourceStartByte] = i
+		}
+	}
+	for _, o := range owners {
+		c := countsByName[o.name]
+		if !o.known || o.conditional || c.unknown != 0 || c.arities[o.arity] != 1 {
+			continue
+		}
+		index, ok := entityByOrigin[int(o.forms[0].StartByte())]
+		if !ok || entities[index].Name != o.name {
+			continue
+		}
+		var witness erlangSelfCallWitness
+		complete := true
+		for _, form := range o.forms {
+			clause := firstNamedChildOfType(form, "function_clause")
+			body := clause.ChildByFieldName("body")
+			w, _, done := erlangSelfCallWalk(body, src, o.name, o.arity, 0)
+			if !done {
+				complete = false
+				break
+			}
+			if w.StartLine > 0 && (witness.StartLine == 0 || w.StartLine < witness.StartLine) {
+				witness = w
+			}
+		}
+		if complete && witness.contained(entities[index].StartLine, entities[index].EndLine) {
+			entities[index].erlangSelfCall = witness
+		}
+	}
+}
+
+func finalizeErlangSelfCalls(entities []Entity, status ParseStatus) {
+	if status.ParseError || status.Partial || status.DepthExceeded {
+		for i := range entities {
+			entities[i].erlangSelfCall = erlangSelfCallWitness{}
+		}
+	}
+}
 
 // erlangCallSite is one call expression found in an Erlang block: a remote
 // call `Module:Name(...)`, or a local call `Name(...)` when Module is empty.
@@ -176,11 +361,15 @@ func erlangFileDefinesModule(path, module string, symbolsByShortName map[string]
 // the module named by the qualifier. Erlang identifies functions by
 // name/arity and the parser folds each arity into its own symbol, so a name
 // may match several arity symbols in the target module — each is emitted,
-// matching the conservative name-level resolution used elsewhere. Recursive
-// calls to the enclosing symbol itself are skipped; a same-name call landing
+// matching the conservative name-level resolution used elsewhere. Self calls
+// require the live parser's admitted witness; the legacy scanner skips the
+// enclosing symbol itself. A same-name call landing
 // on a sibling arity (`f(X) -> f(X, default)`) is a real edge and kept.
 func erlangCallRelations(from SymbolRecord, block string, sameFile []SymbolRecord, symbolsByShortName map[string][]SymbolRecord) []RelationRecord {
 	var relations []RelationRecord
+	if from.Language == "Erlang" && from.Kind == "function" && from.erlangSelfCall.contained(from.StartLine, from.EndLine) {
+		relations = append(relations, RelationRecord{RecordType: "relation", FromID: from.ID, ToID: from.ID, Type: "CALLS", Confidence: .92, Reason: "source-proven named body self call", RelationScope: "file", Resolution: "exact", TargetKind: "symbol", Evidence: []Evidence{{Kind: "call_site", FilePath: from.FilePath, StartLine: from.erlangSelfCall.StartLine, EndLine: from.erlangSelfCall.EndLine, Detail: from.Name}}, WarningCodes: []string{}})
+	}
 	for _, site := range erlangCallSites(block) {
 		var targets []resolvedCallTarget
 		if site.Module == "" {

@@ -382,6 +382,8 @@ type SymbolRecord struct {
 	paramTypeText       string
 	returnTypeText      string
 	signatureTypesKnown bool
+	// Only persisted privately for structured full-to-selective resolution.
+	erlangSelfCall erlangSelfCallWitness
 }
 
 type RelationRecord struct {
@@ -441,6 +443,7 @@ type ProviderSnapshot struct {
 }
 
 type ProviderSnapshotOptions struct {
+	cacheSource  *cacheSource
 	NoNetwork    bool
 	Worktree     bool
 	IgnoreFiles  []string
@@ -2082,6 +2085,7 @@ func entitySymbols(repoKey, path, language string, entities []Entity) []SymbolRe
 			Language:                language,
 			ContainerID:             containerID,
 			Local:                   entity.Local,
+			erlangSelfCall:          entity.erlangSelfCall,
 			sourceStartByte:         entity.sourceStartByte,
 			sourceEndByte:           entity.sourceEndByte,
 			bodyless:                entity.bodyless,

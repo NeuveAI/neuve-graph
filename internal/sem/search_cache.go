@@ -28,7 +28,10 @@ import (
 // unreachable inside a live version directory and defeat that cleanup rule.
 // v16 retires the diagnostic-count status in favor of source-file health.
 // v17 retires omissions of source-proven named-declaration self calls.
-const searchSnapshotCacheVersion = "search-snapshot-v17-" + IdentityRevision
+// v18 binds validated Git ownership/scope and executable bytes, and rebinds
+// cached snapshots to the active serving view before any source reads.
+// v19 retires omissions of live-parse-proven Erlang named body self calls.
+const searchSnapshotCacheVersion = "search-snapshot-v19-" + IdentityRevision
 
 type cachedSymbolByteRange struct {
 	Start int `json:"start"`
@@ -36,12 +39,16 @@ type cachedSymbolByteRange struct {
 }
 
 type cachedSearchSnapshot struct {
-	CacheVersion    string  `json:"cache_version"`
-	ProviderVersion string  `json:"provider_version"`
-	Commit          string  `json:"commit"`
-	Tree            string  `json:"tree"`
-	Profile         Profile `json:"profile"`
-	MaxParseBytes   int     `json:"max_parse_bytes"`
+	ErlangSelfCalls map[string]erlangSelfCallWitness `json:"erlang_self_calls,omitempty"`
+
+	Source          cacheSource `json:"source"`
+	BuildIdentity   string      `json:"build_identity"`
+	CacheVersion    string      `json:"cache_version"`
+	ProviderVersion string      `json:"provider_version"`
+	Commit          string      `json:"commit"`
+	Tree            string      `json:"tree"`
+	Profile         Profile     `json:"profile"`
+	MaxParseBytes   int         `json:"max_parse_bytes"`
 	// Worktree is retained for decoding and validating older in-memory fixtures.
 	// Persistent worktree caching is disabled because Git listing inputs and
 	// working-tree contents cannot be pinned to one atomic cache transaction.
@@ -127,6 +134,7 @@ func loadOrBuildSearchGraphSnapshot(
 // empty generation" from "the marker could not be read". Only the former is a
 // generation; the latter must not be compared with anything.
 type preloadedCompleteSnapshot struct {
+	key             string
 	snapshot        ProviderSnapshot
 	generation      string
 	generationKnown bool
@@ -174,6 +182,10 @@ func loadCachedCompleteSearchSnapshotBinding(
 		return preloadedCompleteSnapshot{}, false, nil
 	}
 	options = capturedOptions
+	options, err = captureSearchCacheSource(ctx, absRepo, options)
+	if err != nil {
+		return preloadedCompleteSnapshot{}, false, nil
+	}
 	commit, tree, headErr := resolveCommittedHEAD(ctx, absRepo)
 	if headErr != nil {
 		return preloadedCompleteSnapshot{}, false, nil
@@ -199,14 +211,15 @@ func loadCachedCompleteSearchSnapshotBinding(
 		return preloadedCompleteSnapshot{}, false, entryErr
 	}
 	cached, readErr := readSearchSnapshot(fullEntry)
-	if readErr != nil || !validCachedSearchSnapshot(cached, repositoryKey, providerVersion, tree, fullOptions) {
+	if readErr != nil || !validCachedSearchSnapshot(cached, repositoryKey, providerVersion, tree, fullOptions) || !validCachedSearchSource(cached, fullOptions) {
 		return preloadedCompleteSnapshot{}, false, nil
 	}
 	// The cache key is tree-only: a hit may have been built for a different
 	// commit that shares this tree. The parsed graph is exactly correct, but
 	// commit provenance must reflect the HEAD we are serving right now.
-	cached = restampCachedSearchSnapshotCommit(cached, commit)
+	cached = rebindCachedSearchSnapshot(cached, absRepo, commit)
 	return preloadedCompleteSnapshot{
+		key:             fullKey,
 		snapshot:        cached.Snapshot,
 		generation:      generation,
 		generationKnown: generationErr == nil,
@@ -253,6 +266,11 @@ func loadOrBuildSearchSnapshot(
 		return snapshot, false, buildErr
 	}
 	options = capturedOptions
+	options, err = captureSearchCacheSource(ctx, absRepo, options)
+	if err != nil {
+		snapshot, buildErr := BuildProviderSnapshotWithOptions(ctx, repo, providerVersion, options)
+		return snapshot, false, buildErr
+	}
 	commit, tree, headErr := resolveCommittedHEAD(ctx, absRepo)
 	if headErr != nil {
 		snapshot, buildErr := BuildProviderSnapshotWithOptions(ctx, repo, providerVersion, options)
@@ -312,11 +330,12 @@ func loadOrBuildSearchSnapshot(
 	}
 	if cached, err := readSearchSnapshot(entry); generationKnown && err == nil &&
 		validCachedSearchSnapshot(cached, repositoryKey, providerVersion, tree, options) &&
+		validCachedSearchSource(cached, options) &&
 		cached.DerivedFrom == derivedFrom {
 		// See loadCachedCompleteSearchSnapshot: tree-only keying means this hit
 		// may belong to a different commit that shares the tree. Re-stamp before
 		// handing it back so no caller ever reports a stale commit.
-		cached = restampCachedSearchSnapshotCommit(cached, commit)
+		cached = rebindCachedSearchSnapshot(cached, absRepo, commit)
 		return cached.Snapshot, true, nil
 	}
 	// A complete committed-tree snapshot is query independent and can serve a
@@ -358,7 +377,8 @@ func loadOrBuildSearchSnapshot(
 		// below is read AFTER the generation and can be stamped correctly, so
 		// falling through costs a decode and keeps the guarantee.
 		if generationKnown && preloadedFull != nil &&
-			preloadedFull.generationKnown && preloadedFull.generation == derivedFrom {
+			preloadedFull.generationKnown && preloadedFull.generation == derivedFrom &&
+			preloadedFull.key == completeKey {
 			if selective, ok := deriveFromFull(preloadedFull.snapshot); ok {
 				return selective, true, nil
 			}
@@ -367,8 +387,8 @@ func loadOrBuildSearchSnapshot(
 		if entryErr != nil {
 			return ProviderSnapshot{}, false, entryErr
 		}
-		if cached, readErr := readSearchSnapshot(fullEntry); readErr == nil && validCachedSearchSnapshot(cached, repositoryKey, providerVersion, tree, completeOptions) {
-			cached = restampCachedSearchSnapshotCommit(cached, commit)
+		if cached, readErr := readSearchSnapshot(fullEntry); readErr == nil && validCachedSearchSnapshot(cached, repositoryKey, providerVersion, tree, completeOptions) && validCachedSearchSource(cached, completeOptions) {
+			cached = rebindCachedSearchSnapshot(cached, absRepo, commit)
 			if selective, ok := deriveFromFull(cached.Snapshot); ok {
 				return selective, true, nil
 			}
@@ -458,6 +478,10 @@ func preindexProviderSnapshotWithPersistenceReader(
 	if err != nil {
 		return ProviderSnapshot{}, false, err
 	}
+	options, err = captureSearchCacheSource(ctx, absRepo, options)
+	if err != nil {
+		return ProviderSnapshot{}, false, fmt.Errorf("identify preindex cache source: %w", err)
+	}
 	commit, tree, err := resolveCommittedHEAD(ctx, absRepo)
 	if err != nil {
 		return ProviderSnapshot{}, false, fmt.Errorf("resolve committed HEAD for preindex: %w", err)
@@ -505,7 +529,7 @@ func preindexProviderSnapshotWithPersistenceReader(
 		return ProviderSnapshot{}, false, err
 	}
 	persisted, readErr := readPersisted(entry)
-	if options.ForceRebuild || readErr != nil || !validCachedSearchSnapshot(persisted, repositoryKey, providerVersion, tree, options) {
+	if options.ForceRebuild || readErr != nil || !validCachedSearchSnapshot(persisted, repositoryKey, providerVersion, tree, options) || !validCachedSearchSource(persisted, options) {
 		cache := newCachedSearchSnapshot(providerVersion, commit, tree, options, snapshot)
 		if err := writeSearchSnapshot(entry, cache); err != nil {
 			return ProviderSnapshot{}, false, fmt.Errorf("persist preindex snapshot: %w", err)
@@ -573,7 +597,9 @@ func newCachedSearchSnapshot(providerVersion, commit, tree string, options Provi
 }
 
 func newCachedSearchSnapshotFrom(providerVersion, commit, tree, derivedFrom string, options ProviderSnapshotOptions, snapshot ProviderSnapshot) cachedSearchSnapshot {
+	buildIdentity, _ := ExecutableBuildIdentity()
 	cache := cachedSearchSnapshot{
+		BuildIdentity:   buildIdentity,
 		DerivedFrom:     derivedFrom,
 		CacheVersion:    searchSnapshotCacheVersion,
 		ProviderVersion: providerVersion,
@@ -583,6 +609,12 @@ func newCachedSearchSnapshotFrom(providerVersion, commit, tree, derivedFrom stri
 		MaxParseBytes:   options.MaxParseBytes,
 		Worktree:        options.Worktree,
 		Snapshot:        snapshot,
+	}
+	if options.cacheSource != nil {
+		cache.Source = *options.cacheSource
+	} else if source, err := resolveCacheSource(context.Background(), snapshot.Header.RepoRoot); err == nil {
+		// Internal serialization fixtures may call the constructor directly.
+		cache.Source = source
 	}
 	for _, file := range snapshot.Files {
 		if file.Lines == 0 {
@@ -594,6 +626,12 @@ func newCachedSearchSnapshotFrom(providerVersion, commit, tree, derivedFrom stri
 		cache.FileLines[file.ID] = file.Lines
 	}
 	for _, symbol := range snapshot.Symbols {
+		if symbol.Language == "Erlang" && symbol.Kind == "function" && symbol.erlangSelfCall.contained(symbol.StartLine, symbol.EndLine) {
+			if cache.ErlangSelfCalls == nil {
+				cache.ErlangSelfCalls = map[string]erlangSelfCallWitness{}
+			}
+			cache.ErlangSelfCalls[symbol.ID] = symbol.erlangSelfCall
+		}
 		if symbol.Local {
 			cache.LocalSymbolIDs = append(cache.LocalSymbolIDs, symbol.ID)
 		}
@@ -663,6 +701,10 @@ func restoreCachedSearchInternals(cache *cachedSearchSnapshot) {
 	}
 	for index := range cache.Snapshot.Symbols {
 		symbol := &cache.Snapshot.Symbols[index]
+		symbol.erlangSelfCall = erlangSelfCallWitness{}
+		if w := cache.ErlangSelfCalls[symbol.ID]; symbol.Language == "Erlang" && symbol.Kind == "function" && w.contained(symbol.StartLine, symbol.EndLine) {
+			symbol.erlangSelfCall = w
+		}
 		symbol.Local = localIDs[symbol.ID]
 		symbol.bodyless = bodylessIDs[symbol.ID]
 		symbol.objectLiteral = objectLiteralIDs[symbol.ID]
@@ -934,10 +976,29 @@ func searchSnapshotKeyForSchema(schemaVersion, absRepo, repositoryKey, providerV
 	if err != nil {
 		return "", err
 	}
+	buildIdentity, err := ExecutableBuildIdentity()
+	if err != nil {
+		return "", err
+	}
 	hash := sha256.New()
 	writeCacheKeyString(hash, "cache-version", searchSnapshotCacheVersion)
 	writeCacheKeyString(hash, "schema-version", schemaVersion)
-	writeCacheKeyString(hash, "repository-path", absRepo)
+	// Production loaders capture a validated Git binding before keying. Direct
+	// key-only callers can still test policy inputs outside Git, isolated by the
+	// physical directory rather than an unvalidated shared namespace.
+	source := options.cacheSource
+	if source == nil {
+		if resolved, err := resolveCacheSource(context.Background(), absRepo); err == nil {
+			source = &resolved
+		}
+	}
+	if source != nil {
+		writeCacheKeyString(hash, "repository-common-dir", source.CommonDir)
+		writeCacheKeyString(hash, "repository-scope", source.Scope)
+	} else {
+		writeCacheKeyString(hash, "repository-path", absRepo)
+	}
+	writeCacheKeyString(hash, "build-identity", buildIdentity)
 	writeCacheKeyString(hash, "repository-key", repositoryKey)
 	writeCacheKeyString(hash, "provider-version", providerVersion)
 	writeCacheKeyString(hash, "tree", tree)
@@ -982,7 +1043,7 @@ func searchSnapshotKeyForSchema(schemaVersion, absRepo, repositoryKey, providerV
 // validCachedSearchSnapshot deliberately does not compare commit: the cache is
 // tree-keyed, so an entry built at a different commit sharing this tree is a
 // valid hit. Callers that serve a cached snapshot re-stamp the commit to the
-// serving HEAD via restampCachedSearchSnapshotCommit before returning it;
+// serving HEAD via rebindCachedSearchSnapshot before returning it;
 // other call sites (e.g. PreindexProviderSnapshot's persisted-entry check)
 // use this function only as a persistence check and never hand the cached
 // value back to a caller, so they have no re-stamping to do.
@@ -1009,7 +1070,7 @@ func validCachedSearchSnapshot(cache cachedSearchSnapshot, repositoryKey, provid
 		cache.Snapshot.Header.Profile == string(options.Profile)
 }
 
-// restampCachedSearchSnapshotCommit rewrites a loaded cache entry's commit
+// rebindCachedSearchSnapshot rewrites a validated loaded cache entry's root and commit
 // provenance to the commit we are actually serving. Tree determines the
 // parsed graph, so a same-tree cache hit from a different (empty, amended,
 // rebased) commit is exactly correct content-wise; commit is provenance
@@ -1019,9 +1080,10 @@ func validCachedSearchSnapshot(cache cachedSearchSnapshot, repositoryKey, provid
 // git treeish for content reads (see openSearchContentReader in search.go),
 // so serving a stale commit here could point those reads at a dangling or
 // wrong revision.
-func restampCachedSearchSnapshotCommit(cache cachedSearchSnapshot, commit string) cachedSearchSnapshot {
+func rebindCachedSearchSnapshot(cache cachedSearchSnapshot, repo, commit string) cachedSearchSnapshot {
 	cache.Commit = commit
 	cache.Snapshot.Header.Commit = commit
+	cache.Snapshot.Header.RepoRoot = repo
 	return cache
 }
 

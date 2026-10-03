@@ -66,6 +66,8 @@ type Entity struct {
 	paramTypeText       string
 	returnTypeText      string
 	signatureTypesKnown bool
+	// Admitted during the live Erlang parse; absent from the public schema.
+	erlangSelfCall erlangSelfCallWitness
 }
 
 type EntityChange struct {

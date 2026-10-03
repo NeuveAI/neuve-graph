@@ -111,7 +111,12 @@ func Run(ctx context.Context, opts Options, args []string) error {
 		return runInitAgents(opts, args[1:])
 	case "version", "--version", "-v":
 		if len(args) > 1 && args[1] == "--json" {
+			buildIdentity, err := sem.ExecutableBuildIdentity()
+			if err != nil {
+				return fmt.Errorf("identify executable build: %w", err)
+			}
 			return json.NewEncoder(termsafe.NewJSONWriter(opts.Stdout)).Encode(map[string]string{
+				"build_identity":    buildIdentity,
 				"provider":          sem.ProviderName,
 				"version":           opts.Version,
 				"identity_revision": sem.IdentityRevision,

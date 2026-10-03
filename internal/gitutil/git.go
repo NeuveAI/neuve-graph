@@ -79,6 +79,27 @@ func RepoPrefix(ctx context.Context, cwd string) (string, error) {
 	return strings.TrimSuffix(out, "\n"), nil
 }
 
+// CommonDir returns the canonical directory Git uses for shared objects and
+// refs. Linked worktrees report the same directory; unrelated clones do not.
+func CommonDir(ctx context.Context, cwd string) (string, error) {
+	out, err := run(ctx, cwd, "git", "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	path, err := filepath.EvalSymlinks(strings.TrimSuffix(out, "\n"))
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", errors.New("Git common directory is not a directory")
+	}
+	return path, nil
+}
+
 // RepoCommandRoot returns a cwd from which tree-root-relative paths keep the
 // same coordinates. A worktree subdirectory is normalized to Git's top level;
 // a worktree root or bare repository already has an empty prefix and is kept as

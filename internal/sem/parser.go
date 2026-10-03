@@ -387,6 +387,9 @@ func (TreeSitterParser) ParseWithStatus(path, content string) ([]Entity, string,
 
 	var entities []Entity
 	depthExceeded := walkEntities(root, entitySrc, spec.language, "", &entities)
+	if spec.language == "Erlang" {
+		collectErlangSelfCalls(root, entitySrc, entities)
+	}
 	if spec.language == "C++" {
 		entities = appendMissingEntities(entities, cPlusPlusTypeAliasEntities(content)...)
 	}
@@ -490,6 +493,9 @@ func (TreeSitterParser) ParseWithStatus(path, content string) ([]Entity, string,
 		}
 	case root.HasError():
 		status = ParseStatus{ParseError: true, Code: "E_PARSE_ERROR", Detail: parseErrorDetailWithLineOffset(root, entitySrc, entityLineOffset)}
+	}
+	if spec.language == "Erlang" {
+		finalizeErlangSelfCalls(entities, status)
 	}
 	return entities, spec.language, status
 }

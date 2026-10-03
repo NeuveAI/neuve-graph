@@ -24,7 +24,8 @@ import (
 // retires entries written before truncated records counted what they dropped.
 // v11 retires streams carrying the old diagnostic-count completeness status.
 // v12 retires omissions of source-proven named-declaration self calls.
-const providerRecordsCacheVersion = "provider-records-v12-" + IdentityRevision
+// v13 retires omissions of live-parse-proven Erlang named body self calls.
+const providerRecordsCacheVersion = "provider-records-v13-" + IdentityRevision
 
 // cachedProviderRecords is the on-disk envelope for a cached record stream. The
 // key alone is authoritative (sha256 over version+commit+tree+mode+profile+
