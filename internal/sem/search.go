@@ -83,6 +83,7 @@ type SearchOptions struct {
 	MaxParseBytes     int
 	CacheDir          string
 	DisableCache      bool
+	PreparedOnly      bool
 	MaxIndexedFiles   int
 	IndexAllFiles     bool
 	MaxContextBytes   int
@@ -363,8 +364,9 @@ type SearchContainedCallableDrop struct {
 }
 
 type SearchStats struct {
-	QueryConstraintsTruncated bool `json:"query_constraints_truncated,omitempty"`
-	FilesScanned              int  `json:"files_scanned"`
+	AnalysisScope             string `json:"analysis_scope,omitempty"`
+	QueryConstraintsTruncated bool   `json:"query_constraints_truncated,omitempty"`
+	FilesScanned              int    `json:"files_scanned"`
 	// RepoIgnoredFiles counts the files Git listed that the REPOSITORY's own
 	// ignore rules removed from this corpus before FilesScanned was taken. It sits
 	// beside FilesScanned deliberately: read alone, "scanned N files" invites the
@@ -1132,6 +1134,9 @@ func SearchRepository(ctx context.Context, repo, providerVersion, query string, 
 		return SearchResponse{}, err
 	}
 	response.FormatVersion = SearchFormatVersion
+	if options.PreparedOnly {
+		response.Stats.AnalysisScope = "complete-prepared"
+	}
 	return response, nil
 }
 
@@ -1180,10 +1185,16 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 		MaxParseBytes: options.MaxParseBytes,
 		Profile:       options.Profile,
 	}
+	if options.PreparedOnly && (options.Worktree || options.DisableCache || options.CacheDir == "") {
+		return SearchResponse{}, &PreparedSnapshotError{Reason: "incompatible-read-options"}
+	}
 	searchCacheDisabled := options.DisableCache
 	if !options.Worktree && !searchCacheDisabled && options.CacheDir != "" {
 		capturedOptions, captureErr := CaptureProviderCachePolicy(repo, baseSnapshotOptions)
 		if captureErr != nil {
+			if options.PreparedOnly {
+				return SearchResponse{}, &PreparedSnapshotError{Reason: "policy-unavailable", Cause: captureErr}
+			}
 			// Capturing retains every policy input at once and therefore has a
 			// stricter aggregate bound than sequential matcher construction. An
 			// optional cache must not reject a search that the uncached path can
@@ -1209,7 +1220,14 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 	var preindexBinding preloadedCompleteSnapshot
 	preindexCacheHit := false
 	indexStarted := time.Now()
-	if !options.Worktree && !searchCacheDisabled {
+	if options.PreparedOnly {
+		var err error
+		preindexedSnapshot, err = LoadPreparedProviderSnapshot(ctx, repo, providerVersion, baseSnapshotOptions, options.CacheDir)
+		if err != nil {
+			return SearchResponse{}, err
+		}
+		preindexCacheHit = true
+	} else if !options.Worktree && !searchCacheDisabled {
 		var err error
 		preindexBinding, preindexCacheHit, err = loadCachedCompleteSearchSnapshotBinding(
 			ctx, repo, providerVersion, baseSnapshotOptions, options.CacheDir,
@@ -1234,7 +1252,10 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 	// when a remote URL changes). Symbols embed that identity, so a complete
 	// preindex loaded before preselection is usable only when both identities
 	// still match. Treat drift as a miss and rebuild from the captured source.
-	if preindexCacheHit && !searchSnapshotMatchesSelection(preindexedSnapshot, selection) {
+	if preindexCacheHit && (!searchSnapshotMatchesSelection(preindexedSnapshot, selection) || (options.PreparedOnly && preindexedSnapshot.Header.Commit != selection.commit)) {
+		if options.PreparedOnly {
+			return SearchResponse{}, &PreparedSnapshotError{Reason: "source-changed-during-read"}
+		}
 		preindexedSnapshot = ProviderSnapshot{}
 		preindexBinding = preloadedCompleteSnapshot{}
 		preindexCacheHit = false
@@ -1367,7 +1388,7 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 	snapshotOptions.OnlyFiles = onlyFiles
 	snapshot, cacheHit := preindexedSnapshot, preindexCacheHit
 	indexLatency := preindexLoadLatency
-	if cacheHit && len(snapshotOptions.OnlyFiles) > 0 {
+	if !options.PreparedOnly && cacheHit && len(snapshotOptions.OnlyFiles) > 0 {
 		// The preindexed complete snapshot never serves a selective query
 		// directly: the loader reuses the per-query selective cache entry, only
 		// derives from the complete snapshot on a miss, and falls back to an
@@ -1380,7 +1401,7 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 			return SearchResponse{}, err
 		}
 		indexLatency += time.Since(indexStarted)
-	} else if !cacheHit {
+	} else if !options.PreparedOnly && !cacheHit {
 		indexStarted = time.Now()
 		snapshot, cacheHit, err = loadOrBuildSearchGraphSnapshot(ctx, repo, providerVersion, snapshotOptions, options.CacheDir, searchCacheDisabled)
 		if err != nil {
@@ -2567,7 +2588,11 @@ func preselectSearchFiles(
 			// honouring MaxIndexedFiles (see above), so the bridge gets its own
 			// budget rather than a remainder of a cap this path does not apply.
 			files := committedSearchFiles(source.paths, matches, q)
-			selection.files = bridgeRegistrationHandlerFiles(ctx, source, files, searchRegistrationBridgeMaxHandlers)
+			if options.PreparedOnly {
+				selection.files = bridgePreparedRegistrationHandlerFiles(preindexedSnapshot, source, files, searchRegistrationBridgeMaxHandlers)
+			} else {
+				selection.files = bridgeRegistrationHandlerFiles(ctx, source, files, searchRegistrationBridgeMaxHandlers)
+			}
 			selection.sparseFiles = append([]string(nil), selection.files...)
 			selection.preselectionBackend = "git-tree-grep"
 			selection.preselectionPasses = 1
@@ -2947,7 +2972,11 @@ func preselectSearchFiles(
 	}
 	// An explicit MaxIndexedFiles is an exact compatibility limit, so the bridge
 	// spends only what preselection left unused.
-	selection.files = bridgeRegistrationHandlerFiles(ctx, source, selection.files, options.MaxIndexedFiles-len(selection.files))
+	if options.PreparedOnly {
+		selection.files = bridgePreparedRegistrationHandlerFiles(preindexedSnapshot, source, selection.files, options.MaxIndexedFiles-len(selection.files))
+	} else {
+		selection.files = bridgeRegistrationHandlerFiles(ctx, source, selection.files, options.MaxIndexedFiles-len(selection.files))
+	}
 	selection.filesContentRead += contentReads
 	selection.preselectionBackend = "go-content"
 	selection.preselectionFilesExamined = len(scanPaths)
@@ -2979,6 +3008,62 @@ const (
 	searchRegistrationBridgeMaxParses   = 64
 	searchRegistrationBridgeScanLimit   = 50_000
 )
+
+func bridgePreparedRegistrationHandlerFiles(snapshot ProviderSnapshot, source sourceContext, selected []string, budget int) []string {
+	budget = minInt(budget, searchRegistrationBridgeMaxHandlers)
+	if budget <= 0 || len(selected) == 0 || len(selected) >= len(source.paths) {
+		return selected
+	}
+	aliases := collectRegistrationAliases(selected, source.read)
+	if len(aliases) == 0 {
+		return selected
+	}
+	definitions := make(map[string]map[string]bool)
+	for _, symbol := range snapshot.Symbols {
+		if symbol.Kind != "function" || symbol.Local {
+			continue
+		}
+		if definitions[symbol.FilePath] == nil {
+			definitions[symbol.FilePath] = map[string]bool{}
+		}
+		definitions[symbol.FilePath][symbol.Name] = true
+	}
+	chosen, placed := map[string]bool{}, map[string]bool{}
+	for _, file := range selected {
+		chosen[file] = true
+		for handler := range aliases {
+			if definitions[file][handler] {
+				placed[handler] = true
+			}
+		}
+	}
+	var handlers []string
+	for handler := range aliases {
+		if !placed[handler] {
+			handlers = append(handlers, handler)
+		}
+	}
+	sort.Strings(handlers)
+	if len(handlers) > budget {
+		handlers = handlers[:budget]
+	}
+	files := append([]string(nil), selected...)
+	for _, file := range source.paths {
+		if chosen[file] {
+			continue
+		}
+		for _, handler := range handlers {
+			if !placed[handler] && definitions[file][handler] {
+				placed[handler] = true
+				if !chosen[file] {
+					chosen[file] = true
+					files = append(files, file)
+				}
+			}
+		}
+	}
+	return files
+}
 
 // bridgeRegistrationHandlerFiles adds the source files that define the handlers
 // named by the command tables already in the selection.

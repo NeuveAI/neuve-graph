@@ -176,6 +176,7 @@ var commandDocs = []commandDoc{
 			{name: "--index-all-files", desc: "Widen cold-search parsing to every file"},
 			{name: "--cache-dir", arg: "path", desc: "Override the committed-tree cache directory"},
 			{name: "--no-cache", desc: "Disable the committed-tree cache"},
+			{name: "--prepared-only", desc: "Require --head and an existing exact complete prepared snapshot; never parse, resolve or rebuild"},
 		},
 		examples: []string{
 			`entire graph query --repo . --format text "token refresh returns 401"`,
@@ -199,6 +200,7 @@ var commandDocs = []commandDoc{
 			{name: "--relation", arg: "CALLS", def: "CALLS", desc: "Relation family to follow"},
 			{name: "--selection", arg: "exact|family", def: "family", desc: "Exact relation type or declared family (CALLS includes CONSTRUCTS)"},
 			{name: "--summary", arg: "frontier", desc: "Count retained endpoints' selected edges (depth 1, direction in/out, JSON only)"},
+			{name: "--prepared-only", desc: "Require --head and an existing exact complete prepared snapshot; never parse, resolve or rebuild"},
 			{name: "--direction", arg: "both|in|out", def: "both", desc: "in = callers, out = callees"},
 			{name: "--depth", arg: "1|2", def: "1", desc: "Hops to traverse"},
 			{name: "--limit", arg: "n", def: "20", desc: "Max neighbors per direction"},

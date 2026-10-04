@@ -67,6 +67,7 @@ type searchFlags struct {
 	IncludeFiles          []string
 	CacheDir              string
 	DisableCache          bool
+	PreparedOnly          bool
 	MaxIndexedFiles       int
 	IndexAllFiles         bool
 	MaxContextBytes       int
@@ -135,7 +136,7 @@ func runSearch(ctx context.Context, opts Options, args []string) error {
 	// ZERO-TOLL DELIVERY. When the caller has already computed this session's payload and handed it
 	// to the agent inside context the session pays for anyway, this call must cost nothing: echo
 	// those bytes and return, before the profile, the repo, the cache and the index are touched.
-	if path := strings.TrimSpace(opts.Env.PresearchPath); path != "" {
+	if path := strings.TrimSpace(opts.Env.PresearchPath); path != "" && !flags.PreparedOnly {
 		return echoPresearchPayload(opts.Stdout, path)
 	}
 	// The echo is decided before any INDEXING work: a replayed payload must not pay for an index
@@ -147,9 +148,12 @@ func runSearch(ctx context.Context, opts Options, args []string) error {
 	// session-stale, like the later query itself: this cap replays the first answer verbatim rather
 	// than promising a fresh ranking. The checks stay deliberately ahead of the index build. See
 	// searchSessionScope and sem.SearchReplayPolicy.
-	session, err := newSearchSession(opts.Env, opts.Stderr)
-	if err != nil {
-		return err
+	var session *searchSession
+	if !flags.PreparedOnly {
+		session, err = newSearchSession(opts.Env, opts.Stderr)
+		if err != nil {
+			return err
+		}
 	}
 	profile, err := parseProfile(flags.Profile)
 	if err != nil {
@@ -286,6 +290,7 @@ func runSearch(ctx context.Context, opts Options, args []string) error {
 		MaxRegionsPerFile: flags.MaxRegionsPerFile,
 		CacheDir:          cacheDir,
 		DisableCache:      flags.DisableCache,
+		PreparedOnly:      flags.PreparedOnly,
 		MaxIndexedFiles:   flags.MaxIndexedFiles,
 		IndexAllFiles:     flags.IndexAllFiles,
 		MaxContextBytes:   flags.MaxContextBytes,
@@ -2583,6 +2588,8 @@ func parseSearchFlags(args []string) (searchFlags, []string, error) {
 			flags.CacheDir, i = value, next
 		case "--no-cache":
 			flags.DisableCache = true
+		case "--prepared-only":
+			flags.PreparedOnly = true
 		case "--max-indexed-files":
 			value, next, err := searchPositiveIntFlag(args, i)
 			if err != nil {
@@ -2639,6 +2646,9 @@ func parseSearchFlags(args []string) (searchFlags, []string, error) {
 				rest = append(rest, args[i])
 			}
 		}
+	}
+	if flags.PreparedOnly && (flags.Worktree || flags.DisableCache) {
+		return flags, nil, errors.New("--prepared-only requires --head and caching")
 	}
 	return flags, rest, nil
 }

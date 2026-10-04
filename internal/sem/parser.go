@@ -240,6 +240,7 @@ func (TreeSitterParser) Parse(path, content string) ([]Entity, string) {
 }
 
 func (TreeSitterParser) ParseWithStatus(path, content string) ([]Entity, string, ParseStatus) {
+	structuralWorkCounts.extractions.Add(1)
 	spec, ok := languageForContent(path, content)
 	if !ok {
 		return nil, "", ParseStatus{}
@@ -357,6 +358,7 @@ func (TreeSitterParser) ParseWithStatus(path, content string) ([]Entity, string,
 	parser := sitter.NewParser()
 	defer parser.Close()
 	parser.SetLanguage(spec.grammar)
+	structuralWorkCounts.parses.Add(1)
 	tree, err := parser.ParseCtx(ctx, nil, parseSrc)
 	if tree != nil {
 		defer tree.Close()
@@ -754,6 +756,7 @@ func unwrapRustItemWrapperMacros(src []byte) bool {
 	parser := sitter.NewParser()
 	defer parser.Close()
 	parser.SetLanguage(rust.GetLanguage())
+	structuralWorkCounts.parses.Add(1)
 	tree, err := parser.ParseCtx(ctx, nil, src)
 	if tree != nil {
 		defer tree.Close()
@@ -9966,6 +9969,7 @@ func cxxAggregateMembers(node *sitter.Node, src []byte) bool {
 	parser.SetLanguage(c.GetLanguage())
 	ctx, cancel := context.WithTimeout(context.Background(), treeSitterParseTimeout)
 	defer cancel()
+	structuralWorkCounts.parses.Add(1)
 	tree, err := parser.ParseCtx(ctx, nil, append([]byte(node.Content(src)), ';', '\n'))
 	if tree == nil {
 		return true

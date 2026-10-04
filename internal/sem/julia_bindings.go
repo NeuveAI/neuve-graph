@@ -22,6 +22,7 @@ func juliaLocalBindingNames(source string) map[string]struct{} {
 	parser.SetLanguage(spec.grammar)
 	ctx, cancel := context.WithTimeout(context.Background(), treeSitterParseTimeout)
 	defer cancel()
+	structuralWorkCounts.parses.Add(1)
 	tree, err := parser.ParseCtx(ctx, nil, sourceBytes)
 	if tree != nil {
 		defer tree.Close()

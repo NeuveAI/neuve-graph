@@ -152,6 +152,7 @@ func buildJSScanState(grammar *sitter.Language, parseSrc []byte, content string)
 	parser := sitter.NewParser()
 	defer parser.Close()
 	parser.SetLanguage(grammar)
+	structuralWorkCounts.parses.Add(1)
 	tree, err := parser.ParseCtx(ctx, nil, parseSrc)
 	if tree != nil {
 		defer tree.Close()

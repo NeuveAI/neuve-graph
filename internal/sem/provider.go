@@ -691,6 +691,7 @@ func Capabilities() CapabilityReport {
 			"near_clone_detection":       true,
 			"git_cochange_edges":         true,
 			"durable_preindex":           true,
+			"prepared_snapshot_query":    true,
 			"focused_neighbors":          true,
 			"neighbor_frontier_summary":  true,
 		},
@@ -977,6 +978,7 @@ func evidenceLimit(spec profileSpec) string {
 // trailing summary), sorting relations for stable output. Intended for tests
 // and small repositories; large repositories should consume StreamSnapshot.
 func BuildProviderSnapshotWithOptions(ctx context.Context, repo, providerVersion string, options ProviderSnapshotOptions) (ProviderSnapshot, error) {
+	structuralWorkCounts.builds.Add(1)
 	var snapshot ProviderSnapshot
 	var summary SnapshotSummary
 	err := StreamSnapshot(ctx, repo, providerVersion, options, func(record any) error {
@@ -3959,7 +3961,22 @@ func resolveCallTargetsWithRawImport(name string, from SymbolRecord, candidates,
 	return targets
 }
 
+func jsParameterShadowsCall(from SymbolRecord, name string) bool {
+	if (from.Language != "JavaScript" && from.Language != "TypeScript") || !from.parameterNamesKnown {
+		return false
+	}
+	for _, parameter := range from.parameterNames {
+		if parameter == name {
+			return true
+		}
+	}
+	return false
+}
+
 func resolveCallTargetsWithRawImportDeclarations(name string, from SymbolRecord, candidates, rawCandidates []SymbolRecord, rawImportModuleSets [][]string, sameFile []SymbolRecord, importsByName map[string][]string, allowMethodTargets bool) []resolvedCallTarget {
+	if jsParameterShadowsCall(from, name) {
+		return nil
+	}
 	// candidates arrive ALREADY filtered to languages the caller can name: every
 	// call site wraps its symbolsByShortName lookup in sharedTypeCandidates,
 	// because that is where the referring symbol is known. Re-filtering here
@@ -4750,6 +4767,7 @@ type httpCallEntry struct {
 var errRelationScanStopped = errors.New("relation scan stopped")
 
 func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, recordsByFile map[string][]SymbolRecord, readContent contentReader, precomputedImports map[string][]string, spec profileSpec, workers int, shouldStop func() bool, emit func(RelationRecord), recordFailure func(PartialFailure)) {
+	structuralWorkCounts.resolutions.Add(1)
 	if spec.name == ProfileSyntaxOnly {
 		emitStructuralRelations(repoKey, files, recordsByFile, emit)
 		return
@@ -5720,6 +5738,9 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 					}
 				}
 				for _, name := range sortedKeysOf(callNames) {
+					if jsParameterShadowsCall(from, name) {
+						continue
+					}
 					if name == from.Name {
 						if file.Language == "JavaScript" || file.Language == "TypeScript" {
 							if evidence := jsScan.namedSelfCallEvidence(from); len(evidence) > 0 {

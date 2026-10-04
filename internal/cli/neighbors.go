@@ -40,6 +40,7 @@ type neighborFlags struct {
 	IncludeFile     []string
 	CacheDir        string
 	DisableCache    bool
+	PreparedOnly    bool
 	InternalOnly    bool
 	ExcludeTests    bool
 	MaxContextBytes int
@@ -90,6 +91,7 @@ type neighborFocus struct {
 }
 
 type neighborResponse struct {
+	AnalysisScope     string   `json:"analysis_scope,omitempty"`
 	FormatVersion     int      `json:"format_version"`
 	RepoRoot          string   `json:"repo_root"`
 	Commit            string   `json:"commit,omitempty"`
@@ -157,13 +159,21 @@ func runNeighbors(ctx context.Context, opts Options, args []string) error {
 	cacheDir := resolveCacheDir(flags.CacheDir, opts.Env.PluginDataDir)
 	totalStarted := time.Now()
 	indexStarted := totalStarted
-	snapshot, cacheHit, err := sem.LoadOrBuildProviderSnapshot(ctx, repo, opts.Version, sem.ProviderSnapshotOptions{
+	snapshotOptions := sem.ProviderSnapshotOptions{
 		NoNetwork:    true,
 		Worktree:     flags.Worktree,
 		IgnoreFiles:  flags.IgnoreFile,
 		IncludeFiles: flags.IncludeFile,
 		Profile:      profile,
-	}, cacheDir, flags.DisableCache)
+	}
+	var snapshot sem.ProviderSnapshot
+	cacheHit := false
+	if flags.PreparedOnly {
+		snapshot, err = sem.LoadPreparedProviderSnapshot(ctx, repo, opts.Version, snapshotOptions, cacheDir)
+		cacheHit = err == nil
+	} else {
+		snapshot, cacheHit, err = sem.LoadOrBuildProviderSnapshot(ctx, repo, opts.Version, snapshotOptions, cacheDir, flags.DisableCache)
+	}
 	if err != nil {
 		return err
 	}
@@ -176,7 +186,13 @@ func runNeighbors(ctx context.Context, opts Options, args []string) error {
 	if closeSource != nil {
 		defer closeSource()
 	}
+	if flags.PreparedOnly && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	response := buildNeighborResponseFromReader(snapshot, flags, readSource)
+	if flags.PreparedOnly {
+		response.AnalysisScope = "complete-prepared"
+	}
 	// Call-site resolution reads the caller's source from the same snapshot-bound
 	// reader as fuzzy and ambiguous bodies. It runs after the graph query and is
 	// bounded by the answer's size.
@@ -187,6 +203,9 @@ func runNeighbors(ctx context.Context, opts Options, args []string) error {
 	response.IndexLatencyMS = indexLatency.Milliseconds()
 	response.QueryLatencyMS = queryLatency.Milliseconds()
 	response.TotalLatencyMS = time.Since(totalStarted).Milliseconds()
+	if flags.PreparedOnly && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	switch flags.Format {
 	case "json":
 		encoder := json.NewEncoder(termsafe.NewJSONWriter(opts.Stdout))
@@ -329,6 +348,8 @@ func parseNeighborFlags(args []string) (neighborFlags, error) {
 			flags.CacheDir = item
 		case "--no-cache":
 			flags.DisableCache = true
+		case "--prepared-only":
+			flags.PreparedOnly = true
 		case "--internal-only":
 			flags.InternalOnly = true
 		case "--exclude-tests":
@@ -336,6 +357,9 @@ func parseNeighborFlags(args []string) (neighborFlags, error) {
 		default:
 			return flags, fmt.Errorf("neighbors received unexpected argument %q", arg)
 		}
+	}
+	if flags.PreparedOnly && (flags.Worktree || flags.DisableCache) {
+		return flags, errors.New("--prepared-only requires --head and caching")
 	}
 	if strings.TrimSpace(flags.Symbol) == "" {
 		return flags, errors.New("neighbors requires --symbol")

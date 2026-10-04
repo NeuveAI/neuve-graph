@@ -30,6 +30,7 @@ func newPythonBareImportScopes(content string, symbols []SymbolRecord) *pythonBa
 	parser.SetLanguage(python.GetLanguage())
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
+	structuralWorkCounts.parses.Add(1)
 	tree, err := parser.ParseCtx(ctx, nil, []byte(content))
 	if err != nil || tree == nil {
 		return state
