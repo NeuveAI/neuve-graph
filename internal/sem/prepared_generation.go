@@ -45,6 +45,52 @@ type cachedPreparedGeneration struct {
 	Snapshot cachedSearchSnapshot `json:"snapshot"`
 }
 
+// This binding qualifies one retained generation before bytes are admitted.
+// Preparation and read-only retrieval use the same identity and codec.
+type preparedGenerationBinding struct {
+	repo, repositoryKey, providerVersion, commit, tree, policy, id string
+	options                                                        ProviderSnapshotOptions
+	entry                                                          cacheEntry
+}
+
+func bindPreparedGeneration(repo, repositoryKey, providerVersion, commit, tree string, options ProviderSnapshotOptions, cacheDir string) (preparedGenerationBinding, error) {
+	policy, err := preparationPolicy(repo, repositoryKey, providerVersion, options)
+	if err != nil {
+		return preparedGenerationBinding{}, &IncrementalPreparationError{Reason: "policy-unavailable", Cause: err}
+	}
+	id := preparedGenerationKey(policy, commit, tree)
+	entry, err := newCacheEntry(cacheDir, "generations", preparedGenerationVersion, id)
+	if err != nil {
+		return preparedGenerationBinding{}, &IncrementalPreparationError{Reason: "artifact-unavailable", Cause: err}
+	}
+	return preparedGenerationBinding{repo: repo, repositoryKey: repositoryKey, providerVersion: providerVersion, commit: commit, tree: tree, policy: policy, id: id, options: options, entry: entry}, nil
+}
+
+func (binding preparedGenerationBinding) read(ctx context.Context) (PreparedGeneration, error) {
+	if err := ctx.Err(); err != nil {
+		return PreparedGeneration{}, err
+	}
+	file, err := binding.entry.open()
+	if err != nil {
+		return PreparedGeneration{}, err
+	}
+	var cached cachedPreparedGeneration
+	err = decodeCompressedJSON(ctx, file, &cached)
+	_ = file.Close()
+	if ctx.Err() != nil {
+		return PreparedGeneration{}, ctx.Err()
+	}
+	digest, digestErr := generationDigest(cached.Snapshot)
+	if err != nil || digestErr != nil || cached.ID != binding.id || cached.Policy != binding.policy || cached.Digest != digest || cached.Snapshot.Commit != binding.commit || cached.Snapshot.Snapshot.Header.Commit != binding.commit || !validCachedSearchSnapshot(cached.Snapshot, binding.repositoryKey, binding.providerVersion, binding.tree, binding.options) || !validCachedSearchSource(cached.Snapshot, binding.options) {
+		return PreparedGeneration{}, &IncrementalPreparationError{Reason: "invalid-generation", Cause: err}
+	}
+	restoreCachedSearchInternals(&cached.Snapshot)
+	if err := ctx.Err(); err != nil {
+		return PreparedGeneration{}, err
+	}
+	return PreparedGeneration{ID: binding.id, Commit: binding.commit, Tree: binding.tree, Profile: binding.options.Profile, Snapshot: rebindCachedSearchSnapshot(cached.Snapshot, binding.repo, binding.commit).Snapshot, AlreadyPublished: true}, nil
+}
+
 type cacheContextReader struct {
 	ctx    context.Context
 	reader io.Reader
@@ -128,10 +174,9 @@ func generationDigest(snapshot cachedSearchSnapshot) (string, error) {
 	return hex.EncodeToString(digest[:]), nil
 }
 
-// PrepareIncrementalProviderSnapshot is the internal Stage B1 extraction
-// operation. It admits every provider language at syntax-only depth. Full
-// relation/binding generations remain unsupported; no CLI advertises this
-// operation as production readiness. The target must be an exact Git commit,
+// PrepareIncrementalProviderSnapshot admits every provider language at
+// syntax-only depth for explicit incremental indexing. Full relation/binding
+// generations remain unsupported. The target must be an exact Git commit,
 // so a queued job never silently prepares the newer HEAD.
 func PrepareIncrementalProviderSnapshot(ctx context.Context, repo, target, providerVersion string, options ProviderSnapshotOptions, cacheDir string) (PreparedGeneration, error) {
 	fail := func(reason string, cause error) (PreparedGeneration, error) {
@@ -166,32 +211,13 @@ func PrepareIncrementalProviderSnapshot(ctx context.Context, repo, target, provi
 		return fail("source-unavailable", err)
 	}
 	repositoryKey := repoKey(ctx, absRepo)
-	policy, err := preparationPolicy(absRepo, repositoryKey, providerVersion, options)
+	binding, err := bindPreparedGeneration(absRepo, repositoryKey, providerVersion, commit, tree, options, cacheDir)
 	if err != nil {
-		return fail("policy-unavailable", err)
+		return PreparedGeneration{}, err
 	}
-	id := preparedGenerationKey(policy, commit, tree)
-	entry, err := newCacheEntry(cacheDir, "generations", preparedGenerationVersion, id)
-	if err != nil {
-		return fail("artifact-unavailable", err)
-	}
+	policy, id, entry := binding.policy, binding.id, binding.entry
 	readRetained := func() (PreparedGeneration, error) {
-		file, err := entry.open()
-		if err != nil {
-			return PreparedGeneration{}, err
-		}
-		var cached cachedPreparedGeneration
-		err = decodeCompressedJSON(ctx, file, &cached)
-		_ = file.Close()
-		digest, digestErr := generationDigest(cached.Snapshot)
-		if err != nil || digestErr != nil || cached.ID != id || cached.Policy != policy || cached.Digest != digest || cached.Snapshot.Commit != commit || cached.Snapshot.Snapshot.Header.Commit != commit || !validCachedSearchSnapshot(cached.Snapshot, repositoryKey, providerVersion, tree, options) || !validCachedSearchSource(cached.Snapshot, options) {
-			return fail("invalid-generation", err)
-		}
-		restoreCachedSearchInternals(&cached.Snapshot)
-		if err := ctx.Err(); err != nil {
-			return fail("cancelled", err)
-		}
-		return PreparedGeneration{ID: id, Commit: commit, Tree: tree, Profile: options.Profile, Snapshot: rebindCachedSearchSnapshot(cached.Snapshot, absRepo, commit).Snapshot, AlreadyPublished: true}, nil
+		return binding.read(ctx)
 	}
 	retained, readErr := readRetained()
 	if readErr == nil {
@@ -244,6 +270,9 @@ func PrepareIncrementalProviderSnapshot(ctx context.Context, repo, target, provi
 			if err != nil {
 				return fail("publication-unconfirmed", err)
 			}
+			// The retained artifact is the winner's; the completed path-work
+			// receipt belongs to this invocation, including a losing publisher.
+			retained.Extraction = cache.stats()
 			return retained, nil
 		}
 		return fail("publication-failed", err)

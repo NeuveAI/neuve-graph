@@ -223,6 +223,15 @@ func (entry cacheEntry) open() (*os.File, error) {
 	// confinement and caller-selected cache-root links retain their semantics.
 	file, err := openRootBoundedRegularFile(root, entry.relative)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// A missing symlink target is not an absent artifact name. Do not
+			// propagate that target's ErrNotExist as compatibility admission.
+			if _, namedErr := root.Lstat(entry.relative); namedErr == nil {
+				return nil, fmt.Errorf("cache artifact %q is present but cannot be opened: %v", entry.relative, err)
+			} else if !errors.Is(namedErr, fs.ErrNotExist) {
+				return nil, namedErr
+			}
+		}
 		return nil, err
 	}
 	info, err := file.Stat()

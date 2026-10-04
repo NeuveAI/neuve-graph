@@ -19,6 +19,8 @@ type indexFlags struct {
 	Format       string
 	IgnoreFiles  []string
 	IncludeFiles []string
+	Incremental  bool
+	Commit       string
 	// Report is where to write the human-readable GRAPH_REPORT.md rendering of the
 	// snapshot this run built or loaded. Empty writes no report. It rides on index
 	// rather than on a command of its own because index is already the command that
@@ -30,19 +32,31 @@ type indexFlags struct {
 }
 
 type indexResponse struct {
-	FormatVersion   int                    `json:"format_version"`
-	Provider        string                 `json:"provider"`
-	ProviderVersion string                 `json:"provider_version"`
-	RepoRoot        string                 `json:"repo_root"`
-	Commit          string                 `json:"commit"`
-	Tree            string                 `json:"tree"`
-	Profile         string                 `json:"profile"`
-	IndexCacheHit   bool                   `json:"index_cache_hit"`
-	IndexLatencyMS  int64                  `json:"index_latency_ms"`
-	Counts          sem.ProviderStats      `json:"counts"`
-	Warnings        []sem.ProviderWarning  `json:"warnings"`
-	PartialFailures []sem.PartialFailure   `json:"partial_failures"`
-	Completeness    sem.CompletenessReport `json:"completeness"`
+	FormatVersion          int                             `json:"format_version"`
+	Provider               string                          `json:"provider"`
+	ProviderVersion        string                          `json:"provider_version"`
+	RepoRoot               string                          `json:"repo_root"`
+	Commit                 string                          `json:"commit"`
+	Tree                   string                          `json:"tree"`
+	Profile                string                          `json:"profile"`
+	IndexCacheHit          bool                            `json:"index_cache_hit"`
+	IndexLatencyMS         int64                           `json:"index_latency_ms"`
+	Counts                 sem.ProviderStats               `json:"counts"`
+	Warnings               []sem.ProviderWarning           `json:"warnings"`
+	PartialFailures        []sem.PartialFailure            `json:"partial_failures"`
+	Completeness           sem.CompletenessReport          `json:"completeness"`
+	IncrementalPreparation *incrementalPreparationResponse `json:"incremental_preparation,omitempty"`
+}
+
+type incrementalPreparationResponse struct {
+	GenerationID                   string   `json:"generation_id"`
+	ExtractedFiles                 int      `json:"extracted_files"`
+	ReusedFiles                    int      `json:"reused_files"`
+	UncacheableFiles               int      `json:"uncacheable_files"`
+	SupportedRelationTypes         []string `json:"supported_relation_types"`
+	RelationshipResolution         string   `json:"relationship_resolution"`
+	UnchangedContentIdentification string   `json:"unchanged_content_identification"`
+	SourceEnumeration              string   `json:"source_enumeration"`
 }
 
 func runIndex(ctx context.Context, opts Options, args []string) error {
@@ -84,6 +98,13 @@ func runIndexCommand(ctx context.Context, opts Options, args []string, health bo
 	if err != nil {
 		return err
 	}
+	if flags.Incremental {
+		if health || profile != sem.ProfileSyntaxOnly || flags.Commit == "" || flags.Force {
+			return errors.New("incremental index requires --profile syntax-only and --commit with an exact commit OID; --force and health are unsupported")
+		}
+	} else if flags.Commit != "" {
+		return errors.New("index --commit requires --incremental --profile syntax-only")
+	}
 	repo, err := resolveRepo(ctx, opts.Env, flags.Repo)
 	if err != nil {
 		return err
@@ -121,7 +142,22 @@ func runIndexCommand(ctx context.Context, opts Options, args []string, health bo
 		}
 	}
 	started := time.Now()
-	snapshot, cacheHit, err := sem.PreindexProviderSnapshot(ctx, repo, opts.Version, snapOptions, cacheDir)
+	var snapshot sem.ProviderSnapshot
+	var cacheHit bool
+	var preparation *incrementalPreparationResponse
+	if flags.Incremental {
+		var generation sem.PreparedGeneration
+		generation, err = sem.PrepareIncrementalProviderSnapshot(ctx, repo, flags.Commit, opts.Version, snapOptions, cacheDir)
+		if err == nil {
+			snapshot, cacheHit = generation.Snapshot, generation.AlreadyPublished
+			preparation = &incrementalPreparationResponse{
+				GenerationID: generation.ID, ExtractedFiles: len(generation.Extraction.ExtractedPaths), ReusedFiles: len(generation.Extraction.ReusedPaths), UncacheableFiles: len(generation.Extraction.UncacheablePaths),
+				SupportedRelationTypes: snapshot.Header.RelationSet, RelationshipResolution: snapshot.Header.ProfileLimits.CallResolution, UnchangedContentIdentification: "sha256-content-read", SourceEnumeration: "target-tree",
+			}
+		}
+	} else {
+		snapshot, cacheHit, err = sem.PreindexProviderSnapshot(ctx, repo, opts.Version, snapOptions, cacheDir)
+	}
 	if bar != nil {
 		bar.clear()
 	}
@@ -137,19 +173,20 @@ func runIndexCommand(ctx context.Context, opts Options, args []string, health bo
 		partialFailures = []sem.PartialFailure{}
 	}
 	response := indexResponse{
-		FormatVersion:   1,
-		Provider:        sem.ProviderName,
-		ProviderVersion: opts.Version,
-		RepoRoot:        snapshot.Header.RepoRoot,
-		Commit:          snapshot.Header.Commit,
-		Tree:            snapshot.Header.Tree,
-		Profile:         snapshot.Header.Profile,
-		IndexCacheHit:   cacheHit,
-		IndexLatencyMS:  time.Since(started).Milliseconds(),
-		Counts:          snapshot.Header.Stats,
-		Warnings:        warnings,
-		PartialFailures: partialFailures,
-		Completeness:    snapshot.Header.Completeness,
+		FormatVersion:          1,
+		Provider:               sem.ProviderName,
+		ProviderVersion:        opts.Version,
+		RepoRoot:               snapshot.Header.RepoRoot,
+		Commit:                 snapshot.Header.Commit,
+		Tree:                   snapshot.Header.Tree,
+		Profile:                snapshot.Header.Profile,
+		IndexCacheHit:          cacheHit,
+		IndexLatencyMS:         time.Since(started).Milliseconds(),
+		Counts:                 snapshot.Header.Stats,
+		Warnings:               warnings,
+		PartialFailures:        partialFailures,
+		Completeness:           snapshot.Header.Completeness,
+		IncrementalPreparation: preparation,
 	}
 	if health {
 		return writeHealth(opts.Stdout, response, outputText, flags.Force)
@@ -195,6 +232,11 @@ func writeIndexText(w io.Writer, r indexResponse, reportPath string) error {
 		fmt.Fprintf(w, "  cache hit — reused in %s\n", time.Duration(r.IndexLatencyMS)*time.Millisecond)
 	} else {
 		fmt.Fprintf(w, "  built in %s\n", time.Duration(r.IndexLatencyMS)*time.Millisecond)
+	}
+	if preparation := r.IncrementalPreparation; preparation != nil {
+		fmt.Fprintf(w, "  syntax generation %s\n", preparation.GenerationID)
+		fmt.Fprintf(w, "  extracted %d files, reused %d file facts; only DEFINES/CONTAINS, no binding resolution\n", preparation.ExtractedFiles, preparation.ReusedFiles)
+		fmt.Fprintln(w, "  preparation lists the target tree and reads unchanged contents for identity; retained retries skip that preparation")
 	}
 
 	c := r.Counts
@@ -295,10 +337,19 @@ func parseIndexFlags(args []string) (indexFlags, []string, error) {
 			flags.Format, index = value, next
 		case "--force":
 			flags.Force = true
+		case "--incremental":
+			flags.Incremental = true
+		case "--commit":
+			value, next, err := searchFlagValue(args, index)
+			if err != nil {
+				return flags, nil, err
+			}
+			flags.Commit, index = value, next
 		case "--head", "--no-network":
-			// Indexing is always local-only and always targets committed HEAD.
+			// Ordinary indexing targets HEAD; incremental indexing requires
+			// an exact committed target. Both modes are local-only.
 		case "--worktree":
-			return flags, nil, errors.New("index is HEAD-only; --worktree is not supported")
+			return flags, nil, errors.New("index requires committed source; --worktree is not supported")
 		default:
 			rest = append(rest, args[index])
 		}

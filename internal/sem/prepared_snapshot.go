@@ -77,6 +77,24 @@ func LoadPreparedProviderSnapshot(ctx context.Context, repo, providerVersion str
 		return fail("source-unavailable", err)
 	}
 	repositoryKey := repoKey(ctx, absRepo)
+	if options.Profile == ProfileSyntaxOnly {
+		binding, err := bindPreparedGeneration(absRepo, repositoryKey, providerVersion, commit, tree, options, cacheDir)
+		if err != nil {
+			return fail("policy-unavailable", err)
+		}
+		generation, err := binding.read(ctx)
+		if err == nil {
+			return generation.Snapshot, nil
+		}
+		if ctx.Err() != nil {
+			return ProviderSnapshot{}, ctx.Err()
+		}
+		// Only absence permits reading the compatible legacy syntax cache.
+		// A present invalid generation cannot be masked or repaired by a query.
+		if !errors.Is(err, fs.ErrNotExist) {
+			return fail("invalid-artifact", err)
+		}
+	}
 	key, err := searchSnapshotKey(absRepo, repositoryKey, providerVersion, tree, options)
 	if err != nil {
 		return fail("policy-unavailable", err)

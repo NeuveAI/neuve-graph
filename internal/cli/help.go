@@ -114,13 +114,16 @@ var commandDocs = []commandDoc{
 		name:    "index",
 		group:   groupSetup,
 		summary: "Build/warm a committed-tree cache variant for matching queries",
-		usage:   []string{"entire graph index --repo . [--head] [--force] [--profile syntax-only|fast|full] [--cache-dir path] [--report GRAPH_REPORT.md] [--format text|json|auto]"},
+		usage:   []string{"entire graph index --repo . [--head] [--force] [--profile syntax-only|fast|full] [--cache-dir path] [--report GRAPH_REPORT.md] [--format text|json|auto]", "entire graph index --repo . --incremental --commit <exact-commit-OID> --profile syntax-only [--cache-dir path] [--format text|json|auto]"},
 		long: "Prebuilds a durable, complete committed-tree snapshot. Later --head searches/neighbors can reuse it when caching is enabled and they resolve the same cache directory, profile, and ordered ignore/include inputs, with unchanged input-file contents and .graphignore. index defaults to full while query defaults to fast, so a default index does not warm a default query --head. Re-running index refreshes that cache variant: an unchanged tree hits, while a changed tree rebuilds. Pass --force to rebuild and overwrite the entry even when the tree is unchanged.\n\n" +
+			"--incremental requires --commit with an exact lowercase commit OID and --profile syntax-only. It reuses qualified per-path extraction facts and publishes one immutable exact-revision generation. Only DEFINES and CONTAINS are prepared; there is no call/binding resolution. New preparations still list the target tree and read unchanged contents for identity. An exact retained retry does no structural work. --force, worktree and health are unsupported for this mode. Matching query/neighbors --head --prepared-only --profile syntax-only reads the generation without preparing or repairing it. Full/fast profiles never consume it.\n\n" +
 			"At a terminal it draws a live progress bar on stderr (only when it actually builds — a cache hit returns instantly) and prints a readable summary; piped or with --format json it emits the schema-versioned JSON summary that agents and CI consume. --report writes a human-readable GRAPH_REPORT.md rendered from the snapshot, so the same tree always renders the same bytes. The cache defaults to the platform per-user cache dir (macOS ~/Library/Caches/entire-graph; XDG_CACHE_HOME or ~/.cache elsewhere); --cache-dir and ENTIRE_PLUGIN_DATA_DIR override it.\n\n" +
 			"A repo-root .graphignore (gitignore syntax) is honored by every graph command, on top of .gitignore. Use it for tracked-but-vendored/generated sources — e.g. tree-sitter parser.c blobs — that otherwise surface as E_FILE_TOO_LARGE/E_PARSE_ERROR partial failures and a \"degraded\" completeness. Oversized/minified skips also no longer count toward \"degraded\" on their own.",
 		flags: []flagDoc{
 			{name: "--repo", arg: "path", desc: "Repository to index (default: current repo)"},
-			{name: "--head", desc: "Accepted for symmetry with the query commands; index is always HEAD-only, so this is a no-op"},
+			{name: "--head", desc: "Accepted for symmetry; ordinary index targets HEAD, incremental mode requires an explicit commit"},
+			{name: "--incremental", desc: "Prepare an immutable syntax-only generation using per-path extraction reuse"},
+			{name: "--commit", arg: "OID", desc: "Exact lowercase commit identity; required and only accepted with --incremental"},
 			{name: "--force", desc: "Rebuild from scratch and overwrite the cache even if the tree is unchanged"},
 			{name: "--profile", arg: "syntax-only|fast|full", def: "full", desc: "Parsing depth; full favors call-graph correctness"},
 			{name: "--cache-dir", arg: "path", desc: "Override the committed-tree cache directory"},

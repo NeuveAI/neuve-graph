@@ -1,6 +1,7 @@
 package sem
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,6 +84,46 @@ func TestCacheEntryReadRejectsDirectoryArtifact(t *testing.T) {
 			}
 			if err == nil || !strings.Contains(err.Error(), "not a regular file") {
 				t.Fatalf("directory artifact error=%v", err)
+			}
+		})
+	}
+}
+
+func TestCacheEntryReadDistinguishesDanglingEntryFromAbsence(t *testing.T) {
+	for _, family := range []string{"extractions", "generations"} {
+		t.Run(family, func(t *testing.T) {
+			entry, err := newCacheEntry(t.TempDir(), family, "v1", strings.Repeat("e", 64))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := entry.write("regular-control", map[string]string{"value": "retained"}); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(entry.root, entry.relative)
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("missing-retained-artifact.json.gz", path); err != nil {
+				t.Fatal(err)
+			}
+			file, err := entry.open()
+			if file != nil {
+				_ = file.Close()
+				t.Fatal("dangling artifact produced a readable handle")
+			}
+			if err == nil || errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("present dangling artifact classified as absence: %v", err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			file, err = entry.open()
+			if file != nil {
+				_ = file.Close()
+				t.Fatal("absent artifact produced a readable handle")
+			}
+			if !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("genuine absence no longer classified as missing: %v", err)
 			}
 		})
 	}

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 )
@@ -143,6 +144,62 @@ func TestIncrementalConcurrentPreparationPublishesOneImmutableGeneration(t *test
 		t.Fatalf("ready generation count=%d err=%v", len(files), err)
 	}
 	requireIncrementalFreshEquality(t, repo, retained)
+}
+
+func TestIncrementalConcurrentPublicationRetainsInvocationWork(t *testing.T) {
+	repo, cache := incrementalFixture(t), t.TempDir()
+	commit := incrementalHead(t, repo)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var enterOnce, releaseOnce sync.Once
+	releasePreparation := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releasePreparation()
+	options := ProviderSnapshotOptions{Profile: ProfileSyntaxOnly, Progress: func(ProgressEvent) {
+		enterOnce.Do(func() { close(entered); <-release })
+	}}
+	type result struct {
+		generation PreparedGeneration
+		err        error
+	}
+	finished := make(chan result, 1)
+	go func() {
+		generation, err := PrepareIncrementalProviderSnapshot(t.Context(), repo, commit, "test", options, cache)
+		finished <- result{generation, err}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first publisher did not reach preparation after observing absence")
+	}
+	winner := prepareIncremental(t, repo, commit, cache)
+	if len(winner.Extraction.ExtractedPaths) != 6 {
+		t.Fatalf("winner extraction positive control=%v", winner.Extraction)
+	}
+	before := StructuralWorkSnapshot()
+	releasePreparation()
+	var loser result
+	select {
+	case loser = <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("prepared publisher did not finish after release")
+	}
+	if loser.err != nil {
+		t.Fatal(loser.err)
+	}
+	if !loser.generation.AlreadyPublished || loser.generation.ID != winner.ID || !reflect.DeepEqual(loser.generation.Snapshot, winner.Snapshot) {
+		t.Fatal("publication loser did not validate and retain the immutable winner")
+	}
+	if len(loser.generation.Extraction.ReusedPaths) != 6 || len(loser.generation.Extraction.ExtractedPaths) != 0 || len(loser.generation.Extraction.UncacheablePaths) != 0 {
+		t.Fatalf("publication loser discarded completed path work: %v", loser.generation.Extraction)
+	}
+	after := StructuralWorkSnapshot()
+	if after.Parses != before.Parses || after.Extractions != before.Extractions || after.Builds != before.Builds || after.Resolutions != before.Resolutions {
+		t.Fatalf("loser work interval does not establish reuse: %v -> %v", before, after)
+	}
+	before = after
+	retry := prepareIncremental(t, repo, commit, cache)
+	if !retry.AlreadyPublished || len(retry.Extraction.ReusedPaths) != 0 || len(retry.Extraction.ExtractedPaths) != 0 || StructuralWorkSnapshot() != before {
+		t.Fatal("immediate-ready retry acquired someone else's invocation work")
+	}
 }
 
 func TestIncrementalCrashHelperProcess(t *testing.T) {

@@ -1,6 +1,6 @@
 # Incremental syntax extraction prototype
 
-Status: internal Stage B1 library and bounded native proof. Not exposed through a command or advertised capability. Git ingestion and full semantic generations remain pending.
+Status: Stage B1 provider library and bounded native proof. The later [explicit syntax-generation preparation/read integration](0007-explicit-syntax-generation-preparation.md) exposes only the qualified syntax profile. Git ingestion and full semantic generations remain pending.
 
 ## Ownership and admission
 
@@ -15,7 +15,7 @@ The provider owns parsing and the metadata that later relationship resolution co
 | Publish readiness | Existing confined cache writer | Publish one complete generation artifact with no replacement, qualified by exact commit and tree |
 | Retry | Generation loader | Read and validate the same immutable artifact; never rebuild a corrupt published value |
 
-Syntax-only supports every language already admitted by the provider, with the same omissions and partial-failure reporting. It produces `DEFINES` and `CONTAINS`, not resolved call graphs. It is not sufficient for production TypeScript/full review-context retrieval. No prepared query silently invokes this operation, and its generation family does not replace the prepared-query search cache.
+Syntax-only supports every language already admitted by the provider, with the same omissions and partial-failure reporting. It produces `DEFINES` and `CONTAINS`, not resolved call graphs. It is not sufficient for production TypeScript/full review-context retrieval. No prepared query silently invokes this operation. The later integration reads qualified syntax generations directly without publishing them as full search-cache artifacts.
 
 ## Reuse and invalidation
 

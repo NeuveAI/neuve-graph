@@ -432,6 +432,7 @@ type CapabilityReport struct {
 	UnsupportedButDetectedLanguages []string            `json:"unsupported_but_detected_language_hints"`
 	OptionalLocalOnlyFeatures       map[string]bool     `json:"optional_local_only_features"`
 	FeaturesRequiringNetworkAccess  map[string]bool     `json:"features_requiring_network_access"`
+	IncrementalPreparationProfiles  []string            `json:"incremental_preparation_profiles"`
 }
 
 type ProviderSnapshot struct {
@@ -682,20 +683,22 @@ func Capabilities() CapabilityReport {
 		RelationFamilies:                RelationFamilies(),
 		RelationSupportByLanguage:       relationSupportByLanguage(),
 		RelationSupportByProfile:        relationSupportByProfile(),
+		IncrementalPreparationProfiles:  []string{"syntax-only"},
 		HeuristicRelationTypes:          []string{"HANDLES_ROUTE", "HTTP_CALLS", "EMITS", "LISTENS_ON", "HANDLES_TOOL", "SIMILAR_TO", "TESTS"},
 		OptionalLocalOnlyFeatures: map[string]bool{
-			"stable_symbol_ids":          true,
-			"semantic_diff":              true,
-			"ndjson_snapshot":            true,
-			"compact_snapshot_ndjson_v1": true,
-			"scip_snapshot_experimental": true,
-			"hybrid_source_search":       true,
-			"near_clone_detection":       true,
-			"git_cochange_edges":         true,
-			"durable_preindex":           true,
-			"prepared_snapshot_query":    true,
-			"focused_neighbors":          true,
-			"neighbor_frontier_summary":  true,
+			"stable_symbol_ids":              true,
+			"semantic_diff":                  true,
+			"ndjson_snapshot":                true,
+			"compact_snapshot_ndjson_v1":     true,
+			"scip_snapshot_experimental":     true,
+			"hybrid_source_search":           true,
+			"near_clone_detection":           true,
+			"git_cochange_edges":             true,
+			"durable_preindex":               true,
+			"prepared_snapshot_query":        true,
+			"incremental_syntax_preparation": true,
+			"focused_neighbors":              true,
+			"neighbor_frontier_summary":      true,
 		},
 		FeaturesRequiringNetworkAccess: map[string]bool{
 			"grammar_download":  false,

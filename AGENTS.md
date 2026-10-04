@@ -151,6 +151,13 @@ neither a default `query --head` nor the default working-tree agent path.
 Match the whole variant: unchanged keyed inputs and tree produce a hit, while
 a changed tree or changed input selects or builds another entry.
 
+Explicit incremental syntax preparation uses `index --incremental --commit
+<exact-commit-OID> --profile syntax-only`. Matching syntax-only prepared queries
+read the qualified immutable generation without rebuilding. Its relationship
+coverage is only `DEFINES`/`CONTAINS`; full and fast do not consume it. New
+preparation still lists the tree and reads unchanged content for identity.
+See [the qualified syntax preparation contract](docs/adr/0007-explicit-syntax-generation-preparation.md).
+
 ### 🧭 capabilities / version — *feature-detect*
 ```sh
 entire graph capabilities --json    # semantic vs inventory-only languages, relation types, features
