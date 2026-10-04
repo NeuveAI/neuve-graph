@@ -50,6 +50,10 @@ func TestPreparedNeighborsCommandMatchesFreshWithoutStructuralWork(t *testing.T)
 		if actual.AnalysisScope != "complete-prepared" || !actual.IndexCacheHit {
 			t.Fatalf("missing prepared qualification: %s", &preparedOut)
 		}
+		if actual.PreparedRead == nil || actual.PreparedRead.ArtifactFamily != "search-snapshot" || actual.PreparedRead.GenerationID != "" || len(actual.PreparedRead.PolicyID) != 64 || actual.PreparedRead.ExternalPolicyOrigin != "serving-directory-captured" {
+			t.Fatal("prepared neighbors lost legacy artifact-family qualification")
+		}
+		actual.PreparedRead = nil
 		fresh.IndexCacheHit, fresh.IndexCacheDisabled = false, false
 		actual.IndexCacheHit, actual.IndexCacheDisabled = false, false
 		fresh.IndexLatencyMS, fresh.QueryLatencyMS, fresh.TotalLatencyMS = 0, 0, 0

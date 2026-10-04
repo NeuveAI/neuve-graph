@@ -84,6 +84,7 @@ type SearchOptions struct {
 	CacheDir          string
 	DisableCache      bool
 	PreparedOnly      bool
+	PreparedCommit    string
 	MaxIndexedFiles   int
 	IndexAllFiles     bool
 	MaxContextBytes   int
@@ -520,12 +521,13 @@ type SearchResponse struct {
 	// format_version and the record/snapshot surfaces emit schema_version, but a
 	// consumer parsing search JSON had nothing to tell one payload shape from the
 	// next.
-	FormatVersion int    `json:"format_version"`
-	Query         string `json:"query"`
-	RepoRoot      string `json:"repo_root"`
-	Commit        string `json:"commit,omitempty"`
-	Tree          string `json:"tree,omitempty"`
-	Profile       string `json:"profile"`
+	FormatVersion int                  `json:"format_version"`
+	Query         string               `json:"query"`
+	RepoRoot      string               `json:"repo_root"`
+	Commit        string               `json:"commit,omitempty"`
+	Tree          string               `json:"tree,omitempty"`
+	Profile       string               `json:"profile"`
+	PreparedRead  *PreparedReadReceipt `json:"prepared_read,omitempty"`
 	// Results starts with the retained TopK-selected base primary ranking plus
 	// any explicitly requested primary enrichment (for example CalleeHop), then
 	// up to four `related` locators and one final `covering-test`. Supplements may
@@ -1178,14 +1180,15 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 	sparseQuery := buildSparseSearchQueryExpanded(query, q)
 	searchStarted := time.Now()
 	baseSnapshotOptions := ProviderSnapshotOptions{
-		NoNetwork:     true,
-		Worktree:      options.Worktree,
-		IgnoreFiles:   options.IgnoreFiles,
-		IncludeFiles:  options.IncludeFiles,
-		MaxParseBytes: options.MaxParseBytes,
-		Profile:       options.Profile,
+		PreparedCommit: options.PreparedCommit,
+		NoNetwork:      true,
+		Worktree:       options.Worktree,
+		IgnoreFiles:    options.IgnoreFiles,
+		IncludeFiles:   options.IncludeFiles,
+		MaxParseBytes:  options.MaxParseBytes,
+		Profile:        options.Profile,
 	}
-	if options.PreparedOnly && (options.Worktree || options.DisableCache || options.CacheDir == "") {
+	if (options.PreparedCommit != "" && !options.PreparedOnly) || (options.PreparedOnly && (options.Worktree || options.DisableCache || options.CacheDir == "")) {
 		return SearchResponse{}, &PreparedSnapshotError{Reason: "incompatible-read-options"}
 	}
 	searchCacheDisabled := options.DisableCache
@@ -1213,6 +1216,7 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 		}
 	}
 	var preindexedSnapshot ProviderSnapshot
+	var preparedReceipt *PreparedReadReceipt
 	// preindexBinding keeps the generation this complete snapshot was read under
 	// beside the snapshot itself. Deriving a selective view from it later is only
 	// sound while that generation is still current, and this is the only place
@@ -1222,10 +1226,13 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 	indexStarted := time.Now()
 	if options.PreparedOnly {
 		var err error
-		preindexedSnapshot, err = LoadPreparedProviderSnapshot(ctx, repo, providerVersion, baseSnapshotOptions, options.CacheDir)
+		var prepared PreparedProviderRead
+		prepared, err = ReadPreparedProviderSnapshot(ctx, repo, providerVersion, baseSnapshotOptions, options.CacheDir)
 		if err != nil {
 			return SearchResponse{}, err
 		}
+		preindexedSnapshot, preparedReceipt = prepared.Snapshot, &prepared.Receipt
+		baseSnapshotOptions = prepared.options
 		preindexCacheHit = true
 	} else if !options.Worktree && !searchCacheDisabled {
 		var err error
@@ -1337,6 +1344,7 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 			symbolsConsidered = len(cachedSnapshot.Symbols)
 		}
 		return SearchResponse{
+			PreparedRead:          preparedReceipt,
 			Query:                 query,
 			RepoRoot:              repoRoot,
 			Commit:                commit,
@@ -2095,6 +2103,7 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 		partialFailures = []PartialFailure{}
 	}
 	return SearchResponse{
+		PreparedRead:          preparedReceipt,
 		Query:                 query,
 		RepoRoot:              snapshot.Header.RepoRoot,
 		Commit:                snapshot.Header.Commit,

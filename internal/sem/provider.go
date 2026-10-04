@@ -444,13 +444,17 @@ type ProviderSnapshot struct {
 }
 
 type ProviderSnapshotOptions struct {
-	committedTarget string
-	extractionReuse *providerExtractionCache
-	cacheSource     *cacheSource
-	NoNetwork       bool
-	Worktree        bool
-	IgnoreFiles     []string
-	IncludeFiles    []string
+	// PreparedCommit is an exact commit selector for retained reads only.
+	// Ordinary builders cannot use it to prepare or silently rebuild a source.
+	PreparedCommit     string
+	preparedReadTarget *preparedReadTarget
+	committedTarget    string
+	extractionReuse    *providerExtractionCache
+	cacheSource        *cacheSource
+	NoNetwork          bool
+	Worktree           bool
+	IgnoreFiles        []string
+	IncludeFiles       []string
 	// OnlyFiles restricts parsing to these exact repository-relative paths.
 	// Empty means all discovered files. It is intended for query-time selective
 	// indexing; ignore and vendored-file rules still apply first.
@@ -696,6 +700,7 @@ func Capabilities() CapabilityReport {
 			"git_cochange_edges":             true,
 			"durable_preindex":               true,
 			"prepared_snapshot_query":        true,
+			"exact_commit_prepared_read":     true,
 			"incremental_syntax_preparation": true,
 			"focused_neighbors":              true,
 			"neighbor_frontier_summary":      true,
@@ -984,6 +989,9 @@ func evidenceLimit(spec profileSpec) string {
 // trailing summary), sorting relations for stable output. Intended for tests
 // and small repositories; large repositories should consume StreamSnapshot.
 func BuildProviderSnapshotWithOptions(ctx context.Context, repo, providerVersion string, options ProviderSnapshotOptions) (ProviderSnapshot, error) {
+	if options.PreparedCommit != "" {
+		return ProviderSnapshot{}, &PreparedSnapshotError{Reason: "incompatible-read-options"}
+	}
 	structuralWorkCounts.builds.Add(1)
 	var snapshot ProviderSnapshot
 	var summary SnapshotSummary
@@ -1253,6 +1261,9 @@ func appendFailureClause(existing, incoming string) string {
 // relation dedup key set; it does not scale with held relation records or held
 // file contents.
 func StreamSnapshot(ctx context.Context, repo, providerVersion string, options ProviderSnapshotOptions, emit func(record any) error) error {
+	if options.PreparedCommit != "" {
+		return &PreparedSnapshotError{Reason: "incompatible-read-options"}
+	}
 	return streamSnapshotWithWorkerCount(ctx, repo, providerVersion, options, defaultProviderWorkerCount(), emit)
 }
 
@@ -1846,6 +1857,12 @@ type SnapshotSummary struct {
 // prepareSource resolves repository identity, lists the source files, and
 // builds a per-file content reader without loading any content.
 func prepareSource(ctx context.Context, repo string, options ProviderSnapshotOptions) (sourceContext, error) {
+	if err := ctx.Err(); err != nil {
+		return sourceContext{}, err
+	}
+	if options.PreparedCommit != "" && options.preparedReadTarget == nil {
+		return sourceContext{}, &PreparedSnapshotError{Reason: "incompatible-read-options"}
+	}
 	absRepo, err := filepath.Abs(repo)
 	if err != nil {
 		return sourceContext{}, err
@@ -1857,13 +1874,28 @@ func prepareSource(ctx context.Context, repo string, options ProviderSnapshotOpt
 	ctx, metadataSafe := newGitMetadataValidation(ctx, absRepo)
 	if metadataSafe {
 		key = repoKey(ctx, absRepo)
-		if options.committedTarget == "" {
+		if options.preparedReadTarget != nil {
+			current, sourceErr := resolveCacheSource(ctx, absRepo)
+			if err := ctx.Err(); err != nil {
+				return sourceContext{}, err
+			}
+			if sourceErr != nil || options.cacheSource == nil || current != *options.cacheSource {
+				return sourceContext{}, &PreparedSnapshotError{Reason: "source-changed-during-read", Cause: sourceErr}
+			}
+			commit, tree = options.preparedReadTarget.commit, options.preparedReadTarget.tree
+		} else if options.committedTarget == "" {
 			commit, tree, headErr = resolveCommittedHEAD(ctx, absRepo)
 		} else {
 			commit, tree, headErr = resolvePreparedTarget(ctx, absRepo, options.committedTarget)
 		}
 	} else {
 		headErr = gitMetadataRefusalError(absRepo)
+	}
+	if options.preparedReadTarget != nil && (headErr != nil || options.Worktree) {
+		if err := ctx.Err(); err != nil {
+			return sourceContext{}, err
+		}
+		return sourceContext{}, &PreparedSnapshotError{Reason: "source-changed-during-read", Cause: headErr}
 	}
 	if options.committedTarget != "" && (headErr != nil || options.Worktree) {
 		if headErr == nil {

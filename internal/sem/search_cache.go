@@ -253,6 +253,9 @@ func loadOrBuildSearchSnapshot(
 	disableCache bool,
 	preloadedFull *preloadedCompleteSnapshot,
 ) (ProviderSnapshot, bool, error) {
+	if options.PreparedCommit != "" {
+		return ProviderSnapshot{}, false, &PreparedSnapshotError{Reason: "incompatible-read-options"}
+	}
 	if options.Profile == "" {
 		options.Profile = ProfileFull
 	}
@@ -471,6 +474,9 @@ func preindexProviderSnapshotWithPersistenceReader(
 	cacheDir string,
 	readPersisted func(cacheEntry) (cachedSearchSnapshot, error),
 ) (ProviderSnapshot, bool, error) {
+	if options.PreparedCommit != "" {
+		return ProviderSnapshot{}, false, &PreparedSnapshotError{Reason: "incompatible-read-options"}
+	}
 	if options.Worktree {
 		return ProviderSnapshot{}, false, errors.New("preindex requires a committed HEAD snapshot")
 	}

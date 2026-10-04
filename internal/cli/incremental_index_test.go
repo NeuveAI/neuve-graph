@@ -119,6 +119,10 @@ func TestIncrementalIndexCommandAndPreparedSyntaxQueries(t *testing.T) {
 			t.Fatalf("syntax containment frontier missing/incorrect: %s", &out)
 		}
 		response.IndexLatencyMS, response.QueryLatencyMS, response.TotalLatencyMS = 0, 0, 0
+		if response.PreparedRead == nil || (directory == cache && (response.PreparedRead.ArtifactFamily != "syntax-generation" || response.PreparedRead.GenerationID != delta.IncrementalPreparation.GenerationID)) || (directory == freshCache && (response.PreparedRead.ArtifactFamily != "search-snapshot" || response.PreparedRead.GenerationID != "")) {
+			t.Fatal("syntax neighbors lost the actual artifact-family qualification")
+		}
+		response.PreparedRead = nil
 		neighbors = append(neighbors, response)
 	}
 	if !reflect.DeepEqual(neighbors[0], neighbors[1]) || sem.StructuralWorkSnapshot() != before {

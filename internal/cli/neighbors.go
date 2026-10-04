@@ -41,6 +41,7 @@ type neighborFlags struct {
 	CacheDir        string
 	DisableCache    bool
 	PreparedOnly    bool
+	PreparedCommit  string
 	InternalOnly    bool
 	ExcludeTests    bool
 	MaxContextBytes int
@@ -91,15 +92,16 @@ type neighborFocus struct {
 }
 
 type neighborResponse struct {
-	AnalysisScope     string   `json:"analysis_scope,omitempty"`
-	FormatVersion     int      `json:"format_version"`
-	RepoRoot          string   `json:"repo_root"`
-	Commit            string   `json:"commit,omitempty"`
-	Tree              string   `json:"tree,omitempty"`
-	Profile           string   `json:"profile"`
-	Relation          string   `json:"relation"`
-	Selection         string   `json:"selection"`
-	SelectedRelations []string `json:"selected_relations"`
+	AnalysisScope     string                   `json:"analysis_scope,omitempty"`
+	FormatVersion     int                      `json:"format_version"`
+	RepoRoot          string                   `json:"repo_root"`
+	Commit            string                   `json:"commit,omitempty"`
+	Tree              string                   `json:"tree,omitempty"`
+	Profile           string                   `json:"profile"`
+	PreparedRead      *sem.PreparedReadReceipt `json:"prepared_read,omitempty"`
+	Relation          string                   `json:"relation"`
+	Selection         string                   `json:"selection"`
+	SelectedRelations []string                 `json:"selected_relations"`
 	// Direction echoes which half of the adjacency was asked for. Without it a
 	// reader cannot tell an empty section from a section that was never queried.
 	Direction     string `json:"direction"`
@@ -160,16 +162,20 @@ func runNeighbors(ctx context.Context, opts Options, args []string) error {
 	totalStarted := time.Now()
 	indexStarted := totalStarted
 	snapshotOptions := sem.ProviderSnapshotOptions{
-		NoNetwork:    true,
-		Worktree:     flags.Worktree,
-		IgnoreFiles:  flags.IgnoreFile,
-		IncludeFiles: flags.IncludeFile,
-		Profile:      profile,
+		PreparedCommit: flags.PreparedCommit,
+		NoNetwork:      true,
+		Worktree:       flags.Worktree,
+		IgnoreFiles:    flags.IgnoreFile,
+		IncludeFiles:   flags.IncludeFile,
+		Profile:        profile,
 	}
 	var snapshot sem.ProviderSnapshot
 	cacheHit := false
+	var preparedReceipt *sem.PreparedReadReceipt
 	if flags.PreparedOnly {
-		snapshot, err = sem.LoadPreparedProviderSnapshot(ctx, repo, opts.Version, snapshotOptions, cacheDir)
+		var prepared sem.PreparedProviderRead
+		prepared, err = sem.ReadPreparedProviderSnapshot(ctx, repo, opts.Version, snapshotOptions, cacheDir)
+		snapshot, preparedReceipt = prepared.Snapshot, &prepared.Receipt
 		cacheHit = err == nil
 	} else {
 		snapshot, cacheHit, err = sem.LoadOrBuildProviderSnapshot(ctx, repo, opts.Version, snapshotOptions, cacheDir, flags.DisableCache)
@@ -192,6 +198,7 @@ func runNeighbors(ctx context.Context, opts Options, args []string) error {
 	response := buildNeighborResponseFromReader(snapshot, flags, readSource)
 	if flags.PreparedOnly {
 		response.AnalysisScope = "complete-prepared"
+		response.PreparedRead = preparedReceipt
 	}
 	// Call-site resolution reads the caller's source from the same snapshot-bound
 	// reader as fuzzy and ambiguous bodies. It runs after the graph query and is
@@ -221,6 +228,7 @@ func runNeighbors(ctx context.Context, opts Options, args []string) error {
 }
 
 func parseNeighborFlags(args []string) (neighborFlags, error) {
+	var headProvided, worktreeProvided, commitProvided bool
 	flags := neighborFlags{
 		Format: "json", Profile: "full", Relation: "CALLS", Selection: "family", Direction: "both",
 		Depth: 1, Limit: defaultNeighborLimit, Worktree: true,
@@ -325,8 +333,10 @@ func parseNeighborFlags(args []string) (neighborFlags, error) {
 			}
 			flags.MaxContextBytes, index = parsed, next
 		case "--head":
+			headProvided = true
 			flags.Worktree = false
 		case "--worktree":
+			worktreeProvided = true
 			flags.Worktree = true
 		case "--ignore-file":
 			item, valueErr := value()
@@ -350,6 +360,15 @@ func parseNeighborFlags(args []string) (neighborFlags, error) {
 			flags.DisableCache = true
 		case "--prepared-only":
 			flags.PreparedOnly = true
+		case "--commit":
+			item, valueErr := value()
+			if valueErr != nil {
+				return flags, valueErr
+			}
+			if commitProvided {
+				return flags, errors.New("--commit must be supplied once")
+			}
+			flags.PreparedCommit, commitProvided = item, true
 		case "--internal-only":
 			flags.InternalOnly = true
 		case "--exclude-tests":
@@ -358,8 +377,14 @@ func parseNeighborFlags(args []string) (neighborFlags, error) {
 			return flags, fmt.Errorf("neighbors received unexpected argument %q", arg)
 		}
 	}
+	if commitProvided {
+		if !flags.PreparedOnly || headProvided || worktreeProvided || !exactPreparedCommit(flags.PreparedCommit) {
+			return flags, errors.New("--commit requires --prepared-only, an exact lowercase commit OID, and no --head/--worktree selector")
+		}
+		flags.Worktree = false
+	}
 	if flags.PreparedOnly && (flags.Worktree || flags.DisableCache) {
-		return flags, errors.New("--prepared-only requires --head and caching")
+		return flags, errors.New("--prepared-only requires --head or an exact --commit, and caching")
 	}
 	if strings.TrimSpace(flags.Symbol) == "" {
 		return flags, errors.New("neighbors requires --symbol")

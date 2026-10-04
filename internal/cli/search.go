@@ -68,6 +68,7 @@ type searchFlags struct {
 	CacheDir              string
 	DisableCache          bool
 	PreparedOnly          bool
+	PreparedCommit        string
 	MaxIndexedFiles       int
 	IndexAllFiles         bool
 	MaxContextBytes       int
@@ -291,6 +292,7 @@ func runSearch(ctx context.Context, opts Options, args []string) error {
 		CacheDir:          cacheDir,
 		DisableCache:      flags.DisableCache,
 		PreparedOnly:      flags.PreparedOnly,
+		PreparedCommit:    flags.PreparedCommit,
 		MaxIndexedFiles:   flags.MaxIndexedFiles,
 		IndexAllFiles:     flags.IndexAllFiles,
 		MaxContextBytes:   flags.MaxContextBytes,
@@ -531,7 +533,7 @@ func writeNdjsonSearch(out interface{ Write([]byte) (int, error) }, response sem
 	{
 		encoder := json.NewEncoder(termsafe.NewJSONWriter(out))
 		encoder.SetEscapeHTML(false)
-		if err := encoder.Encode(map[string]any{
+		header := map[string]any{
 			"record_type": "search_header",
 			// The header record carries the envelope version for the same reason
 			// the JSON payload does: a consumer reading the stream must be able to
@@ -542,7 +544,11 @@ func writeNdjsonSearch(out interface{ Write([]byte) (int, error) }, response sem
 			"commit":         response.Commit,
 			"tree":           response.Tree,
 			"profile":        response.Profile,
-		}); err != nil {
+		}
+		if response.PreparedRead != nil {
+			header["prepared_read"] = response.PreparedRead
+		}
+		if err := encoder.Encode(header); err != nil {
 			return err
 		}
 		// The exclusion disclosure leads the stream, ahead of the results, because NDJSON is
@@ -2451,6 +2457,7 @@ func parseSearchFlags(args []string) (searchFlags, []string, error) {
 	flags := searchFlags{Format: "json", Profile: "fast", Worktree: true, MaxContextBytes: defaultSearchContextBytes}
 	var rest []string
 	var queryProvided bool
+	var headProvided, worktreeProvided, commitProvided bool
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--repo":
@@ -2590,6 +2597,15 @@ func parseSearchFlags(args []string) (searchFlags, []string, error) {
 			flags.DisableCache = true
 		case "--prepared-only":
 			flags.PreparedOnly = true
+		case "--commit":
+			value, next, err := searchFlagValue(args, i)
+			if err != nil {
+				return flags, nil, err
+			}
+			if commitProvided {
+				return flags, nil, errors.New("--commit must be supplied once")
+			}
+			flags.PreparedCommit, i, commitProvided = value, next, true
 		case "--max-indexed-files":
 			value, next, err := searchPositiveIntFlag(args, i)
 			if err != nil {
@@ -2633,9 +2649,11 @@ func parseSearchFlags(args []string) (searchFlags, []string, error) {
 			flags.MaxContextBytes, i = value, next
 		case "--worktree", "--no-network":
 			if args[i] == "--worktree" {
+				worktreeProvided = true
 				flags.Worktree = true
 			}
 		case "--head":
+			headProvided = true
 			flags.Worktree = false
 		default:
 			// A single trailing argument is shorthand for --query. Never consume
@@ -2647,10 +2665,20 @@ func parseSearchFlags(args []string) (searchFlags, []string, error) {
 			}
 		}
 	}
+	if commitProvided {
+		if !flags.PreparedOnly || headProvided || worktreeProvided || !exactPreparedCommit(flags.PreparedCommit) {
+			return flags, nil, errors.New("--commit requires --prepared-only, an exact lowercase commit OID, and no --head/--worktree selector")
+		}
+		flags.Worktree = false
+	}
 	if flags.PreparedOnly && (flags.Worktree || flags.DisableCache) {
-		return flags, nil, errors.New("--prepared-only requires --head and caching")
+		return flags, nil, errors.New("--prepared-only requires --head or an exact --commit, and caching")
 	}
 	return flags, rest, nil
+}
+
+func exactPreparedCommit(value string) bool {
+	return (len(value) == 40 || len(value) == 64) && strings.Trim(value, "0123456789abcdef") == ""
 }
 
 func searchFlagValue(args []string, index int) (string, int, error) {

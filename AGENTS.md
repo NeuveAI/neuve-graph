@@ -48,6 +48,7 @@ entire graph query --repo . --query "<the task or bug in one plain sentence>" --
 - `--top-k N` result count; `--max-context-bytes N` byte budget (`0` = unbounded).
 - Working tree by default (always rebuilt and never cached); add `--head` for cached committed-tree semantics.
 - `--head --prepared-only` requires an existing complete snapshot for the exact commit and matching producer/policy/profile. It never parses, resolves or rebuilds; missing or incompatible preparation is an error. It preserves the question and skips presearch/session answer echoes. See [the prepared-read contract](docs/adr/0005-prepared-only-reads.md).
+- `--prepared-only --commit <exact-commit-OID>` reads retained preparation for that historical source without a checkout/worktree. It excludes explicit `--head`/`--worktree`; source, lexical selection, Gitignore and snippets use that target. External `.graphignore` and ordered include/ignore policy come from the serving directory, not recovered historical policy. Structured receipts identify the artifact family, producer, source scope and policy binding. See [the exact prepared-read contract](docs/adr/0008-exact-commit-prepared-reads.md).
 - `--profile syntax-only|fast|full` (default `fast`); `--index-all-files` or `--max-indexed-files N` to widen/bound cold-search parsing.
 
 **When:** additional code discovery is needed; reuse locations already supplied by the task or Brain brief.
@@ -71,6 +72,7 @@ and selected types. Selection does not change an edge's resolution confidence.
 - `--internal-only` drops unresolved external endpoints; `--exclude-tests` drops test-only neighbors.
 - `--format agent|text|json`; `--head` for cached committed-tree; `--profile fast` for shallow call resolution (default `full` favors correctness).
 - `--head --prepared-only` observes retained complete facts without parsing, relationship re-resolution or fallback indexing. Match the profile and cache variant used during preparation.
+- `--prepared-only --commit <exact-commit-OID>` selects exact historical preparation without modifying HEAD or creating a worktree. The same profile, producer/source and captured policy must match.
 
 **When:** "what breaks if I change X", "who uses this", tracing a call chain — after query has given you a concrete symbol name.
 

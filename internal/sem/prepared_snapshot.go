@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 )
 
@@ -41,18 +42,48 @@ func (e *PreparedSnapshotError) Error() string {
 
 func (e *PreparedSnapshotError) Unwrap() error { return e.Cause }
 
+type preparedReadTarget struct{ commit, tree string }
+
+// PreparedReadReceipt qualifies a read under the provider's existing artifact
+// family. Policy IDs are opaque; they do not recover historical invocation policy.
+type PreparedReadReceipt struct {
+	ArtifactFamily       string      `json:"artifact_family"`
+	GenerationID         string      `json:"generation_id,omitempty"`
+	PolicyID             string      `json:"policy_id"`
+	ProducerBuildID      string      `json:"producer_build_id"`
+	Source               cacheSource `json:"source"`
+	ExternalPolicyOrigin string      `json:"external_policy_origin"`
+	GitignoreOrigin      string      `json:"gitignore_origin"`
+}
+
+type PreparedProviderRead struct {
+	Snapshot ProviderSnapshot
+	Receipt  PreparedReadReceipt
+	options  ProviderSnapshotOptions
+}
+
 // LoadPreparedProviderSnapshot reads the existing complete artifact for the
 // exact committed source and producer configuration. Unlike optional cache
 // loaders it never degrades a missing or invalid artifact into a build.
 func LoadPreparedProviderSnapshot(ctx context.Context, repo, providerVersion string, options ProviderSnapshotOptions, cacheDir string) (ProviderSnapshot, error) {
+	read, err := ReadPreparedProviderSnapshot(ctx, repo, providerVersion, options, cacheDir)
+	return read.Snapshot, err
+}
+
+// ReadPreparedProviderSnapshot returns facts and their qualified retained-read
+// receipt without indexing, resolving, repairing or changing the source view.
+func ReadPreparedProviderSnapshot(ctx context.Context, repo, providerVersion string, options ProviderSnapshotOptions, cacheDir string) (PreparedProviderRead, error) {
 	if err := ctx.Err(); err != nil {
-		return ProviderSnapshot{}, err
+		return PreparedProviderRead{}, err
 	}
-	fail := func(reason PreparedSnapshotFailureReason, cause error) (ProviderSnapshot, error) {
-		return ProviderSnapshot{}, &PreparedSnapshotError{Reason: reason, Cause: cause}
+	fail := func(reason PreparedSnapshotFailureReason, cause error) (PreparedProviderRead, error) {
+		return PreparedProviderRead{}, &PreparedSnapshotError{Reason: reason, Cause: cause}
 	}
 	if options.Worktree || options.ForceRebuild || len(options.OnlyFiles) > 0 || cacheDir == "" {
 		return fail("incompatible-read-options", nil)
+	}
+	if target := options.PreparedCommit; target != "" && ((len(target) != 40 && len(target) != 64) || strings.Trim(target, "0123456789abcdef") != "") {
+		return fail("invalid-target", nil)
 	}
 	if options.Profile == "" {
 		options.Profile = ProfileFull
@@ -69,14 +100,25 @@ func LoadPreparedProviderSnapshot(ctx context.Context, repo, providerVersion str
 	if err != nil {
 		return fail("source-unavailable", err)
 	}
-	commit, tree, err := resolveCommittedHEAD(ctx, absRepo)
+	var commit, tree string
+	if options.PreparedCommit != "" {
+		commit, tree, err = resolvePreparedTarget(ctx, absRepo, options.PreparedCommit)
+		options.preparedReadTarget = &preparedReadTarget{commit: commit, tree: tree}
+	} else {
+		commit, tree, err = resolveCommittedHEAD(ctx, absRepo)
+	}
 	if err != nil {
 		if ctx.Err() != nil {
-			return ProviderSnapshot{}, ctx.Err()
+			return PreparedProviderRead{}, ctx.Err()
 		}
 		return fail("source-unavailable", err)
 	}
 	repositoryKey := repoKey(ctx, absRepo)
+	build, err := ExecutableBuildIdentity()
+	if err != nil {
+		return fail("source-unavailable", err)
+	}
+	receipt := PreparedReadReceipt{ProducerBuildID: build, Source: *options.cacheSource, ExternalPolicyOrigin: "serving-directory-captured", GitignoreOrigin: "target-commit"}
 	if options.Profile == ProfileSyntaxOnly {
 		binding, err := bindPreparedGeneration(absRepo, repositoryKey, providerVersion, commit, tree, options, cacheDir)
 		if err != nil {
@@ -84,10 +126,11 @@ func LoadPreparedProviderSnapshot(ctx context.Context, repo, providerVersion str
 		}
 		generation, err := binding.read(ctx)
 		if err == nil {
-			return generation.Snapshot, nil
+			receipt.ArtifactFamily, receipt.GenerationID, receipt.PolicyID = "syntax-generation", generation.ID, binding.policy
+			return PreparedProviderRead{Snapshot: generation.Snapshot, Receipt: receipt, options: options}, nil
 		}
 		if ctx.Err() != nil {
-			return ProviderSnapshot{}, ctx.Err()
+			return PreparedProviderRead{}, ctx.Err()
 		}
 		// Only absence permits reading the compatible legacy syntax cache.
 		// A present invalid generation cannot be masked or repaired by a query.
@@ -121,11 +164,16 @@ func LoadPreparedProviderSnapshot(ctx context.Context, repo, providerVersion str
 		return fail("revision-not-prepared", nil)
 	}
 	if err := ctx.Err(); err != nil {
-		return ProviderSnapshot{}, err
+		return PreparedProviderRead{}, err
 	}
 	cached = rebindCachedSearchSnapshot(cached, absRepo, commit)
 	if cached.Snapshot.Header.Tree != tree {
 		return fail("incompatible-artifact", fmt.Errorf("prepared tree mismatch"))
 	}
-	return cached.Snapshot, nil
+	receipt.ArtifactFamily = "search-snapshot"
+	receipt.PolicyID, err = searchSnapshotKey(absRepo, repositoryKey, providerVersion, "", options)
+	if err != nil {
+		return fail("policy-unavailable", err)
+	}
+	return PreparedProviderRead{Snapshot: cached.Snapshot, Receipt: receipt, options: options}, nil
 }
