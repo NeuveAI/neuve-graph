@@ -2,10 +2,12 @@ package sem
 
 import (
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"math/rand/v2"
 	"os"
@@ -216,7 +218,26 @@ func (entry cacheEntry) open() (*os.File, error) {
 		return nil, err
 	}
 	defer root.Close()
-	return root.Open(entry.relative)
+	// The existing platform-qualified opener uses O_NONBLOCK on POSIX so a
+	// raced-in FIFO cannot park before the opened-handle type check. Root
+	// confinement and caller-selected cache-root links retain their semantics.
+	file, err := openRootBoundedRegularFile(root, entry.relative)
+	if err != nil {
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err == nil {
+		var regular bool
+		regular, err = openedFileIsRegular(file, info)
+		if err == nil && !regular {
+			err = fmt.Errorf("cache artifact %q is not a regular file", entry.relative)
+		}
+	}
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return file, nil
 }
 
 // write installs the gzipped JSON encoding of value at the entry, atomically, without following a
@@ -253,6 +274,32 @@ func (entry cacheEntry) open() (*os.File, error) {
 // portable os.Root cannot also pin the object's lexical ancestry, and that process already has the
 // authority needed to move existing cache artifacts through the same namespace.
 func (entry cacheEntry) write(temporaryPrefix string, value any) error {
+	return entry.publish(context.Background(), temporaryPrefix, value, false)
+}
+
+// writeImmutable links a complete synced temporary artifact without replacing
+// an existing name. Concurrent preparation must validate the existing value;
+// it cannot retire an already published generation by overwriting it.
+func (entry cacheEntry) writeImmutable(ctx context.Context, temporaryPrefix string, value any) error {
+	return entry.publish(ctx, temporaryPrefix, value, true)
+}
+
+type cacheContextWriter struct {
+	ctx    context.Context
+	writer io.Writer
+}
+
+func (writer cacheContextWriter) Write(bytes []byte) (int, error) {
+	if err := writer.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return writer.writer.Write(bytes)
+}
+
+func (entry cacheEntry) publish(ctx context.Context, temporaryPrefix string, value any, immutable bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(entry.root, 0o700); err != nil {
 		return err
 	}
@@ -284,7 +331,7 @@ func (entry cacheEntry) write(temporaryPrefix string, value any) error {
 		_ = temporary.Close()
 		return err
 	}
-	writer := gzip.NewWriter(temporary)
+	writer := gzip.NewWriter(cacheContextWriter{ctx: ctx, writer: temporary})
 	encoder := json.NewEncoder(writer)
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(value); err != nil {
@@ -296,7 +343,32 @@ func (entry cacheEntry) write(temporaryPrefix string, value any) error {
 		_ = temporary.Close()
 		return err
 	}
+	if immutable {
+		if err := ctx.Err(); err != nil {
+			_ = temporary.Close()
+			return err
+		}
+		if err := temporary.Sync(); err != nil {
+			_ = temporary.Close()
+			return err
+		}
+	}
 	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if immutable {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := directory.Link(temporaryName, filepath.Base(entry.relative)); err != nil {
+			return err
+		}
+		directoryFile, err := directory.Open(".")
+		if err != nil {
+			return err
+		}
+		err = directoryFile.Sync()
+		_ = directoryFile.Close()
 		return err
 	}
 	// Rename, not a write through the destination: renameat replaces a symlink sitting at the

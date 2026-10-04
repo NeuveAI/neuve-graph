@@ -443,11 +443,13 @@ type ProviderSnapshot struct {
 }
 
 type ProviderSnapshotOptions struct {
-	cacheSource  *cacheSource
-	NoNetwork    bool
-	Worktree     bool
-	IgnoreFiles  []string
-	IncludeFiles []string
+	committedTarget string
+	extractionReuse *providerExtractionCache
+	cacheSource     *cacheSource
+	NoNetwork       bool
+	Worktree        bool
+	IgnoreFiles     []string
+	IncludeFiles    []string
 	// OnlyFiles restricts parsing to these exact repository-relative paths.
 	// Empty means all discovered files. It is intended for query-time selective
 	// indexing; ignore and vendored-file rules still apply first.
@@ -910,14 +912,15 @@ type oversizeReader func(path string) (oversizeFile, bool)
 // the file list, a per-file content reader, and git-state warnings. It holds no
 // file content itself.
 type sourceContext struct {
-	absRepo    string
-	key        string
-	commit     string
-	tree       string
-	paths      []string
-	read       contentReader
-	readPrefix prefixReader
-	oversize   oversizeReader
+	extractionReuse *providerExtractionCache
+	absRepo         string
+	key             string
+	commit          string
+	tree            string
+	paths           []string
+	read            contentReader
+	readPrefix      prefixReader
+	oversize        oversizeReader
 	// ignores is the exact matcher that admitted paths. Search carries it to
 	// whole-tree Git-grep filtering so no second policy-file read can diverge
 	// from the corpus listing.
@@ -1111,6 +1114,9 @@ func registrationCandidateCounts(
 			return processProviderFile(workerCtx, sc, spec, maxParseBytes, index, path)
 		},
 		func(result providerFileResult) error {
+			if result.err != nil {
+				return result.err
+			}
 			for _, symbol := range result.symbols {
 				if len(aliasesByHandler[symbol.Name]) > 0 && registrationBindableKind(symbol.Kind) {
 					counts[symbol.Name]++
@@ -1342,6 +1348,9 @@ func streamSnapshotWithWorkerCount(ctx context.Context, repo, providerVersion st
 			return processProviderFile(workerCtx, sc, spec, maxParseBytes, index, path)
 		},
 		func(result providerFileResult) error {
+			if result.err != nil {
+				return result.err
+			}
 			failures = append(failures, result.failures...)
 			if result.hasPrecomputedImports {
 				precomputedImports[result.path] = result.precomputedImports
@@ -1845,9 +1854,19 @@ func prepareSource(ctx context.Context, repo string, options ProviderSnapshotOpt
 	ctx, metadataSafe := newGitMetadataValidation(ctx, absRepo)
 	if metadataSafe {
 		key = repoKey(ctx, absRepo)
-		commit, tree, headErr = resolveCommittedHEAD(ctx, absRepo)
+		if options.committedTarget == "" {
+			commit, tree, headErr = resolveCommittedHEAD(ctx, absRepo)
+		} else {
+			commit, tree, headErr = resolvePreparedTarget(ctx, absRepo, options.committedTarget)
+		}
 	} else {
 		headErr = gitMetadataRefusalError(absRepo)
+	}
+	if options.committedTarget != "" && (headErr != nil || options.Worktree) {
+		if headErr == nil {
+			headErr = errors.New("exact committed target cannot use a working-tree source")
+		}
+		return sourceContext{}, headErr
 	}
 
 	// The provider is local-only. NoNetwork is accepted to make that contract
@@ -1907,18 +1926,19 @@ func prepareSource(ctx context.Context, repo string, options ProviderSnapshotOpt
 		})
 	}
 	return sourceContext{
-		absRepo:     absRepo,
-		key:         key,
-		commit:      commit,
-		tree:        tree,
-		paths:       paths,
-		read:        opened.read,
-		readPrefix:  opened.readPrefix,
-		oversize:    opened.oversize,
-		ignores:     opened.ignores,
-		close:       opened.close,
-		warnings:    warnings,
-		repoIgnored: opened.repoIgnored,
+		extractionReuse: options.extractionReuse,
+		absRepo:         absRepo,
+		key:             key,
+		commit:          commit,
+		tree:            tree,
+		paths:           paths,
+		read:            opened.read,
+		readPrefix:      opened.readPrefix,
+		oversize:        opened.oversize,
+		ignores:         opened.ignores,
+		close:           opened.close,
+		warnings:        warnings,
+		repoIgnored:     opened.repoIgnored,
 	}, nil
 }
 

@@ -65,3 +65,25 @@ func TestCacheEntryReadRejectsSymlinkEscape(t *testing.T) {
 		t.Fatal("cache read followed a symlink outside the opened root")
 	}
 }
+
+func TestCacheEntryReadRejectsDirectoryArtifact(t *testing.T) {
+	for _, family := range []string{"extractions", "generations"} {
+		t.Run(family, func(t *testing.T) {
+			entry, err := newCacheEntry(t.TempDir(), family, "v1", strings.Repeat("c", 64))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(entry.root, entry.relative), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			file, err := entry.open()
+			if file != nil {
+				_ = file.Close()
+				t.Fatal("nonregular cache artifact yielded a readable handle")
+			}
+			if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+				t.Fatalf("directory artifact error=%v", err)
+			}
+		})
+	}
+}

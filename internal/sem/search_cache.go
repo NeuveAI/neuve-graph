@@ -31,7 +31,9 @@ import (
 // v18 binds validated Git ownership/scope and executable bytes, and rebinds
 // cached snapshots to the active serving view before any source reads.
 // v19 retires omissions of live-parse-proven Erlang named body self calls.
-const searchSnapshotCacheVersion = "search-snapshot-v19-" + IdentityRevision
+// v20 retains C/C++ declaration ownership and C-linkage metadata alongside
+// the shared extraction products; dropping them changes downstream binding.
+const searchSnapshotCacheVersion = "search-snapshot-v20-" + IdentityRevision
 
 type cachedSymbolByteRange struct {
 	Start int `json:"start"`
@@ -39,8 +41,6 @@ type cachedSymbolByteRange struct {
 }
 
 type cachedSearchSnapshot struct {
-	ErlangSelfCalls map[string]erlangSelfCallWitness `json:"erlang_self_calls,omitempty"`
-
 	Source          cacheSource `json:"source"`
 	BuildIdentity   string      `json:"build_identity"`
 	CacheVersion    string      `json:"cache_version"`
@@ -54,6 +54,21 @@ type cachedSearchSnapshot struct {
 	// working-tree contents cannot be pinned to one atomic cache transaction.
 	Worktree bool             `json:"worktree,omitempty"`
 	Snapshot ProviderSnapshot `json:"snapshot"`
+	cachedSnapshotInternals
+	// DerivedFrom is the generation of the complete entry this selective view was
+	// derived from, empty on a complete entry. Removing the derived directory
+	// cannot stop a derivation that read the OUTGOING complete snapshot before
+	// the rebuild published and then persisted after the removal: that artifact
+	// carries the tree and options the key already agrees with, so nothing else
+	// in this envelope separates it from a current one. Recording which INSTANCE
+	// it came from does, and the generation is read before the complete snapshot
+	// is, so such a writer necessarily stamps the generation being retired.
+	DerivedFrom string `json:"derived_from,omitempty"`
+}
+
+type cachedSnapshotInternals struct {
+	CDeclarationMetadata map[string]cachedCDeclarationMetadata `json:"c_declaration_metadata,omitempty"`
+	ErlangSelfCalls      map[string]erlangSelfCallWitness      `json:"erlang_self_calls,omitempty"`
 	// FileRecord.Lines, SymbolRecord.Local, and exact symbol byte ranges are
 	// intentionally absent from the public wire format, but relation resolution
 	// consumes them. Preserve those internal fields so a complete preindex can
@@ -76,15 +91,12 @@ type cachedSearchSnapshot struct {
 	BodylessSymbolIDs              []string `json:"bodyless_symbol_ids,omitempty"`
 	ObjectLiteralSymbolIDs         []string `json:"object_literal_symbol_ids,omitempty"`
 	LexicalObjectPropertySymbolIDs []string `json:"lexical_object_property_symbol_ids,omitempty"`
-	// DerivedFrom is the generation of the complete entry this selective view was
-	// derived from, empty on a complete entry. Removing the derived directory
-	// cannot stop a derivation that read the OUTGOING complete snapshot before
-	// the rebuild published and then persisted after the removal: that artifact
-	// carries the tree and options the key already agrees with, so nothing else
-	// in this envelope separates it from a current one. Recording which INSTANCE
-	// it came from does, and the generation is read before the complete snapshot
-	// is, so such a writer necessarily stamps the generation being retired.
-	DerivedFrom string `json:"derived_from,omitempty"`
+}
+
+type cachedCDeclarationMetadata struct {
+	Owners         []string `json:"owners,omitempty"`
+	DefinitionName string   `json:"definition_name,omitempty"`
+	CLinkage       bool     `json:"c_linkage,omitempty"`
 }
 
 type cachedSignatureTypes struct {
@@ -616,106 +628,126 @@ func newCachedSearchSnapshotFrom(providerVersion, commit, tree, derivedFrom stri
 		// Internal serialization fixtures may call the constructor directly.
 		cache.Source = source
 	}
+	cache.cachedSnapshotInternals = captureCachedSnapshotInternals(snapshot)
+	return cache
+}
+
+func captureCachedSnapshotInternals(snapshot ProviderSnapshot) cachedSnapshotInternals {
+	var internals cachedSnapshotInternals
 	for _, file := range snapshot.Files {
 		if file.Lines == 0 {
 			continue
 		}
-		if cache.FileLines == nil {
-			cache.FileLines = make(map[string]int)
+		if internals.FileLines == nil {
+			internals.FileLines = make(map[string]int)
 		}
-		cache.FileLines[file.ID] = file.Lines
+		internals.FileLines[file.ID] = file.Lines
 	}
 	for _, symbol := range snapshot.Symbols {
-		if symbol.Language == "Erlang" && symbol.Kind == "function" && symbol.erlangSelfCall.contained(symbol.StartLine, symbol.EndLine) {
-			if cache.ErlangSelfCalls == nil {
-				cache.ErlangSelfCalls = map[string]erlangSelfCallWitness{}
+		if len(symbol.cPlusPlusOwners) != 0 || symbol.cPlusPlusDefinitionName != "" || symbol.cLinkage {
+			if internals.CDeclarationMetadata == nil {
+				internals.CDeclarationMetadata = map[string]cachedCDeclarationMetadata{}
 			}
-			cache.ErlangSelfCalls[symbol.ID] = symbol.erlangSelfCall
+			internals.CDeclarationMetadata[symbol.ID] = cachedCDeclarationMetadata{Owners: append([]string(nil), symbol.cPlusPlusOwners...), DefinitionName: symbol.cPlusPlusDefinitionName, CLinkage: symbol.cLinkage}
+		}
+		if symbol.Language == "Erlang" && symbol.Kind == "function" && symbol.erlangSelfCall.contained(symbol.StartLine, symbol.EndLine) {
+			if internals.ErlangSelfCalls == nil {
+				internals.ErlangSelfCalls = map[string]erlangSelfCallWitness{}
+			}
+			internals.ErlangSelfCalls[symbol.ID] = symbol.erlangSelfCall
 		}
 		if symbol.Local {
-			cache.LocalSymbolIDs = append(cache.LocalSymbolIDs, symbol.ID)
+			internals.LocalSymbolIDs = append(internals.LocalSymbolIDs, symbol.ID)
 		}
 		if symbol.bodyless {
-			cache.BodylessSymbolIDs = append(cache.BodylessSymbolIDs, symbol.ID)
+			internals.BodylessSymbolIDs = append(internals.BodylessSymbolIDs, symbol.ID)
 		}
 		if symbol.objectLiteral {
-			cache.ObjectLiteralSymbolIDs = append(cache.ObjectLiteralSymbolIDs, symbol.ID)
+			internals.ObjectLiteralSymbolIDs = append(internals.ObjectLiteralSymbolIDs, symbol.ID)
 		}
 		if symbol.lexicalObjectProperty {
-			cache.LexicalObjectPropertySymbolIDs = append(cache.LexicalObjectPropertySymbolIDs, symbol.ID)
+			internals.LexicalObjectPropertySymbolIDs = append(internals.LexicalObjectPropertySymbolIDs, symbol.ID)
 		}
 		if symbol.sourceEndByte > symbol.sourceStartByte {
-			if cache.SymbolByteRanges == nil {
-				cache.SymbolByteRanges = make(map[string]cachedSymbolByteRange)
+			if internals.SymbolByteRanges == nil {
+				internals.SymbolByteRanges = make(map[string]cachedSymbolByteRange)
 			}
-			cache.SymbolByteRanges[symbol.ID] = cachedSymbolByteRange{
+			internals.SymbolByteRanges[symbol.ID] = cachedSymbolByteRange{
 				Start: symbol.sourceStartByte,
 				End:   symbol.sourceEndByte,
 			}
 		}
 		if symbol.parameterNamesKnown {
-			cache.SymbolParameterNamesKnownIDs = append(cache.SymbolParameterNamesKnownIDs, symbol.ID)
+			internals.SymbolParameterNamesKnownIDs = append(internals.SymbolParameterNamesKnownIDs, symbol.ID)
 		}
 		if symbol.signatureTypesKnown {
-			if cache.SymbolSignatureTypes == nil {
-				cache.SymbolSignatureTypes = make(map[string]cachedSignatureTypes)
+			if internals.SymbolSignatureTypes == nil {
+				internals.SymbolSignatureTypes = make(map[string]cachedSignatureTypes)
 			}
-			cache.SymbolSignatureTypes[symbol.ID] = cachedSignatureTypes{
+			internals.SymbolSignatureTypes[symbol.ID] = cachedSignatureTypes{
 				Params:  symbol.paramTypeText,
 				Returns: symbol.returnTypeText,
 			}
 		}
 		if len(symbol.parameterNames) > 0 {
-			if cache.SymbolParameterNames == nil {
-				cache.SymbolParameterNames = make(map[string][]string)
+			if internals.SymbolParameterNames == nil {
+				internals.SymbolParameterNames = make(map[string][]string)
 			}
-			cache.SymbolParameterNames[symbol.ID] = append([]string(nil), symbol.parameterNames...)
+			internals.SymbolParameterNames[symbol.ID] = append([]string(nil), symbol.parameterNames...)
 		}
 	}
-	return cache
+	return internals
 }
 
 func restoreCachedSearchInternals(cache *cachedSearchSnapshot) {
-	for index := range cache.Snapshot.Files {
-		cache.Snapshot.Files[index].Lines = cache.FileLines[cache.Snapshot.Files[index].ID]
+	restoreCachedSnapshotInternals(&cache.Snapshot, cache.cachedSnapshotInternals)
+}
+
+func restoreCachedSnapshotInternals(snapshot *ProviderSnapshot, internals cachedSnapshotInternals) {
+	for index := range snapshot.Files {
+		snapshot.Files[index].Lines = internals.FileLines[snapshot.Files[index].ID]
 	}
-	localIDs := make(map[string]bool, len(cache.LocalSymbolIDs))
-	for _, id := range cache.LocalSymbolIDs {
+	localIDs := make(map[string]bool, len(internals.LocalSymbolIDs))
+	for _, id := range internals.LocalSymbolIDs {
 		localIDs[id] = true
 	}
-	bodylessIDs := make(map[string]bool, len(cache.BodylessSymbolIDs))
-	for _, id := range cache.BodylessSymbolIDs {
+	bodylessIDs := make(map[string]bool, len(internals.BodylessSymbolIDs))
+	for _, id := range internals.BodylessSymbolIDs {
 		bodylessIDs[id] = true
 	}
-	objectLiteralIDs := make(map[string]bool, len(cache.ObjectLiteralSymbolIDs))
-	for _, id := range cache.ObjectLiteralSymbolIDs {
+	objectLiteralIDs := make(map[string]bool, len(internals.ObjectLiteralSymbolIDs))
+	for _, id := range internals.ObjectLiteralSymbolIDs {
 		objectLiteralIDs[id] = true
 	}
-	lexicalObjectPropertyIDs := make(map[string]bool, len(cache.LexicalObjectPropertySymbolIDs))
-	for _, id := range cache.LexicalObjectPropertySymbolIDs {
+	lexicalObjectPropertyIDs := make(map[string]bool, len(internals.LexicalObjectPropertySymbolIDs))
+	for _, id := range internals.LexicalObjectPropertySymbolIDs {
 		lexicalObjectPropertyIDs[id] = true
 	}
-	parameterNamesKnownIDs := make(map[string]bool, len(cache.SymbolParameterNamesKnownIDs))
-	for _, id := range cache.SymbolParameterNamesKnownIDs {
+	parameterNamesKnownIDs := make(map[string]bool, len(internals.SymbolParameterNamesKnownIDs))
+	for _, id := range internals.SymbolParameterNamesKnownIDs {
 		parameterNamesKnownIDs[id] = true
 	}
-	for index := range cache.Snapshot.Symbols {
-		symbol := &cache.Snapshot.Symbols[index]
+	for index := range snapshot.Symbols {
+		symbol := &snapshot.Symbols[index]
+		declaration := internals.CDeclarationMetadata[symbol.ID]
+		symbol.cPlusPlusOwners = append([]string(nil), declaration.Owners...)
+		symbol.cPlusPlusDefinitionName = declaration.DefinitionName
+		symbol.cLinkage = declaration.CLinkage
 		symbol.erlangSelfCall = erlangSelfCallWitness{}
-		if w := cache.ErlangSelfCalls[symbol.ID]; symbol.Language == "Erlang" && symbol.Kind == "function" && w.contained(symbol.StartLine, symbol.EndLine) {
+		if w := internals.ErlangSelfCalls[symbol.ID]; symbol.Language == "Erlang" && symbol.Kind == "function" && w.contained(symbol.StartLine, symbol.EndLine) {
 			symbol.erlangSelfCall = w
 		}
 		symbol.Local = localIDs[symbol.ID]
 		symbol.bodyless = bodylessIDs[symbol.ID]
 		symbol.objectLiteral = objectLiteralIDs[symbol.ID]
 		symbol.lexicalObjectProperty = lexicalObjectPropertyIDs[symbol.ID]
-		if sourceRange, ok := cache.SymbolByteRanges[symbol.ID]; ok && sourceRange.End > sourceRange.Start {
+		if sourceRange, ok := internals.SymbolByteRanges[symbol.ID]; ok && sourceRange.End > sourceRange.Start {
 			symbol.sourceStartByte = sourceRange.Start
 			symbol.sourceEndByte = sourceRange.End
 		}
-		symbol.parameterNames = append([]string(nil), cache.SymbolParameterNames[symbol.ID]...)
+		symbol.parameterNames = append([]string(nil), internals.SymbolParameterNames[symbol.ID]...)
 		symbol.parameterNamesKnown = parameterNamesKnownIDs[symbol.ID]
-		if types, ok := cache.SymbolSignatureTypes[symbol.ID]; ok {
+		if types, ok := internals.SymbolSignatureTypes[symbol.ID]; ok {
 			symbol.paramTypeText = types.Params
 			symbol.returnTypeText = types.Returns
 			symbol.signatureTypesKnown = true

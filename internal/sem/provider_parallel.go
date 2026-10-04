@@ -11,6 +11,7 @@ import (
 // and the single snapshot reducer. More parse products are added by the
 // provider without changing the scheduling contract.
 type providerFileResult struct {
+	err                   error
 	index                 int
 	path                  string
 	file                  *FileRecord
@@ -40,7 +41,14 @@ func boundedProviderWorkerCount(maxProcs int) int {
 // content read, classification, and parse, but no shared graph state and no
 // emission; a later content-reuse layer can replace the read at this boundary
 // without changing the deterministic reducer.
-func processProviderFile(
+func processProviderFile(ctx context.Context, sc sourceContext, spec profileSpec, maxParseBytes, index int, path string) providerFileResult {
+	if sc.extractionReuse != nil {
+		return sc.extractionReuse.process(ctx, sc, spec, maxParseBytes, index, path)
+	}
+	return processProviderFileUncached(ctx, sc, spec, maxParseBytes, index, path)
+}
+
+func processProviderFileUncached(
 	ctx context.Context,
 	sc sourceContext,
 	spec profileSpec,
