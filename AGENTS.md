@@ -160,6 +160,13 @@ coverage is only `DEFINES`/`CONTAINS`; full and fast do not consume it. New
 preparation still lists the tree and reads unchanged content for identity.
 See [the qualified syntax preparation contract](docs/adr/0007-explicit-syntax-generation-preparation.md).
 
+Add `--plan` to that exact syntax index command to obtain prospective producer,
+source and policy qualification plus validated `ready`/`absent` availability
+without extraction or cache writes. Execute or observe the retained selection
+with `--expected-generation <SHA256>`; producer/source/policy drift refuses
+before preparation. A present invalid artifact is never absence. See
+[the preparation selection contract](docs/adr/0009-preparation-selection-and-availability.md).
+
 ### 🧭 capabilities / version — *feature-detect*
 ```sh
 entire graph capabilities --json    # semantic vs inventory-only languages, relation types, features

@@ -36,6 +36,16 @@ type PreparedGeneration struct {
 	Snapshot         ProviderSnapshot
 	Extraction       ExtractionReuseStats
 	AlreadyPublished bool
+	Receipt          PreparedReadReceipt
+}
+
+type IncrementalPreparationPlan struct {
+	Repo         string
+	Commit       string
+	Tree         string
+	Profile      Profile
+	Availability string
+	Receipt      PreparedReadReceipt
 }
 
 type cachedPreparedGeneration struct {
@@ -88,7 +98,39 @@ func (binding preparedGenerationBinding) read(ctx context.Context) (PreparedGene
 	if err := ctx.Err(); err != nil {
 		return PreparedGeneration{}, err
 	}
-	return PreparedGeneration{ID: binding.id, Commit: binding.commit, Tree: binding.tree, Profile: binding.options.Profile, Snapshot: rebindCachedSearchSnapshot(cached.Snapshot, binding.repo, binding.commit).Snapshot, AlreadyPublished: true}, nil
+	receipt, err := binding.receipt()
+	if err != nil {
+		return PreparedGeneration{}, err
+	}
+	if err := binding.validateSource(ctx); err != nil {
+		return PreparedGeneration{}, err
+	}
+	return PreparedGeneration{ID: binding.id, Commit: binding.commit, Tree: binding.tree, Profile: binding.options.Profile, Snapshot: rebindCachedSearchSnapshot(cached.Snapshot, binding.repo, binding.commit).Snapshot, AlreadyPublished: true, Receipt: receipt}, nil
+}
+
+func (binding preparedGenerationBinding) receipt() (PreparedReadReceipt, error) {
+	if binding.options.cacheSource == nil {
+		return PreparedReadReceipt{}, &IncrementalPreparationError{Reason: "source-unavailable"}
+	}
+	build, err := ExecutableBuildIdentity()
+	if err != nil {
+		return PreparedReadReceipt{}, &IncrementalPreparationError{Reason: "source-unavailable", Cause: err}
+	}
+	return PreparedReadReceipt{ArtifactFamily: "syntax-generation", GenerationID: binding.id, PolicyID: binding.policy, ProducerBuildID: build, Source: *binding.options.cacheSource, ExternalPolicyOrigin: "serving-directory-captured", GitignoreOrigin: "target-commit"}, nil
+}
+
+func (binding preparedGenerationBinding) validateSource(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	source, err := resolveCacheSource(ctx, binding.repo)
+	if err != nil || binding.options.cacheSource == nil || source != *binding.options.cacheSource || repoKey(ctx, binding.repo) != binding.repositoryKey {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return &IncrementalPreparationError{Reason: "source-changed", Cause: err}
+	}
+	return ctx.Err()
 }
 
 type cacheContextReader struct {
@@ -174,16 +216,12 @@ func generationDigest(snapshot cachedSearchSnapshot) (string, error) {
 	return hex.EncodeToString(digest[:]), nil
 }
 
-// PrepareIncrementalProviderSnapshot admits every provider language at
-// syntax-only depth for explicit incremental indexing. Full relation/binding
-// generations remain unsupported. The target must be an exact Git commit,
-// so a queued job never silently prepares the newer HEAD.
-func PrepareIncrementalProviderSnapshot(ctx context.Context, repo, target, providerVersion string, options ProviderSnapshotOptions, cacheDir string) (PreparedGeneration, error) {
-	fail := func(reason string, cause error) (PreparedGeneration, error) {
+func captureIncrementalPreparation(ctx context.Context, repo, target, providerVersion string, options ProviderSnapshotOptions, cacheDir, expectedGeneration string) (preparedGenerationBinding, error) {
+	fail := func(reason string, cause error) (preparedGenerationBinding, error) {
 		if err := ctx.Err(); err != nil {
 			reason, cause = "cancelled", err
 		}
-		return PreparedGeneration{}, &IncrementalPreparationError{Reason: reason, Cause: cause}
+		return preparedGenerationBinding{}, &IncrementalPreparationError{Reason: reason, Cause: cause}
 	}
 	if err := ctx.Err(); err != nil {
 		return fail("cancelled", err)
@@ -193,6 +231,9 @@ func PrepareIncrementalProviderSnapshot(ctx context.Context, repo, target, provi
 	}
 	if (len(target) != 40 && len(target) != 64) || strings.Trim(target, "0123456789abcdef") != "" {
 		return fail("invalid-target", nil)
+	}
+	if expectedGeneration != "" && !validSHA256Hex(expectedGeneration) {
+		return fail("invalid-expected-generation", nil)
 	}
 	absRepo, err := filepath.Abs(repo)
 	if err != nil {
@@ -213,8 +254,70 @@ func PrepareIncrementalProviderSnapshot(ctx context.Context, repo, target, provi
 	repositoryKey := repoKey(ctx, absRepo)
 	binding, err := bindPreparedGeneration(absRepo, repositoryKey, providerVersion, commit, tree, options, cacheDir)
 	if err != nil {
+		return preparedGenerationBinding{}, err
+	}
+	if expectedGeneration != "" && binding.id != expectedGeneration {
+		return fail("generation-mismatch", nil)
+	}
+	return binding, nil
+}
+
+// PlanIncrementalProviderSnapshot selects the same qualified exact generation
+// as preparation, and validates its availability without structural work or
+// writes. Absence is not a retained-read attestation; invalid presence refuses.
+func PlanIncrementalProviderSnapshot(ctx context.Context, repo, target, providerVersion string, options ProviderSnapshotOptions, cacheDir, expectedGeneration string) (IncrementalPreparationPlan, error) {
+	binding, err := captureIncrementalPreparation(ctx, repo, target, providerVersion, options, cacheDir, expectedGeneration)
+	if err != nil {
+		return IncrementalPreparationPlan{}, err
+	}
+	receipt, err := binding.receipt()
+	if err != nil {
+		return IncrementalPreparationPlan{}, err
+	}
+	availability := "ready"
+	if _, err := binding.read(ctx); err != nil {
+		if ctx.Err() != nil {
+			return IncrementalPreparationPlan{}, &IncrementalPreparationError{Reason: "cancelled", Cause: ctx.Err()}
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			var failure *IncrementalPreparationError
+			if errors.As(err, &failure) {
+				return IncrementalPreparationPlan{}, err
+			}
+			return IncrementalPreparationPlan{}, &IncrementalPreparationError{Reason: "artifact-unavailable", Cause: err}
+		}
+		availability = "absent"
+	}
+	if err := binding.validateSource(ctx); err != nil {
+		return IncrementalPreparationPlan{}, err
+	}
+	return IncrementalPreparationPlan{Repo: binding.repo, Commit: binding.commit, Tree: binding.tree, Profile: binding.options.Profile, Availability: availability, Receipt: receipt}, nil
+}
+
+// PrepareIncrementalProviderSnapshot admits every provider language at syntax
+// depth for an exact commit. Full relation/binding generations stay unsupported.
+func PrepareIncrementalProviderSnapshot(ctx context.Context, repo, target, providerVersion string, options ProviderSnapshotOptions, cacheDir string) (PreparedGeneration, error) {
+	return PrepareExpectedIncrementalProviderSnapshot(ctx, repo, target, providerVersion, options, cacheDir, "")
+}
+
+// PrepareExpectedIncrementalProviderSnapshot refuses a changed selected binding
+// before even reading a retained artifact or writing reusable extraction facts.
+func PrepareExpectedIncrementalProviderSnapshot(ctx context.Context, repo, target, providerVersion string, options ProviderSnapshotOptions, cacheDir, expectedGeneration string) (PreparedGeneration, error) {
+	fail := func(reason string, cause error) (PreparedGeneration, error) {
+		if err := ctx.Err(); err != nil {
+			reason, cause = "cancelled", err
+		}
+		return PreparedGeneration{}, &IncrementalPreparationError{Reason: reason, Cause: cause}
+	}
+	binding, err := captureIncrementalPreparation(ctx, repo, target, providerVersion, options, cacheDir, expectedGeneration)
+	if err != nil {
 		return PreparedGeneration{}, err
 	}
+	receipt, err := binding.receipt()
+	if err != nil {
+		return PreparedGeneration{}, err
+	}
+	absRepo, repositoryKey, commit, tree, options := binding.repo, binding.repositoryKey, binding.commit, binding.tree, binding.options
 	policy, id, entry := binding.policy, binding.id, binding.entry
 	readRetained := func() (PreparedGeneration, error) {
 		return binding.read(ctx)
@@ -243,9 +346,8 @@ func PrepareIncrementalProviderSnapshot(ctx context.Context, repo, target, provi
 	if err := validateBuiltSearchSnapshot(snapshot, repositoryKey, providerVersion, tree, options); err != nil {
 		return fail("invalid-generation", err)
 	}
-	currentSource, err := resolveCacheSource(ctx, absRepo)
-	if err != nil || options.cacheSource == nil || currentSource != *options.cacheSource {
-		return fail("source-changed", err)
+	if err := binding.validateSource(ctx); err != nil {
+		return PreparedGeneration{}, err
 	}
 	for _, failure := range snapshot.Header.PartialFailures {
 		if failure.Code == "E_FILE_READ" || failure.Code == "E_PARSE_TIMEOUT" {
@@ -277,5 +379,5 @@ func PrepareIncrementalProviderSnapshot(ctx context.Context, repo, target, provi
 		}
 		return fail("publication-failed", err)
 	}
-	return PreparedGeneration{ID: id, Commit: commit, Tree: tree, Profile: options.Profile, Snapshot: snapshot, Extraction: cache.stats()}, nil
+	return PreparedGeneration{ID: id, Commit: commit, Tree: tree, Profile: options.Profile, Snapshot: snapshot, Extraction: cache.stats(), Receipt: receipt}, nil
 }

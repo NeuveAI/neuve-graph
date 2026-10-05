@@ -702,6 +702,7 @@ func Capabilities() CapabilityReport {
 			"prepared_snapshot_query":        true,
 			"exact_commit_prepared_read":     true,
 			"incremental_syntax_preparation": true,
+			"incremental_preparation_plan":   true,
 			"focused_neighbors":              true,
 			"neighbor_frontier_summary":      true,
 		},

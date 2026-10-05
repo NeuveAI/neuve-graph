@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/entireio/entire-graph/internal/sem"
@@ -13,14 +14,17 @@ import (
 )
 
 type indexFlags struct {
-	Repo         string
-	Profile      string
-	CacheDir     string
-	Format       string
-	IgnoreFiles  []string
-	IncludeFiles []string
-	Incremental  bool
-	Commit       string
+	Repo               string
+	Profile            string
+	CacheDir           string
+	Format             string
+	IgnoreFiles        []string
+	IncludeFiles       []string
+	Incremental        bool
+	Commit             string
+	Head               bool
+	Plan               bool
+	ExpectedGeneration string
 	// Report is where to write the human-readable GRAPH_REPORT.md rendering of the
 	// snapshot this run built or loaded. Empty writes no report. It rides on index
 	// rather than on a command of its own because index is already the command that
@@ -46,6 +50,21 @@ type indexResponse struct {
 	PartialFailures        []sem.PartialFailure            `json:"partial_failures"`
 	Completeness           sem.CompletenessReport          `json:"completeness"`
 	IncrementalPreparation *incrementalPreparationResponse `json:"incremental_preparation,omitempty"`
+	PreparedRead           *sem.PreparedReadReceipt        `json:"prepared_read,omitempty"`
+}
+
+type indexPreparationPlanResponse struct {
+	FormatVersion   int                     `json:"format_version"`
+	Provider        string                  `json:"provider"`
+	ProviderVersion string                  `json:"provider_version"`
+	RepoRoot        string                  `json:"repo_root"`
+	Commit          string                  `json:"commit"`
+	Tree            string                  `json:"tree"`
+	Profile         string                  `json:"profile"`
+	PreparedRead    sem.PreparedReadReceipt `json:"prepared_read"`
+	PreparationPlan struct {
+		Availability string `json:"availability"`
+	} `json:"preparation_plan"`
 }
 
 type incrementalPreparationResponse struct {
@@ -99,7 +118,7 @@ func runIndexCommand(ctx context.Context, opts Options, args []string, health bo
 		return err
 	}
 	if flags.Incremental {
-		if health || profile != sem.ProfileSyntaxOnly || flags.Commit == "" || flags.Force {
+		if health || profile != sem.ProfileSyntaxOnly || flags.Commit == "" || flags.Force || flags.Head {
 			return errors.New("incremental index requires --profile syntax-only and --commit with an exact commit OID; --force and health are unsupported")
 		}
 	} else if flags.Commit != "" {
@@ -119,6 +138,21 @@ func runIndexCommand(ctx context.Context, opts Options, args []string, health bo
 		IgnoreFiles:  flags.IgnoreFiles,
 		IncludeFiles: flags.IncludeFiles,
 		ForceRebuild: flags.Force,
+	}
+	if flags.Plan {
+		plan, err := sem.PlanIncrementalProviderSnapshot(ctx, repo, flags.Commit, opts.Version, snapOptions, cacheDir, flags.ExpectedGeneration)
+		if err != nil {
+			return err
+		}
+		response := indexPreparationPlanResponse{FormatVersion: 1, Provider: sem.ProviderName, ProviderVersion: opts.Version, RepoRoot: plan.Repo, Commit: plan.Commit, Tree: plan.Tree, Profile: string(plan.Profile), PreparedRead: plan.Receipt}
+		response.PreparationPlan.Availability = plan.Availability
+		if outputText {
+			_, err := fmt.Fprintf(opts.Stdout, "Syntax preparation %s\nCommit: %s\nTree: %s\nGeneration: %s\n", plan.Availability, plan.Commit, plan.Tree, plan.Receipt.GenerationID)
+			return err
+		}
+		encoder := json.NewEncoder(termsafe.NewJSONWriter(opts.Stdout))
+		encoder.SetEscapeHTML(false)
+		return encoder.Encode(response)
 	}
 	// Draw a live progress bar on stderr when it's a terminal. It only fires on a
 	// cache miss (the build emits the events); a cache hit returns instantly with
@@ -145,11 +179,13 @@ func runIndexCommand(ctx context.Context, opts Options, args []string, health bo
 	var snapshot sem.ProviderSnapshot
 	var cacheHit bool
 	var preparation *incrementalPreparationResponse
+	var preparedRead *sem.PreparedReadReceipt
 	if flags.Incremental {
 		var generation sem.PreparedGeneration
-		generation, err = sem.PrepareIncrementalProviderSnapshot(ctx, repo, flags.Commit, opts.Version, snapOptions, cacheDir)
+		generation, err = sem.PrepareExpectedIncrementalProviderSnapshot(ctx, repo, flags.Commit, opts.Version, snapOptions, cacheDir, flags.ExpectedGeneration)
 		if err == nil {
 			snapshot, cacheHit = generation.Snapshot, generation.AlreadyPublished
+			preparedRead = &generation.Receipt
 			preparation = &incrementalPreparationResponse{
 				GenerationID: generation.ID, ExtractedFiles: len(generation.Extraction.ExtractedPaths), ReusedFiles: len(generation.Extraction.ReusedPaths), UncacheableFiles: len(generation.Extraction.UncacheablePaths),
 				SupportedRelationTypes: snapshot.Header.RelationSet, RelationshipResolution: snapshot.Header.ProfileLimits.CallResolution, UnchangedContentIdentification: "sha256-content-read", SourceEnumeration: "target-tree",
@@ -187,6 +223,7 @@ func runIndexCommand(ctx context.Context, opts Options, args []string, health bo
 		PartialFailures:        partialFailures,
 		Completeness:           snapshot.Header.Completeness,
 		IncrementalPreparation: preparation,
+		PreparedRead:           preparedRead,
 	}
 	if health {
 		return writeHealth(opts.Stdout, response, outputText, flags.Force)
@@ -291,7 +328,9 @@ func writeIndexText(w io.Writer, r indexResponse, reportPath string) error {
 func parseIndexFlags(args []string) (indexFlags, []string, error) {
 	flags := indexFlags{Profile: "full"}
 	var rest []string
+	seen := make(map[string]int)
 	for index := 0; index < len(args); index++ {
+		seen[args[index]]++
 		switch args[index] {
 		case "--repo":
 			value, next, err := searchFlagValue(args, index)
@@ -339,19 +378,48 @@ func parseIndexFlags(args []string) (indexFlags, []string, error) {
 			flags.Force = true
 		case "--incremental":
 			flags.Incremental = true
+		case "--plan":
+			flags.Plan = true
+		case "--expected-generation":
+			value, next, err := searchFlagValue(args, index)
+			if err != nil {
+				return flags, nil, err
+			}
+			flags.ExpectedGeneration, index = value, next
 		case "--commit":
 			value, next, err := searchFlagValue(args, index)
 			if err != nil {
 				return flags, nil, err
 			}
 			flags.Commit, index = value, next
-		case "--head", "--no-network":
+		case "--head":
+			flags.Head = true
+		case "--no-network":
 			// Ordinary indexing targets HEAD; incremental indexing requires
 			// an exact committed target. Both modes are local-only.
 		case "--worktree":
 			return flags, nil, errors.New("index requires committed source; --worktree is not supported")
 		default:
 			rest = append(rest, args[index])
+		}
+	}
+	if flags.Incremental || flags.Plan || seen["--expected-generation"] != 0 {
+		for flag, count := range seen {
+			if count > 1 && flag != "--ignore-file" && flag != "--include-file" {
+				return flags, nil, fmt.Errorf("incremental index rejects duplicate %s", flag)
+			}
+		}
+		if !flags.Incremental || flags.Profile != "syntax-only" || flags.Commit == "" || flags.Head || flags.Force {
+			return flags, nil, errors.New("preparation plan and guarded incremental index require --incremental --profile syntax-only --commit with no --head or --force")
+		}
+		if (len(flags.Commit) != 40 && len(flags.Commit) != 64) || strings.Trim(flags.Commit, "0123456789abcdef") != "" {
+			return flags, nil, errors.New("incremental index requires an exact lowercase commit OID")
+		}
+		if flags.Plan && seen["--report"] != 0 {
+			return flags, nil, errors.New("preparation plan cannot write a report")
+		}
+		if seen["--expected-generation"] != 0 && (len(flags.ExpectedGeneration) != 64 || strings.Trim(flags.ExpectedGeneration, "0123456789abcdef") != "") {
+			return flags, nil, errors.New("--expected-generation requires one lowercase SHA256 identity")
 		}
 	}
 	return flags, rest, nil
