@@ -118,16 +118,25 @@ func TestErlangSelfCallRetainedConsumers(t *testing.T) {
 		}
 	}
 	assertErlangRetainedSelf(t, projected, erlangProofID, 1, 5)
-	if searchSnapshotCacheVersion != "search-snapshot-v19-"+IdentityRevision || providerRecordsCacheVersion != "provider-records-v13-"+IdentityRevision {
-		t.Fatal("semantic namespaces not retired")
-	}
 	// Old semantic envelopes remain invalid even if their other inputs agree.
 	old := newCachedSearchSnapshot("test", cold.Header.Commit, cold.Header.Tree, options, cold)
-	old.CacheVersion = "search-snapshot-v18-" + IdentityRevision
-	if validCachedSearchSnapshot(old, cold.Header.RepoKey, "test", cold.Header.Tree, options) {
-		t.Fatal("old structured semantic namespace admitted")
+	if !validCachedSearchSnapshot(old, cold.Header.RepoKey, "test", cold.Header.Tree, options) {
+		t.Fatal("current structured semantic envelope refused")
 	}
-	oldRecords := cachedProviderRecords{CacheVersion: "provider-records-v12-" + IdentityRevision, SchemaVersion: SchemaVersion, ProviderVersion: "test", Commit: cold.Header.Commit, Tree: cold.Header.Tree, Mode: "snapshot:ndjson", Profile: ProfileFull}
+	for _, version := range []string{"search-snapshot-v18-", "search-snapshot-v19-"} {
+		old.CacheVersion = version + IdentityRevision
+		if validCachedSearchSnapshot(old, cold.Header.RepoKey, "test", cold.Header.Tree, options) {
+			t.Fatalf("old structured semantic namespace admitted: %s", version)
+		}
+	}
+	oldRecords, err := readProviderRecords(transaction.entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !validCachedProviderRecords(oldRecords, "test", cold.Header.Commit, cold.Header.Tree, "snapshot:ndjson", options) {
+		t.Fatal("current opaque semantic envelope refused")
+	}
+	oldRecords.CacheVersion = "provider-records-v12-" + IdentityRevision
 	if validCachedProviderRecords(oldRecords, "test", cold.Header.Commit, cold.Header.Tree, "snapshot:ndjson", options) {
 		t.Fatal("old opaque semantic namespace admitted")
 	}
