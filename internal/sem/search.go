@@ -2584,7 +2584,7 @@ func preselectSearchFiles(
 				allowed[path] = true
 			}
 			seen := map[string]bool{}
-			patterns := searchGitAliasPatternsForTerms(q, q.terms)
+			patterns := searchGitAliasFirstLinePatterns(q, q.terms)
 			if patterns == nil {
 				grepErr = fmt.Errorf("query requires Unicode content preselection")
 			} else {

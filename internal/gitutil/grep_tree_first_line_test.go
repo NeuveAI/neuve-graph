@@ -142,3 +142,54 @@ func TestGrepTreePatternLinesStaysLinearWhenOnePatternHitsEveryLine(t *testing.T
 		t.Fatalf("first-line scan took %s; the per-pattern route is linear and needs well under a second", elapsed)
 	}
 }
+
+// Whatever the budget, and so whatever order the scans finish in, the merged
+// answer is the one multi-pattern scan's.
+func TestGrepTreePatternLinesIsIdenticalAtEveryBudget(t *testing.T) {
+	repo := treeFirstLineFixture(t)
+	var reference []GrepMatch
+	if err := grepPatternLines(t.Context(), repo, "HEAD", treeFirstLinePatterns, 1, func(match GrepMatch) error {
+		reference = append(reference, match)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, budget := range []struct{ cpu, threads string }{{"1", "1"}, {"2", "1"}, {"4", "2"}, {"6", "1"}, {"8", "4"}} {
+		t.Setenv(treePatternGrepCPUEnv, budget.cpu)
+		t.Setenv(treePatternGrepThreadsEnv, budget.threads)
+		var got []GrepMatch
+		if err := GrepTreePatternLines(t.Context(), repo, "HEAD", treeFirstLinePatterns, func(match GrepMatch) error {
+			got = append(got, match)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, reference) {
+			t.Fatalf("budget cpu=%s threads=%s: got %#v, want %#v", budget.cpu, budget.threads, got, reference)
+		}
+	}
+}
+
+func TestResolveTreePatternGrepBudget(t *testing.T) {
+	for _, test := range []struct {
+		name                 string
+		cpu, threads         string
+		performance, maxProc int
+		want                 TreePatternGrepBudget
+		workers              int
+	}{
+		{"half the performance cores", "", "", 8, 12, TreePatternGrepBudget{CPU: 4, Threads: 1}, 4},
+		{"GOMAXPROCS caps the default", "", "", 8, 2, TreePatternGrepBudget{CPU: 2, Threads: 1}, 2},
+		{"never below one", "", "", 1, 1, TreePatternGrepBudget{CPU: 1, Threads: 1}, 1},
+		{"settings override", "6", "2", 8, 2, TreePatternGrepBudget{CPU: 6, Threads: 2}, 3},
+		{"threads never exceed the budget", "2", "4", 8, 12, TreePatternGrepBudget{CPU: 2, Threads: 2}, 1},
+		{"invalid settings are ignored", "zero", "-3", 8, 12, TreePatternGrepBudget{CPU: 4, Threads: 1}, 4},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := resolveTreePatternGrepBudget(test.cpu, test.threads, test.performance, test.maxProc)
+			if got != test.want || got.workers() != test.workers {
+				t.Fatalf("got %+v with %d workers, want %+v with %d", got, got.workers(), test.want, test.workers)
+			}
+		})
+	}
+}

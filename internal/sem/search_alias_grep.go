@@ -40,13 +40,39 @@ func searchGitAliasTerms(q searchQuery) []string {
 }
 
 func searchGitAliasPatternsForTerms(q searchQuery, terms []string) []string {
-	if !searchTermsSafeForGitGrep(terms) {
+	patterns, _ := searchGitAliasPatternSet(q, terms)
+	return patterns
+}
+
+// searchGitAliasFirstLinePatterns is searchGitAliasPatternsForTerms for a
+// first-matching-line scan, where every pattern is ORed per line: each alias
+// group "(A|B|...)" is listed as its alternatives A, B, ... instead. A line
+// matches the group exactly when it matches one of its alternatives, so the
+// matching lines, and therefore every file's first matching line, are the same.
+// The split is the work reduction: Git's regex engine (TRE on macOS) slows down
+// far faster than linearly with expression size, and one alias group of nine
+// boundary alternatives took 18 s over a 2,600-file tree where its nine
+// alternatives took 3.4 s together. Whether the query can use Git at all is
+// still decided on the combined form, so a nil result is unchanged.
+func searchGitAliasFirstLinePatterns(q searchQuery, terms []string) []string {
+	patterns, split := searchGitAliasPatternSet(q, terms)
+	if patterns == nil {
 		return nil
 	}
-	var patterns []string
+	return split
+}
+
+// searchGitAliasPatternSet returns the alias grep patterns and the same set
+// with each alias group expanded into its alternatives.
+func searchGitAliasPatternSet(q searchQuery, terms []string) ([]string, []string) {
+	if !searchTermsSafeForGitGrep(terms) {
+		return nil, nil
+	}
+	var patterns, split []string
 	for _, term := range terms {
 		if !q.inferredAbbreviations[term] {
 			patterns = append(patterns, searchFoldedLiteral(term))
+			split = append(split, patterns[len(patterns)-1])
 		}
 	}
 	for _, alias := range terms {
@@ -68,18 +94,24 @@ func searchGitAliasPatternsForTerms(q searchQuery, terms []string) []string {
 		sort.Strings(forms)
 		alternatives := searchAliasBoundaryPatterns(forms)
 		patterns = append(patterns, "("+strings.Join(alternatives, "|")+")")
+		if len(alternatives) == 0 {
+			// "()" matches every line; keep that meaning rather than drop it.
+			split = append(split, patterns[len(patterns)-1])
+		} else {
+			split = append(split, alternatives...)
+		}
 	}
 	bytes := 0
 	for _, pattern := range patterns {
 		if len(pattern) >= 128*1024 {
-			return nil
+			return nil, nil
 		}
 		bytes += len(pattern) + 4 // include the -e argument and terminators
 		if bytes > maxSearchGitAliasPatternBytes {
-			return nil
+			return nil, nil
 		}
 	}
-	return patterns
+	return patterns, split
 }
 
 func searchFoldedLiteral(text string) string {

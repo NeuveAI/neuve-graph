@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -705,9 +706,10 @@ func (e *GrepDeadlineError) Error() string {
 func (e *GrepDeadlineError) Is(target error) bool { return target == ErrGrepDeadline }
 
 // maxSeparateTreePatternGreps bounds how many single-pattern Git processes one
-// first-line tree scan may run, one after another (never concurrently). A
-// larger distinct pattern set keeps the single combined scan.
-const maxSeparateTreePatternGreps = 64
+// first-line tree scan may start. A larger distinct pattern set keeps the
+// single combined scan. Query patterns stay well below it: at most 48 terms,
+// and an alias contributes at most nine boundary alternatives.
+const maxSeparateTreePatternGreps = 256
 
 // grepTreeFirstPatternLines returns, per file of an immutable tree, the first
 // line matching any of patterns, in Git's path order, exactly as one
@@ -720,15 +722,24 @@ const maxSeparateTreePatternGreps = 64
 // hit, so a pattern absent from a file is rescanned to the end of that file once
 // per hit of the others. On a lockfile-sized blob with ~40 query patterns this
 // is minutes (measured: more than six minutes for one query on a 2,600-file
-// tree, versus 30 seconds below). A single-pattern scan has no such term: its
-// look-ahead stops at the next hit of its only pattern.
+// tree). A single-pattern scan has no such term: its look-ahead stops at the
+// next hit of its only pattern.
 //
-// So each distinct pattern gets its own line-numbered scan, one at a time, and
-// the per-file results merge to the smallest line number. Every file Git would
-// have printed is printed by the scan of some pattern matching that same first
-// line, and no scan can report an earlier matching line, so the merged
-// (path, line) set is identical. Git prints tree paths in byte order, which the
-// final sort reproduces. Duplicate patterns cannot change which lines match.
+// So each distinct pattern gets its own line-numbered scan, and the per-file
+// results merge to the smallest line number. Every file Git would have printed
+// is printed by the scan of some pattern matching that same first line, and no
+// scan can report an earlier matching line, so the merged (path, line) set is
+// identical whatever order the scans finish in. Git prints tree paths in byte
+// order, which the final sort reproduces. Duplicate patterns cannot change
+// which lines match.
+//
+// The scans run on a fixed pool within one CPU budget (treePatternGrepBudget):
+// at most budget/threads Git processes at a time, each capped at threads Git
+// worker threads, so the total never exceeds the budget. Each scan is a whole
+// tree pass whose cost is mostly reading and inflating blobs; a candidate-file
+// pre-pass (`git grep -l` over every pattern) was measured and not adopted:
+// on the stalled queries it listed 91-97% of the files and itself cost about
+// half of all the per-pattern scans together.
 func grepTreeFirstPatternLines(ctx context.Context, repo, treeish string, patterns []string, visit func(GrepMatch) error) error {
 	distinct := make([]string, 0, len(patterns))
 	seen := make(map[string]bool, len(patterns))
@@ -741,21 +752,10 @@ func grepTreeFirstPatternLines(ctx context.Context, repo, treeish string, patter
 	if len(distinct) < 2 || len(distinct) > maxSeparateTreePatternGreps {
 		return grepPatternLines(ctx, repo, treeish, patterns, 1, visit)
 	}
-	type firstLine struct {
-		number int
-		text   string
-	}
-	first := make(map[string]firstLine)
-	for _, pattern := range distinct {
-		err := runGrepPatternLines(ctx, repo, treeish, []string{pattern}, 1, true, func(path string, number int, text string) error {
-			if known, ok := first[path]; !ok || number < known.number {
-				first[path] = firstLine{number: number, text: text}
-			}
-			return ctx.Err()
-		})
-		if err != nil {
-			return err
-		}
+	budget := treePatternGrepBudget()
+	first, err := grepFirstLinesPerPattern(ctx, repo, treeish, distinct, budget.workers(), budget.Threads)
+	if err != nil {
+		return err
 	}
 	paths := make([]string, 0, len(first))
 	for path := range first {
@@ -774,6 +774,121 @@ func grepTreeFirstPatternLines(ctx context.Context, repo, treeish string, patter
 	return nil
 }
 
+type grepFirstLine struct {
+	number int
+	text   string
+}
+
+// grepFirstLinesPerPattern runs one single-pattern scan per pattern, at most
+// workers at a time, each with threads Git worker threads, and keeps each
+// raw path's smallest matching line. The first failure cancels the rest.
+func grepFirstLinesPerPattern(ctx context.Context, repo, treeish string, patterns []string, workers, threads int) (map[string]grepFirstLine, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var (
+		mu       sync.Mutex
+		first    = make(map[string]grepFirstLine)
+		firstErr error
+		wg       sync.WaitGroup
+	)
+	jobs := make(chan string)
+	for range min(workers, len(patterns)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for pattern := range jobs {
+				found := make(map[string]grepFirstLine)
+				err := runGrepPatternLines(ctx, repo, treeish, []string{pattern}, 1, true, threads, func(path string, number int, text string) error {
+					if known, ok := found[path]; !ok || number < known.number {
+						found[path] = grepFirstLine{number: number, text: text}
+					}
+					return ctx.Err()
+				})
+				mu.Lock()
+				if err != nil {
+					if firstErr == nil {
+						firstErr = err
+						cancel()
+					}
+				} else {
+					for path, line := range found {
+						if known, ok := first[path]; !ok || line.number < known.number {
+							first[path] = line
+						}
+					}
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	for _, pattern := range patterns {
+		if ctx.Err() != nil {
+			break
+		}
+		jobs <- pattern
+	}
+	close(jobs)
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return first, nil
+}
+
+// TreePatternGrepBudget is the CPU share one first-line tree scan may use:
+// Threads is each Git process's worker-thread cap (git grep --threads) and CPU
+// is the total of those threads across the processes running at once.
+type TreePatternGrepBudget struct {
+	CPU     int
+	Threads int
+}
+
+func (b TreePatternGrepBudget) workers() int {
+	return max(1, b.CPU/b.Threads)
+}
+
+// Defaults chosen by measurement on an 8-performance-core machine, over the
+// three stalled benchmark queries and one ordinary alias query, idle and with
+// two other Graph queries plus a CPU-bound process running:
+//
+//   - One Git thread per process. At an equal budget, N single-threaded
+//     processes were as fast or faster than fewer multi-threaded ones, and
+//     used 10-35% less CPU (git grep's own threads add coordination cost).
+//   - A budget of half the performance cores. Wall time fell almost linearly
+//     up to about 6 (worst query: 27 s at 1, 14 s at 2, 7.5 s at 4, 5.3 s at 6)
+//     and flattened after it (3.5 s at 12, at 20% more CPU). Half leaves room
+//     for the person and for a second concurrent query, which is this scan's
+//     share of the machine; at 4 the worst query takes 7.5 s idle and 7.7 s
+//     under load, for the same total CPU as running the scans one by one.
+//   - Further capped by GOMAXPROCS, so a caller that limits the engine's
+//     parallelism also limits its Git children.
+//
+// ENTIRE_GRAPH_GREP_CPU and ENTIRE_GRAPH_GREP_THREADS override them.
+const (
+	treePatternGrepDefaultThreads = 1
+	treePatternGrepCPUEnv         = "ENTIRE_GRAPH_GREP_CPU"
+	treePatternGrepThreadsEnv     = "ENTIRE_GRAPH_GREP_THREADS"
+)
+
+func treePatternGrepBudget() TreePatternGrepBudget {
+	return resolveTreePatternGrepBudget(os.Getenv(treePatternGrepCPUEnv), os.Getenv(treePatternGrepThreadsEnv), performanceCores(), runtime.GOMAXPROCS(0))
+}
+
+func resolveTreePatternGrepBudget(cpuSetting, threadsSetting string, performance, maxProcs int) TreePatternGrepBudget {
+	cpu := max(1, min(performance/2, maxProcs))
+	if value, err := strconv.Atoi(strings.TrimSpace(cpuSetting)); err == nil && value > 0 {
+		cpu = value
+	}
+	threads := treePatternGrepDefaultThreads
+	if value, err := strconv.Atoi(strings.TrimSpace(threadsSetting)); err == nil && value > 0 {
+		threads = value
+	}
+	return TreePatternGrepBudget{CPU: cpu, Threads: min(threads, cpu)}
+}
+
 func treeGrepMatch(treeish string, match GrepMatch) (GrepMatch, error) {
 	if treeish != "" {
 		prefix := treeish + ":"
@@ -786,7 +901,7 @@ func treeGrepMatch(treeish string, match GrepMatch) (GrepMatch, error) {
 }
 
 func grepPatternLines(ctx context.Context, repo, treeish string, patterns []string, maxPerFile int, visit func(GrepMatch) error) error {
-	return runGrepPatternLines(ctx, repo, treeish, patterns, maxPerFile, false, func(path string, _ int, text string) error {
+	return runGrepPatternLines(ctx, repo, treeish, patterns, maxPerFile, false, 0, func(path string, _ int, text string) error {
 		match, err := treeGrepMatch(treeish, GrepMatch{Path: path, Text: text})
 		if err != nil {
 			return err
@@ -797,8 +912,9 @@ func grepPatternLines(ctx context.Context, repo, treeish string, patterns []stri
 
 // runGrepPatternLines runs one `git grep -f -` and streams each printed match
 // with its raw (treeish-prefixed) path. lineNumbers adds Git's 1-based line
-// number; without it every number is zero.
-func runGrepPatternLines(ctx context.Context, repo, treeish string, patterns []string, maxPerFile int, lineNumbers bool, visit func(path string, number int, text string) error) error {
+// number; without it every number is zero. threads > 0 caps Git's worker
+// threads (`--threads`); zero leaves Git's own configuration in charge.
+func runGrepPatternLines(ctx context.Context, repo, treeish string, patterns []string, maxPerFile int, lineNumbers bool, threads int, visit func(path string, number int, text string) error) error {
 
 	if len(patterns) == 0 {
 		return nil
@@ -808,6 +924,9 @@ func runGrepPatternLines(ctx context.Context, repo, treeish string, patterns []s
 		lineNumberFlag = "-n"
 	}
 	args := []string{"grep", "--no-recurse-submodules", lineNumberFlag, "--no-column", "--no-color", "--no-full-name", "-z", "-I", "-E", "-m", strconv.Itoa(maxPerFile), "-f", "-"}
+	if threads > 0 {
+		args = append(args, "--threads", strconv.Itoa(threads))
+	}
 	if treeish != "" {
 		args = append(args, treeish)
 	}
