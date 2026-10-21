@@ -626,6 +626,20 @@ func boundedWorktreeSearchReplayProvenance(paths []string) []string {
 // `warnings` still learns that this answer was assembled from a narrowed corpus.
 const repoIgnoreDisclosureCode = "W_REPO_IGNORED_SOURCE"
 
+// searchGitGrepDeadlineCode discloses that a bounded Git tree grep was stopped
+// and the answer's file selection came from the fallback route.
+const searchGitGrepDeadlineCode = "W_GIT_GREP_DEADLINE"
+
+// withPreselectionWarnings appends preselection disclosures without touching
+// the caller's slice (it may be a cached snapshot's header). With none it
+// returns warnings unchanged.
+func withPreselectionWarnings(warnings, extra []ProviderWarning) []ProviderWarning {
+	if len(extra) == 0 {
+		return warnings
+	}
+	return append(append(make([]ProviderWarning, 0, len(warnings)+len(extra)), warnings...), extra...)
+}
+
 // withRepoIgnoreDisclosure puts the disclosure warning FIRST when the
 // repository's own ignore rules narrowed the corpus, and returns warnings
 // unchanged otherwise.
@@ -1377,7 +1391,7 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 				SearchLatencyMS:           totalLatency,
 			},
 			RepoIgnored:     selection.repoIgnored,
-			Warnings:        withRepoIgnoreDisclosure(warnings, selection.repoIgnored),
+			Warnings:        withPreselectionWarnings(withRepoIgnoreDisclosure(warnings, selection.repoIgnored), selection.preselectionWarnings),
 			PartialFailures: withRepoIgnorePartialFailures(partialFailures, selection.repoIgnored),
 			Completeness:    completeness,
 		}, nil
@@ -2120,7 +2134,7 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 		CoverageNote:          coverageNote,
 		RepoIgnored:           selection.repoIgnored,
 		Stats:                 stats,
-		Warnings:              withRepoIgnoreDisclosure(snapshot.Header.Warnings, selection.repoIgnored),
+		Warnings:              withPreselectionWarnings(withRepoIgnoreDisclosure(snapshot.Header.Warnings, selection.repoIgnored), selection.preselectionWarnings),
 		PartialFailures:       withRepoIgnorePartialFailures(partialFailures, selection.repoIgnored),
 		Completeness:          snapshot.Header.Completeness,
 		replayProvenancePaths: replayProvenancePaths,
@@ -2468,6 +2482,9 @@ type searchFileSelection struct {
 	// repoIgnored is the listing's disclosure of what the repository's own ignore
 	// rules removed, carried through so every response shape can report it.
 	repoIgnored *RepoIgnoreReport
+	// preselectionWarnings are disclosures raised while selecting files (a
+	// stopped Git scan), appended after every response's other warnings.
+	preselectionWarnings []ProviderWarning
 	// ignores is the exclude stack the corpus listing was filtered with, kept so the routes that
 	// reach OUTSIDE that listing can apply the same verdict. Only one does: the needle index's
 	// `git grep`, which Git answers over the whole tree. Carrying the matcher rather than
@@ -2591,6 +2608,16 @@ func preselectSearchFiles(
 			}
 		} else {
 			matches, grepErr = gitutil.GrepTreePaths(ctx, source.absRepo, source.commit, grepPatterns)
+		}
+		if errors.Is(grepErr, gitutil.ErrGrepDeadline) {
+			// The scan was stopped, not answered: disclose that this query's file
+			// selection took the fallback route below instead of Git's tree grep.
+			selection.preselectionWarnings = append(selection.preselectionWarnings, ProviderWarning{
+				Code:                 searchGitGrepDeadlineCode,
+				Severity:             "warning",
+				EffectOnCompleteness: "Git's tree grep for this query stopped at its deadline, so content preselection used the fallback route; ranking may differ from a completed scan",
+				Detail:               grepErr.Error(),
+			})
 		}
 		if grepErr == nil {
 			// This branch deliberately keeps every matched file rather than

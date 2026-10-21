@@ -31,7 +31,9 @@ type Options struct {
 }
 
 func Execute(version string, args []string) error {
-	return Run(context.Background(), Options{
+	ctx, stop := interruptibleContext(context.Background(), os.Exit)
+	defer stop()
+	return Run(ctx, Options{
 		Version: version,
 		Env:     EnvFromOS(),
 		Stdout:  os.Stdout,

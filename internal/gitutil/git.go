@@ -659,19 +659,155 @@ func GrepIndexPatternSample(ctx context.Context, repo string, patterns []string,
 
 // GrepTreePatternLines streams matches from the specified immutable tree and
 // strips Git's treeish prefix from each returned path.
+//
+// The scan is bounded by TreePatternGrepDeadline. When the deadline elapses
+// before Git finishes, the Git process is killed and the call returns a
+// *GrepDeadlineError (errors.Is(err, ErrGrepDeadline)) instead of waiting;
+// matches already visited before that are not retracted. A scan that finishes
+// within the deadline is unaffected by it.
 func GrepTreePatternLines(ctx context.Context, repo, treeish string, patterns []string, visit func(GrepMatch) error) error {
 	if treeish == "" || strings.HasPrefix(treeish, "-") || strings.ContainsRune(treeish, '\x00') {
 		return fmt.Errorf("invalid git grep treeish %q", treeish)
 	}
-	return grepPatternLines(ctx, repo, treeish, patterns, 1, visit)
+	deadline := TreePatternGrepDeadline
+	runCtx, cancel := ctx, context.CancelFunc(func() {})
+	if deadline > 0 {
+		runCtx, cancel = context.WithTimeout(ctx, deadline)
+	}
+	defer cancel()
+	err := grepTreeFirstPatternLines(runCtx, repo, treeish, patterns, visit)
+	if err != nil && ctx.Err() == nil && errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+		return &GrepDeadlineError{Limit: deadline}
+	}
+	return err
+}
+
+// TreePatternGrepDeadline bounds one GrepTreePatternLines call. It is a
+// backstop for a pathological scan, not a latency target: it sits below the
+// six-minute limit callers such as the retrieval benchmark already apply to a
+// whole query, so a scan that used to finish still finishes and returns the
+// same matches, and one that would have hung reports a typed error instead.
+var TreePatternGrepDeadline = 5 * time.Minute
+
+// ErrGrepDeadline matches a *GrepDeadlineError through errors.Is.
+var ErrGrepDeadline = errors.New("git grep deadline exceeded")
+
+// GrepDeadlineError reports that a bounded git grep was stopped at its
+// deadline; its result is incomplete and must not be treated as "no match".
+type GrepDeadlineError struct {
+	Limit time.Duration
+}
+
+func (e *GrepDeadlineError) Error() string {
+	return fmt.Sprintf("git grep pattern lines stopped after its %s deadline", e.Limit)
+}
+
+func (e *GrepDeadlineError) Is(target error) bool { return target == ErrGrepDeadline }
+
+// maxSeparateTreePatternGreps bounds how many single-pattern Git processes one
+// first-line tree scan may run, one after another (never concurrently). A
+// larger distinct pattern set keeps the single combined scan.
+const maxSeparateTreePatternGreps = 64
+
+// grepTreeFirstPatternLines returns, per file of an immutable tree, the first
+// line matching any of patterns, in Git's path order, exactly as one
+// `git grep -m 1 -f -` over all patterns would.
+//
+// It does not run that one command because Git's cost for it is quadratic in
+// practice. `-m` caps what Git prints, not what it scans: after a file's first
+// hit Git keeps walking the file, and with more than one pattern its look-ahead
+// re-runs EVERY pattern over the whole remainder of the file after each later
+// hit, so a pattern absent from a file is rescanned to the end of that file once
+// per hit of the others. On a lockfile-sized blob with ~40 query patterns this
+// is minutes (measured: more than six minutes for one query on a 2,600-file
+// tree, versus 30 seconds below). A single-pattern scan has no such term: its
+// look-ahead stops at the next hit of its only pattern.
+//
+// So each distinct pattern gets its own line-numbered scan, one at a time, and
+// the per-file results merge to the smallest line number. Every file Git would
+// have printed is printed by the scan of some pattern matching that same first
+// line, and no scan can report an earlier matching line, so the merged
+// (path, line) set is identical. Git prints tree paths in byte order, which the
+// final sort reproduces. Duplicate patterns cannot change which lines match.
+func grepTreeFirstPatternLines(ctx context.Context, repo, treeish string, patterns []string, visit func(GrepMatch) error) error {
+	distinct := make([]string, 0, len(patterns))
+	seen := make(map[string]bool, len(patterns))
+	for _, pattern := range patterns {
+		if !seen[pattern] {
+			seen[pattern] = true
+			distinct = append(distinct, pattern)
+		}
+	}
+	if len(distinct) < 2 || len(distinct) > maxSeparateTreePatternGreps {
+		return grepPatternLines(ctx, repo, treeish, patterns, 1, visit)
+	}
+	type firstLine struct {
+		number int
+		text   string
+	}
+	first := make(map[string]firstLine)
+	for _, pattern := range distinct {
+		err := runGrepPatternLines(ctx, repo, treeish, []string{pattern}, 1, true, func(path string, number int, text string) error {
+			if known, ok := first[path]; !ok || number < known.number {
+				first[path] = firstLine{number: number, text: text}
+			}
+			return ctx.Err()
+		})
+		if err != nil {
+			return err
+		}
+	}
+	paths := make([]string, 0, len(first))
+	for path := range first {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		match, err := treeGrepMatch(treeish, GrepMatch{Path: path, Text: first[path].text})
+		if err != nil {
+			return err
+		}
+		if err := visit(match); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func treeGrepMatch(treeish string, match GrepMatch) (GrepMatch, error) {
+	if treeish != "" {
+		prefix := treeish + ":"
+		if !strings.HasPrefix(match.Path, prefix) {
+			return GrepMatch{}, fmt.Errorf("git grep missing treeish prefix")
+		}
+		match.Path = strings.TrimPrefix(match.Path, prefix)
+	}
+	return match, nil
 }
 
 func grepPatternLines(ctx context.Context, repo, treeish string, patterns []string, maxPerFile int, visit func(GrepMatch) error) error {
+	return runGrepPatternLines(ctx, repo, treeish, patterns, maxPerFile, false, func(path string, _ int, text string) error {
+		match, err := treeGrepMatch(treeish, GrepMatch{Path: path, Text: text})
+		if err != nil {
+			return err
+		}
+		return visit(match)
+	})
+}
+
+// runGrepPatternLines runs one `git grep -f -` and streams each printed match
+// with its raw (treeish-prefixed) path. lineNumbers adds Git's 1-based line
+// number; without it every number is zero.
+func runGrepPatternLines(ctx context.Context, repo, treeish string, patterns []string, maxPerFile int, lineNumbers bool, visit func(path string, number int, text string) error) error {
 
 	if len(patterns) == 0 {
 		return nil
 	}
-	args := []string{"grep", "--no-recurse-submodules", "--no-line-number", "--no-column", "--no-color", "--no-full-name", "-z", "-I", "-E", "-m", strconv.Itoa(maxPerFile), "-f", "-"}
+	lineNumberFlag := "--no-line-number"
+	if lineNumbers {
+		lineNumberFlag = "-n"
+	}
+	args := []string{"grep", "--no-recurse-submodules", lineNumberFlag, "--no-column", "--no-color", "--no-full-name", "-z", "-I", "-E", "-m", strconv.Itoa(maxPerFile), "-f", "-"}
 	if treeish != "" {
 		args = append(args, treeish)
 	}
@@ -689,16 +825,14 @@ func grepPatternLines(ctx context.Context, repo, treeish string, patterns []stri
 		return err
 	}
 	reader := bufio.NewReader(stdout)
-	readErr := readGrepPatternLines(reader, func(match GrepMatch) error {
-		if treeish != "" {
-			prefix := treeish + ":"
-			if !strings.HasPrefix(match.Path, prefix) {
-				return fmt.Errorf("git grep missing treeish prefix")
-			}
-			match.Path = strings.TrimPrefix(match.Path, prefix)
-		}
-		return visit(match)
-	})
+	var readErr error
+	if lineNumbers {
+		readErr = readNumberedGrepPatternLines(reader, visit)
+	} else {
+		readErr = readGrepPatternLines(reader, func(match GrepMatch) error {
+			return visit(match.Path, 0, match.Text)
+		})
+	}
 	if readErr != nil {
 		_ = cmd.Process.Kill()
 	}
@@ -733,6 +867,38 @@ func readGrepPatternLines(reader *bufio.Reader, visit func(GrepMatch) error) err
 			return err
 		}
 		if visitErr := visit(GrepMatch{Path: strings.TrimSuffix(path, "\x00"), Text: strings.TrimSuffix(line, "\n")}); visitErr != nil {
+			return visitErr
+		}
+		if err == io.EOF {
+			return nil
+		}
+	}
+}
+
+// readNumberedGrepPatternLines parses `git grep -z -n` records: the path and
+// the line number are each NUL-terminated, the line text is LF-terminated.
+func readNumberedGrepPatternLines(reader *bufio.Reader, visit func(path string, number int, text string) error) error {
+	for {
+		path, err := reader.ReadString(0)
+		if err == io.EOF && path == "" {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("git grep path metadata: %w", err)
+		}
+		field, err := reader.ReadString(0)
+		if err != nil {
+			return fmt.Errorf("git grep line number: %w", err)
+		}
+		number, err := strconv.Atoi(strings.TrimSuffix(field, "\x00"))
+		if err != nil || number < 1 {
+			return fmt.Errorf("git grep returned malformed line number %q", strings.TrimSuffix(field, "\x00"))
+		}
+		line, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			return err
+		}
+		if visitErr := visit(strings.TrimSuffix(path, "\x00"), number, strings.TrimSuffix(line, "\n")); visitErr != nil {
 			return visitErr
 		}
 		if err == io.EOF {
