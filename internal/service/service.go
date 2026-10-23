@@ -96,8 +96,14 @@ const maxSocketPath = 103
 var volatileEnvironment = map[string]bool{"PWD": true, "OLDPWD": true, "SHLVL": true, "_": true}
 
 // SocketPath names the socket of the service for this executable and
-// environment, in a directory only this user can enter.
+// environment, in a directory only this user can enter. The executable is
+// named by its resolved path, so one reached through a link shares the
+// service.
 func SocketPath(executable string, environ []string) (string, error) {
+	executable, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		return "", err
+	}
 	info, err := os.Stat(executable)
 	if err != nil {
 		return "", err

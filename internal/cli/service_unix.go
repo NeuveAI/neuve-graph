@@ -98,7 +98,12 @@ func forwardToService(ctx context.Context, args []string) (handled bool, reason 
 	if !serviceEligible(args, EnvFromOS()) {
 		return false, "off", nil
 	}
+	// The resolved path: an executable reached through a link is the same
+	// build, so it shares one service.
 	executable, err := os.Executable()
+	if err == nil {
+		executable, err = filepath.EvalSymlinks(executable)
+	}
 	if err == nil {
 		var socket string
 		if socket, err = service.SocketPath(executable, os.Environ()); err == nil {

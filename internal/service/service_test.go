@@ -180,6 +180,14 @@ func TestSocketPathIsPrivateAndFollowsTheEnvironment(t *testing.T) {
 	if a != b || a == c {
 		t.Fatalf("socket names: %s %s %s", a, b, c)
 	}
+	// The same executable through a link is the same service.
+	link := filepath.Join(tmp, "linked-executable")
+	if err := os.Symlink(executable, link); err != nil {
+		t.Fatal(err)
+	}
+	if linked, err := SocketPath(link, []string{"A=1", "PWD=/x"}); err != nil || linked != a {
+		t.Fatalf("through a link: %s, %v; want %s", linked, err, a)
+	}
 	if err := os.Chmod(filepath.Dir(a), 0o755); err != nil {
 		t.Fatal(err)
 	}
