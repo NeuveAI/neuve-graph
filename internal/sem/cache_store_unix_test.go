@@ -70,3 +70,39 @@ func TestCacheReadsFollowReplacement(t *testing.T) {
 		t.Fatalf("read %q, want the replacement", commit)
 	}
 }
+
+// A copy a running Graph process holds is never removed, however long ago it
+// was last recorded as used.
+func TestPruneCacheKeepsAHeldEngineCopy(t *testing.T) {
+	cacheDir := t.TempDir()
+	name := filepath.Join("executables", key('d'), "entire-graph")
+	path := filepath.Join(cacheDir, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("engine"), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	running, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holdExecutableLock(running)
+	if _, err := PruneCache(cacheDir, CacheLimits{MaxBytes: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if !cacheFileExists(cacheDir, name) {
+		t.Fatal("a held engine copy was removed")
+	}
+	running.Close()
+	if _, err := PruneCache(cacheDir, CacheLimits{MaxBytes: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if cacheFileExists(cacheDir, name) {
+		t.Fatal("an unheld engine copy unused for a day was kept")
+	}
+}

@@ -244,3 +244,71 @@ func TestCacheBookkeepingNeverCreatesTheDirectory(t *testing.T) {
 		t.Fatal("bookkeeping created the cache directory")
 	}
 }
+
+// Engine copies count towards the cap: a prune removes other builds' copies
+// unused for a day and crashed copies' partial files, never the copy of the
+// build running it, a copy used within the day, or one still being written.
+func TestPruneCacheKeepsTheRunningEngineCopy(t *testing.T) {
+	cacheDir := t.TempDir()
+	build, err := ExecutableBuildIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	place := func(relative string, modTime time.Time) {
+		t.Helper()
+		path := filepath.Join(cacheDir, relative)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, bytes.Repeat([]byte{1}, 4096), 0o500); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, modTime, modTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	running := filepath.Join("executables", build, "entire-graph")
+	other := filepath.Join("executables", key('b'), "entire-graph")
+	recent := filepath.Join("executables", key('c'), "entire-graph")
+	stale := filepath.Join("executables", build, "entire-graph.1.partial")
+	fresh := filepath.Join("executables", key('b'), "entire-graph.2.partial")
+	place(running, old)
+	place(other, old)
+	place(recent, time.Now())
+	place(stale, old)
+	place(fresh, time.Now())
+	usage, err := PruneCache(cacheDir, CacheLimits{MaxBytes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]bool{running: true, other: false, recent: true, stale: false, fresh: true} {
+		if got := cacheFileExists(cacheDir, name); got != want {
+			t.Errorf("%s present = %v, want %v", name, got, want)
+		}
+	}
+	if usage.Families["executables"] == 0 || usage.EvictedEntries != 2 {
+		t.Fatalf("usage %+v, want the copies counted and two removals", usage)
+	}
+}
+
+// A caller that touches an engine copy it checked keeps it, however old the
+// last recorded use.
+func TestPruneCacheHonoursATouchedEngineCopy(t *testing.T) {
+	cacheDir := t.TempDir()
+	name := filepath.Join("executables", key('e'), "entire-graph")
+	path := filepath.Join(cacheDir, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("engine"), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	appendCacheUses(cacheDir, map[string]int64{"executables/" + key('e'): time.Now().Add(-72 * time.Hour).UnixNano()})
+	if _, err := PruneCache(cacheDir, CacheLimits{MaxBytes: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if !cacheFileExists(cacheDir, name) {
+		t.Fatal("a copy touched just now was removed for an old recorded use")
+	}
+}

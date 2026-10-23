@@ -22,7 +22,8 @@ import (
 // The cache store keeps one cache directory within a cap and above a floor of
 // free disk space. Everything Graph writes there counts towards the cap; what
 // it may remove are the prepared artifacts (search snapshots, syntax
-// generations, provider records) and the per-file extractions. The remembered
+// generations, provider records), the per-file extractions, and the engine
+// copies Neuve keeps in executables/<sha256>/ (never the running build's). The remembered
 // tree-scan answers and the text index keep their own bounds inside it.
 //
 // It removes, in order: artifacts of other engine versions, which this build
@@ -52,6 +53,11 @@ const (
 	// staleCacheTemporary is how old a writer's temporary file must be before
 	// the store treats it as a crashed writer's leftover.
 	staleCacheTemporary = 24 * time.Hour
+
+	// engineCopyGrace is how long after its last use an engine copy is kept
+	// whatever the pressure: a caller runs one copy many times in a row, and
+	// between those runs no process holds it.
+	engineCopyGrace = 24 * time.Hour
 )
 
 // cacheFamilyVersions names the removable artifact families and the version
@@ -257,7 +263,13 @@ func FlushCacheUse() {
 	pending := cacheUses.byRoot
 	cacheUses.byRoot = map[string]map[string]int64{}
 	cacheUses.Unlock()
+	// The engine running this command used its own copy, wherever a cache
+	// it read holds one.
+	build, err := ExecutableBuildIdentity()
 	for cacheDir, uses := range pending {
+		if err == nil {
+			uses[cacheExecutables+"/"+build] = time.Now().UnixNano()
+		}
 		appendCacheUses(cacheDir, uses)
 	}
 }
@@ -320,7 +332,13 @@ type cacheUnit struct {
 	expired  bool // of another engine version
 	lastUse  int64
 	declared bool
+	running  bool // the copy of the engine build running this prune
 }
+
+// cacheExecutables holds the engine copies Neuve runs Graph from, one
+// directory per build named by the SHA-256 of its bytes (the build identity),
+// each written under a temporary `.partial` name and renamed into place.
+const cacheExecutables = "executables"
 
 // cacheHeader is the base an artifact was prepared for, read once from its
 // head and remembered by path, size and modification time.
@@ -358,6 +376,24 @@ func scanCache(root *os.Root) (cacheScan, error) {
 		parts := strings.Split(name, "/")
 		scan.families[parts[0]] += info.Size()
 		scan.total += info.Size()
+		if parts[0] == cacheExecutables && len(parts) == 3 {
+			if strings.HasSuffix(parts[2], ".partial") {
+				if time.Since(info.ModTime()) > staleCacheTemporary {
+					scan.units = append(scan.units, &cacheUnit{family: parts[0], main: name, paths: []string{name}, bytes: info.Size(), expired: true})
+				}
+				return nil
+			}
+			unitName := path.Join(parts[0], parts[1])
+			unit := units[unitName]
+			if unit == nil {
+				build, _ := ExecutableBuildIdentity()
+				unit = &cacheUnit{family: parts[0], main: unitName, running: parts[1] == build}
+				units[unitName] = unit
+			}
+			unit.bytes += info.Size()
+			unit.paths = append(unit.paths, name)
+			return nil
+		}
 		current, removable := cacheFamilyVersions[parts[0]]
 		if !removable || len(parts) < 3 || !strings.HasSuffix(name, ".json.gz") {
 			return nil
@@ -582,12 +618,17 @@ func measureCache(store *cacheStore, limits CacheLimits, evict bool, keepTrees [
 	uses := readCacheUses(store.files)
 	usage := CacheUsage{CapBytes: limits.MaxBytes, MinFreeBytes: limits.MinFreeBytes, FreeBytes: freeDiskBytes(root.Name()), Families: scan.families}
 	for _, unit := range scan.units {
+		unit.lastUse = uses[unit.main]
 		for _, name := range unit.paths {
 			unit.lastUse = max(unit.lastUse, uses[name])
 		}
-		if unit.lastUse == 0 {
+		// No use recorded: the file's modification time. For an engine copy
+		// always the later of the two, since the caller that runs it marks a
+		// copy it has checked by touching it (it may run no command that
+		// records a use until later).
+		if unit.lastUse == 0 || unit.family == cacheExecutables {
 			if info, err := root.Lstat(unit.paths[0]); err == nil {
-				unit.lastUse = info.ModTime().UnixNano()
+				unit.lastUse = max(unit.lastUse, info.ModTime().UnixNano())
 			}
 		}
 		if unit.declared {
@@ -597,7 +638,10 @@ func measureCache(store *cacheStore, limits CacheLimits, evict bool, keepTrees [
 	total := scan.total
 	if evict {
 		// Other versions first, then the least recently used.
-		candidates := slices.DeleteFunc(slices.Clone(scan.units), func(unit *cacheUnit) bool { return unit.declared })
+		candidates := slices.DeleteFunc(slices.Clone(scan.units), func(unit *cacheUnit) bool {
+			recentCopy := unit.family == cacheExecutables && !unit.expired && time.Since(time.Unix(0, unit.lastUse)) < engineCopyGrace
+			return unit.declared || unit.running || recentCopy
+		})
 		sort.SliceStable(candidates, func(i, j int) bool {
 			if candidates[i].expired != candidates[j].expired {
 				return candidates[i].expired

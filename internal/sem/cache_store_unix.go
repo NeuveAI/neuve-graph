@@ -72,6 +72,13 @@ func stillNamed(root *os.Root, name string, file *os.File) bool {
 	return err == nil && os.SameFile(opened, named)
 }
 
+// holdExecutableLock holds a shared lock on the running executable for the
+// process's life, which keeps a prune from removing it (lockArtifactForRemoval
+// takes an exclusive one).
+func holdExecutableLock(file *os.File) {
+	_ = syscall.Flock(int(file.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
+}
+
 // freeDiskBytes is the space left to this user on dir's file system, -1 when
 // unknown.
 func freeDiskBytes(dir string) int64 {

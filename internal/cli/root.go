@@ -31,6 +31,9 @@ type Options struct {
 }
 
 func Execute(version string, args []string) error {
+	// Before anything else: while this process runs, no cache prune removes
+	// the engine copy it runs from.
+	sem.HoldExecutable()
 	ctx, stop := interruptibleContext(context.Background(), os.Exit)
 	defer stop()
 	handled, reason, err := forwardToService(ctx, args)

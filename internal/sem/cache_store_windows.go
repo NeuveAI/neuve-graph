@@ -15,4 +15,6 @@ func lockArtifactForRemoval(*os.Root, string) (func(), bool) { return func() {},
 
 func holdArtifactForRead(*os.Root, string, *os.File) bool { return true }
 
+func holdExecutableLock(*os.File) {}
+
 func freeDiskBytes(string) int64 { return -1 }
