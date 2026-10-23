@@ -3722,6 +3722,7 @@ func searchGitGrepPreselectionPatterns(q searchQuery) []string {
 
 func candidatesForFile(q searchQuery, filePath, language string, lines []string, symbols []SymbolRecord, options SearchOptions) []searchCandidate {
 	var out []searchCandidate
+	cache := newSearchLineCache(q, lines)
 	covered := make([]bool, len(lines)+1)
 	for _, symbol := range symbols {
 		start, end := clampRegion(symbol.StartLine, symbol.EndLine, len(lines))
@@ -3733,35 +3734,35 @@ func candidatesForFile(q searchQuery, filePath, language string, lines []string,
 			covered[line] = true
 		}
 		if end-searchStart+1 <= options.MaxRegionLines {
-			if candidate, ok := makeSearchCandidate(q, filePath, language, lines, searchStart, end, symbol, options.MaxSnippetLines); ok {
+			if candidate, ok := makeSearchCandidateWith(cache, q, filePath, language, lines, searchStart, end, symbol, options.MaxSnippetLines); ok {
 				out = append(out, candidate)
 			}
 			continue
 		}
-		regions := matchingLineRegions(q, lines, searchStart, end, options.ContextLines, options.MaxRegionLines)
+		regions := matchingLineRegions(cache, searchStart, end, options.ContextLines, options.MaxRegionLines)
 		for _, region := range regions {
-			attributed := attributeSearchRegion(q, lines, region[0], region[1], symbol, symbols)
-			if candidate, ok := makeSearchCandidate(q, filePath, language, lines, region[0], region[1], attributed, options.MaxSnippetLines); ok {
+			attributed := attributeSearchRegion(cache, q, lines, region[0], region[1], symbol, symbols)
+			if candidate, ok := makeSearchCandidateWith(cache, q, filePath, language, lines, region[0], region[1], attributed, options.MaxSnippetLines); ok {
 				out = append(out, candidate)
 			}
 		}
 		if len(regions) == 0 {
 			focusedEnd := minInt(end, searchStart+options.MaxRegionLines-1)
-			if candidate, ok := makeSearchCandidate(q, filePath, language, lines, searchStart, focusedEnd, symbol, options.MaxSnippetLines); ok {
+			if candidate, ok := makeSearchCandidateWith(cache, q, filePath, language, lines, searchStart, focusedEnd, symbol, options.MaxSnippetLines); ok {
 				out = append(out, candidate)
 			}
 		}
 	}
 
 	var uncoveredHits []int
-	for index, line := range lines {
+	for index := range lines {
 		lineNumber := index + 1
-		if !covered[lineNumber] && textMatchesSearchQuery(q, line) {
+		if !covered[lineNumber] && cache.matchesLine(lineNumber) {
 			uncoveredHits = append(uncoveredHits, lineNumber)
 		}
 	}
 	for _, region := range uncoveredRegionsAroundHits(uncoveredHits, covered, len(lines), options.ContextLines, options.MaxRegionLines) {
-		if candidate, ok := makeSearchCandidate(q, filePath, language, lines, region[0], region[1], SymbolRecord{}, options.MaxSnippetLines); ok {
+		if candidate, ok := makeSearchCandidateWith(cache, q, filePath, language, lines, region[0], region[1], SymbolRecord{}, options.MaxSnippetLines); ok {
 			out = append(out, candidate)
 		}
 	}
@@ -3772,7 +3773,7 @@ func candidatesForFile(q searchQuery, filePath, language string, lines []string,
 		// identifier parts or morphological variants) that pathSearchScore
 		// does not treat as evidence. Such files produce no valid candidate
 		// and must be skipped, not emitted as zero-value results.
-		if candidate, ok := makeSearchCandidate(q, filePath, language, lines, 1, end, SymbolRecord{}, options.MaxSnippetLines); ok {
+		if candidate, ok := makeSearchCandidateWith(cache, q, filePath, language, lines, 1, end, SymbolRecord{}, options.MaxSnippetLines); ok {
 			candidate.baseScore += pathSearchScore(q, filePath)
 			candidate.result.Signals = appendUnique(candidate.result.Signals, "path")
 			out = append(out, candidate)
@@ -3796,14 +3797,22 @@ func candidatesForFile(q searchQuery, filePath, language string, lines []string,
 // match that name, so it is credited to the smallest CALLABLE inside the container that
 // contains it. Regions that do include the declaration, and containers with no callable at
 // that line (field blocks, constant tables), are left exactly as they were.
+//
+// cache, when not nil, holds q and lines and supplies the focus line.
 func attributeSearchRegion(
-	q searchQuery, lines []string, start, end int, symbol SymbolRecord, symbols []SymbolRecord,
+	cache *searchLineCache, q searchQuery, lines []string, start, end int, symbol SymbolRecord, symbols []SymbolRecord,
 ) SymbolRecord {
 	if symbol.ID == "" || searchEnclosableSymbolKind(symbol.Kind) || start <= symbol.StartLine {
 		return symbol
 	}
+	focus := 0
+	if cache != nil {
+		focus = cache.focusLine(start, end)
+	} else {
+		focus = searchFocusLine(q, lines, start, end)
+	}
 	inner, ok := smallestSearchSymbolContainingLineWhere(
-		symbols, searchFocusLine(q, lines, start, end),
+		symbols, focus,
 		func(candidate SymbolRecord) bool {
 			return searchEnclosableSymbolKind(candidate.Kind) &&
 				candidate.StartLine >= symbol.StartLine && candidate.EndLine <= symbol.EndLine
@@ -4118,13 +4127,25 @@ func precedingDocumentationStart(lines []string, symbolStart, limit int) int {
 }
 
 func makeSearchCandidate(q searchQuery, filePath, language string, lines []string, start, end int, symbol SymbolRecord, maxSnippetLines int) (searchCandidate, bool) {
+	return makeSearchCandidateWith(nil, q, filePath, language, lines, start, end, symbol, maxSnippetLines)
+}
+
+// makeSearchCandidateWith is makeSearchCandidate reading lines' ranking
+// facts from cache, which must hold q and lines; a nil cache computes them.
+func makeSearchCandidateWith(cache *searchLineCache, q searchQuery, filePath, language string, lines []string, start, end int, symbol SymbolRecord, maxSnippetLines int) (searchCandidate, bool) {
 	start, end = clampRegion(start, end, len(lines))
 	if start == 0 {
 		return searchCandidate{}, false
 	}
-	regionText := strings.Join(lines[start-1:end], "\n")
-	counts, length := searchTermCounts(regionText, q)
-	focus := searchFocusLine(q, lines, start, end)
+	var counts map[string]int
+	var length, focus int
+	if cache != nil {
+		counts, length = cache.termCounts(start, end)
+		focus = cache.focusLine(start, end)
+	} else {
+		counts, length = searchTermCounts(strings.Join(lines[start-1:end], "\n"), q)
+		focus = searchFocusLine(q, lines, start, end)
+	}
 	if symbol.ID != "" {
 		focus = maxInt(focus, symbol.StartLine)
 	}
@@ -4602,7 +4623,7 @@ func searchNameMatchesAbbreviation(tokens []string, term string) bool {
 
 // Preserve the original case until identifier splitting has found camel-case boundaries.
 func searchTextMatchesAlias(text, alias string) bool {
-	for _, word := range searchSourceWordPattern.FindAllString(text, -1) {
+	for _, word := range searchSourceWords(text) {
 		if searchNameMatchesAlias(searchTokenVariants(word), alias) {
 			return true
 		}
@@ -4622,7 +4643,7 @@ func searchQueryNameTermMatches(q searchQuery, name, term string) bool {
 	if q.inferredAbbreviations[term] {
 		return searchQueryTermMatches(q, name, strings.ToLower(name), term)
 	}
-	for _, raw := range searchSourceWordPattern.FindAllString(name, -1) {
+	for _, raw := range searchSourceWords(name) {
 		if searchNameTokenMatchesTerm(searchTokenVariants(raw), term) {
 			return true
 		}
@@ -4632,7 +4653,7 @@ func searchQueryNameTermMatches(q searchQuery, name, term string) bool {
 
 func searchQueryTermMatches(q searchQuery, text, lower, term string) bool {
 	if q.inferredAbbreviations[term] {
-		for _, raw := range searchSourceWordPattern.FindAllString(text, -1) {
+		for _, raw := range searchSourceWords(text) {
 			for _, token := range searchTokenVariants(raw) {
 				for _, alias := range q.aliasTokens[token] {
 					if alias == term {
@@ -6259,10 +6280,12 @@ func searchCandidateLess(left, right searchCandidate) bool {
 	return len(left.result.Signals) < len(right.result.Signals)
 }
 
-func matchingLineRegions(q searchQuery, lines []string, start, end, context, maxLines int) [][2]int {
+// matchingLineRegions groups the lines of start..end that match the query
+// into regions, reading the matches from cache.
+func matchingLineRegions(cache *searchLineCache, start, end, context, maxLines int) [][2]int {
 	var hits []int
 	for line := start; line <= end; line++ {
-		if textMatchesSearchQuery(q, lines[line-1]) {
+		if cache.matchesLine(line) {
 			hits = append(hits, line)
 		}
 	}
@@ -7088,7 +7111,9 @@ func morphologicalSearchTerms(term string) []string {
 	return appendUnique(nil, out...)
 }
 
-func searchTokenVariants(raw string) []string {
+// computeSearchTokenVariants splits an identifier into its lower-cased whole
+// form and parts; searchTokenVariants remembers it per word.
+func computeSearchTokenVariants(raw string) []string {
 	raw = strings.Trim(raw, "./:-")
 	if raw == "" {
 		return nil
@@ -7173,7 +7198,7 @@ func sparseSearchTermCounts(text string, q searchQuery) (map[string]int, int) {
 		}
 	}
 	if len(q.inferredAbbreviations) > 0 {
-		for _, raw := range searchSourceWordPattern.FindAllString(text, -1) {
+		for _, raw := range searchSourceWords(text) {
 			countSearchAliases(counts, q, searchTokenVariants(raw))
 		}
 	}
@@ -7183,7 +7208,7 @@ func sparseSearchTermCounts(text string, q searchQuery) (map[string]int, int) {
 func searchTermCounts(text string, q searchQuery) (map[string]int, int) {
 	counts := map[string]int{}
 	length := 0
-	for _, raw := range searchSourceWordPattern.FindAllString(text, -1) {
+	for _, raw := range searchSourceWords(text) {
 		wholeTokens := searchTokenVariants(raw)
 		ordinaryTokens := wholeTokens
 		if strings.IndexFunc(raw, func(r rune) bool { return r > unicode.MaxASCII }) >= 0 {
@@ -7236,7 +7261,7 @@ func textMatchesSearchQuery(q searchQuery, text string) bool {
 		}
 	}
 	if len(q.aliasTokens) > 0 {
-		for _, raw := range searchSourceWordPattern.FindAllString(text, -1) {
+		for _, raw := range searchSourceWords(text) {
 			for _, token := range searchTokenVariants(raw) {
 				if len(q.aliasTokens[token]) > 0 {
 					return true
@@ -7251,14 +7276,7 @@ func searchFocusLine(q searchQuery, lines []string, start, end int) int {
 	bestLine := start
 	bestMatches := 0.0
 	for line := start; line <= end; line++ {
-		lower := strings.ToLower(lines[line-1])
-		matches := 0.0
-		for _, term := range q.terms {
-			if searchQueryTermMatches(q, lines[line-1], lower, term) {
-				matches += q.weights[term]
-			}
-		}
-		if matches > bestMatches {
+		if matches := searchLineFocusWeight(q, lines[line-1]); matches > bestMatches {
 			bestLine = line
 			bestMatches = matches
 		}

@@ -145,7 +145,7 @@ func (matcher searchTermMatcher) match(text string) []bool {
 		for index := range matcher.aliasTerms {
 			found[index] = false
 		}
-		for _, raw := range searchSourceWordPattern.FindAllString(text, -1) {
+		for _, raw := range searchSourceWords(text) {
 			for _, token := range searchTokenVariants(raw) {
 				for _, index := range matcher.aliasTokens[token] {
 					found[index] = true

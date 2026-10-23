@@ -1330,7 +1330,7 @@ func TestAttributeSearchRegionPrefersInnerCallable(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			got := attributeSearchRegion(q, lines, test.start, test.end, test.symbol, symbols)
+			got := attributeSearchRegion(nil, q, lines, test.start, test.end, test.symbol, symbols)
 			if got.ID != test.want {
 				t.Fatalf("attributeSearchRegion(%d-%d, %q) = %q, want %q",
 					test.start, test.end, test.symbol.ID, got.ID, test.want)
