@@ -31,9 +31,47 @@ import (
 	"time"
 )
 
-// Request is one command line for the service to run.
+// ProtocolVersion is the service's wire protocol. A caller and a service
+// of different protocols never talk: the service refuses the request and the
+// caller runs the command itself.
+const ProtocolVersion = 2
+
+// BuildStamp names the executable file a process runs: the file itself
+// (device and inode) and its size. A service answers only a caller running
+// the very same file, so a build never answers for another, even one
+// installed at the same path (an install writes a new file and renames it
+// into place). Not the modification time: Neuve touches an engine copy it
+// has checked, so the cache store keeps it, and that must not part a caller
+// from its service. While a service runs it holds its file open, so the
+// file's inode cannot be reused by another.
+type BuildStamp struct {
+	Device uint64 `json:"device"`
+	Inode  uint64 `json:"inode"`
+	Size   int64  `json:"size"`
+}
+
+// StampOf is the build stamp of an open executable file.
+func StampOf(file *os.File) (BuildStamp, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return BuildStamp{}, err
+	}
+	return stampOf(info)
+}
+
+func stampOf(info os.FileInfo) (BuildStamp, error) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return BuildStamp{}, errors.New("no file identity on this platform")
+	}
+	return BuildStamp{Device: uint64(stat.Dev), Inode: uint64(stat.Ino), Size: info.Size()}, nil
+}
+
+// Request is one command line for the service to run, from a caller running
+// the build Build.
 type Request struct {
-	Args []string `json:"args"`
+	Args  []string   `json:"args"`
+	Build BuildStamp `json:"build"`
 }
 
 // Response is what running it printed and returned.
@@ -45,6 +83,9 @@ type Response struct {
 	// Retry asks the client to run the command itself: the service could not
 	// answer it the way the client's own process would (it panicked).
 	Retry bool `json:"retry,omitempty"`
+	// Mismatch reports that the service runs another build or protocol than
+	// the caller, so it did not run the command; the caller runs it itself.
+	Mismatch bool `json:"mismatch,omitempty"`
 }
 
 const maxFrameBytes = 1 << 30
@@ -52,15 +93,18 @@ const maxFrameBytes = 1 << 30
 // wireRequest and wireResponse carry text as bytes, so arguments, output and
 // errors that are not valid UTF-8 arrive exactly as they were sent.
 type wireRequest struct {
-	Args [][]byte `json:"args"`
+	Protocol int        `json:"protocol"`
+	Build    BuildStamp `json:"build"`
+	Args     [][]byte   `json:"args"`
 }
 
 type wireResponse struct {
-	Stdout []byte `json:"stdout"`
-	Stderr []byte `json:"stderr"`
-	Failed bool   `json:"failed"`
-	Error  []byte `json:"error,omitempty"`
-	Retry  bool   `json:"retry,omitempty"`
+	Stdout   []byte `json:"stdout"`
+	Stderr   []byte `json:"stderr"`
+	Failed   bool   `json:"failed"`
+	Error    []byte `json:"error,omitempty"`
+	Retry    bool   `json:"retry,omitempty"`
+	Mismatch bool   `json:"mismatch,omitempty"`
 }
 
 func (r Request) wire() wireRequest {
@@ -68,7 +112,7 @@ func (r Request) wire() wireRequest {
 	for i, arg := range r.Args {
 		args[i] = []byte(arg)
 	}
-	return wireRequest{Args: args}
+	return wireRequest{Protocol: ProtocolVersion, Build: r.Build, Args: args}
 }
 
 func (w wireRequest) request() Request {
@@ -76,15 +120,15 @@ func (w wireRequest) request() Request {
 	for i, arg := range w.Args {
 		args[i] = string(arg)
 	}
-	return Request{Args: args}
+	return Request{Args: args, Build: w.Build}
 }
 
 func (r Response) wire() wireResponse {
-	return wireResponse{Stdout: r.Stdout, Stderr: r.Stderr, Failed: r.Failed, Error: []byte(r.Error), Retry: r.Retry}
+	return wireResponse{Stdout: r.Stdout, Stderr: r.Stderr, Failed: r.Failed, Error: []byte(r.Error), Retry: r.Retry, Mismatch: r.Mismatch}
 }
 
 func (w wireResponse) response() Response {
-	return Response{Stdout: w.Stdout, Stderr: w.Stderr, Failed: w.Failed, Error: string(w.Error), Retry: w.Retry}
+	return Response{Stdout: w.Stdout, Stderr: w.Stderr, Failed: w.Failed, Error: string(w.Error), Retry: w.Retry, Mismatch: w.Mismatch}
 }
 
 // maxSocketPath is the longest unix socket path every supported platform
@@ -95,7 +139,8 @@ const maxSocketPath = 103
 // calls from one caller, so it does not choose the service.
 var volatileEnvironment = map[string]bool{"PWD": true, "OLDPWD": true, "SHLVL": true, "_": true}
 
-// SocketPath names the socket of the service for this executable and
+// SocketPath names the socket of the service for this executable file (its
+// resolved path, device, inode and size; see BuildStamp) and
 // environment, in a directory only this user can enter. The executable is
 // named by its resolved path, so one reached through a link shares the
 // service.
@@ -108,6 +153,10 @@ func SocketPath(executable string, environ []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	stamp, err := stampOf(info)
+	if err != nil {
+		return "", err
+	}
 	var keys []string
 	for _, entry := range environ {
 		key, _, _ := strings.Cut(entry, "=")
@@ -117,7 +166,7 @@ func SocketPath(executable string, environ []string) (string, error) {
 	}
 	sort.Strings(keys)
 	sum := sha256.New()
-	fmt.Fprintf(sum, "graph-service-1\x00%s\x00%d\x00%d\x00", executable, info.Size(), info.ModTime().UnixNano())
+	fmt.Fprintf(sum, "graph-service-%d\x00%s\x00%d\x00%d\x00%d\x00", ProtocolVersion, executable, stamp.Device, stamp.Inode, stamp.Size)
 	for _, entry := range keys {
 		sum.Write([]byte(entry))
 		sum.Write([]byte{0})
@@ -126,13 +175,26 @@ func SocketPath(executable string, environ []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, hex.EncodeToString(sum.Sum(nil))[:16]+".sock"), nil
+	return filepath.Join(dir, "graph-"+hex.EncodeToString(sum.Sum(nil))[:16]+".sock"), nil
 }
 
-// socketDirectory is a per-user directory under the temporary directory that
-// only its owner can enter, refused if anyone else could have prepared it.
+// EnvDirectory overrides the service's directory, for tests and diagnosis;
+// like every setting it is part of the environment that names a service.
+const EnvDirectory = "ENTIRE_GRAPH_SERVICE_DIR"
+
+// socketDirectory is the user-level directory Neuve's sockets share,
+// /tmp/neuve-<uid> (the budget socket's and the worker socket's fallback):
+// one place every process of the user finds, whatever its TMPDIR, which
+// sandboxes vary. Only its owner may enter it, and it is refused if anyone
+// else could have prepared it or if it is a link.
 func socketDirectory() (string, error) {
-	dir := filepath.Join(os.TempDir(), fmt.Sprintf("entire-graph-%d", os.Getuid()))
+	dir := fmt.Sprintf("/tmp/neuve-%d", os.Getuid())
+	if override := os.Getenv(EnvDirectory); override != "" {
+		if !filepath.IsAbs(override) {
+			return "", fmt.Errorf("%s must be an absolute path", EnvDirectory)
+		}
+		dir = override
+	}
 	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return "", err
 	}
@@ -343,6 +405,9 @@ func Start(executable, socket string, args []string) (*os.Process, error) {
 type ServeOptions struct {
 	Concurrency int           // requests run at once
 	Idle        time.Duration // exit after this long with no request
+	// Build is the stamp of the executable the service runs; a request from a
+	// caller running another, or speaking another protocol, is refused.
+	Build BuildStamp
 	// Joined, when set, is applied to the response handed to a caller that
 	// joined an identical request already running, rather than started it.
 	Joined func(Response) Response
@@ -500,6 +565,11 @@ func Serve(ctx context.Context, socket string, opts ServeOptions, handle func(co
 			defer conn.Close()
 			var wire wireRequest
 			if err := readFrame(conn, &wire); err != nil {
+				return
+			}
+			// Only a caller of this protocol running this very executable.
+			if wire.Protocol != ProtocolVersion || wire.Build != opts.Build {
+				_ = writeFrame(conn, Response{Mismatch: true}.wire())
 				return
 			}
 			request := wire.request()

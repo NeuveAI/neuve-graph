@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -169,7 +170,7 @@ func TestSocketPathIsPrivateAndFollowsTheEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmp)
-	t.Setenv("TMPDIR", tmp)
+	t.Setenv(EnvDirectory, filepath.Join(tmp, "services"))
 	executable, _ := os.Executable()
 	a, err := SocketPath(executable, []string{"A=1", "PWD=/x"})
 	if err != nil {
@@ -193,6 +194,79 @@ func TestSocketPathIsPrivateAndFollowsTheEnvironment(t *testing.T) {
 	}
 	if _, err := SocketPath(executable, []string{"A=1"}); err == nil {
 		t.Fatal("a socket directory others can enter was accepted")
+	}
+}
+
+// Touching an executable keeps its service; a new file installed at the
+// same path, as an install renames one into place, names another.
+func TestSocketPathFollowsTheFileNotItsTimes(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv(EnvDirectory, filepath.Join(tmp, "services"))
+	executable := filepath.Join(tmp, "entire-graph")
+	if err := os.WriteFile(executable, []byte("build one"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	before, err := SocketPath(executable, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(executable, later, later); err != nil {
+		t.Fatal(err)
+	}
+	if touched, _ := SocketPath(executable, nil); touched != before {
+		t.Fatal("touching the executable named another service")
+	}
+	// The old file stays open, as a running service holds it, so the new one
+	// cannot take its inode.
+	held, err := os.Open(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	if err := os.WriteFile(executable+".new", []byte("build one"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(executable+".new", executable); err != nil {
+		t.Fatal(err)
+	}
+	if installed, _ := SocketPath(executable, nil); installed == before {
+		t.Fatal("a new file at the same path shared the old one's service")
+	}
+}
+
+// A service answers only a caller of its protocol running its very
+// executable; any other is told so and runs the command itself.
+func TestServiceRefusesAnotherBuildOrProtocol(t *testing.T) {
+	socket := shortSocket(t)
+	var runs atomic.Int32
+	serve(t, socket, ServeOptions{Build: BuildStamp{Device: 1, Inode: 7, Size: 10}}, func(ctx context.Context, request Request) Response {
+		runs.Add(1)
+		return Response{Stdout: []byte("ran")}
+	})
+	same, err := Call(t.Context(), socket, Request{Args: []string{"x"}, Build: BuildStamp{Device: 1, Inode: 7, Size: 10}})
+	if err != nil || string(same.Stdout) != "ran" || same.Mismatch {
+		t.Fatalf("the same build: %+v, %v", same, err)
+	}
+	other, err := Call(t.Context(), socket, Request{Args: []string{"x"}, Build: BuildStamp{Device: 1, Inode: 8, Size: 10}})
+	if err != nil || !other.Mismatch || len(other.Stdout) != 0 {
+		t.Fatalf("another build: %+v, %v", other, err)
+	}
+	conn, err := net.Dial("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	old := wireRequest{Protocol: ProtocolVersion - 1, Build: BuildStamp{Device: 1, Inode: 7, Size: 10}, Args: [][]byte{[]byte("x")}}
+	if err := writeFrame(conn, old); err != nil {
+		t.Fatal(err)
+	}
+	var answer wireResponse
+	if err := readFrame(conn, &answer); err != nil || !answer.Mismatch {
+		t.Fatalf("another protocol: %+v, %v", answer, err)
+	}
+	if runs.Load() != 1 {
+		t.Fatalf("%d runs, want only the matching caller's", runs.Load())
 	}
 }
 

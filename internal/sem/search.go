@@ -530,7 +530,8 @@ type SearchStats struct {
 // ServiceStats is what a read cost the process that answered it, with the
 // shared Graph service setting on. Answered is false when this read ran in its
 // own process instead; Reason then says why: "off" (the service does not take
-// this command line), "busy" or "unavailable". The memory fields are the
+// this command line), "busy", "unavailable" or "mismatch" (the service runs
+// another build or protocol). The memory fields are the
 // answering process's; the CPU fields are this read's, its git children
 // included, exact while the service runs one read at a time (with more at
 // once, they include the others'). A read that joined an identical read

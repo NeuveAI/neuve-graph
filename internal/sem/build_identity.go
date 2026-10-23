@@ -68,6 +68,10 @@ func HoldExecutable() {
 	})
 }
 
+// HeldExecutable is the executable file this process holds open, nil when
+// HoldExecutable was not called before the first need of it.
+func HeldExecutable() *os.File { return heldExecutableFile() }
+
 func heldExecutableFile() *os.File {
 	heldExecutable.once.Do(func() {}) // a hold not taken by now is not taken
 	return heldExecutable.file

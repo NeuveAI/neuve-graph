@@ -117,18 +117,34 @@ func forwardToService(ctx context.Context, args []string) (handled bool, reason 
 }
 
 func callService(ctx context.Context, executable, socket string, args []string) (handled bool, reason string, err error) {
+	build, err := runningBuild()
+	if err != nil {
+		if os.Getenv(envService) == "require" {
+			return true, "", fmt.Errorf("the Graph service cannot be reached: %v", err)
+		}
+		return false, "unavailable", nil
+	}
 	start := func() (*os.Process, error) {
 		return service.Start(executable, socket, []string{"service", "--socket", socket})
 	}
-	response, err := service.CallStarting(ctx, socket, start, service.Request{Args: args})
-	if errors.Is(err, service.ErrUnreachable) || (err == nil && response.Retry) {
+	response, err := service.CallStarting(ctx, socket, start, service.Request{Args: args, Build: build})
+	if errors.Is(err, service.ErrUnreachable) || (err == nil && (response.Retry || response.Mismatch)) {
 		if os.Getenv(envService) == "require" {
-			return true, "", fmt.Errorf("the Graph service did not answer: %v", err)
+			switch {
+			case err != nil:
+				return true, "", fmt.Errorf("the Graph service did not answer: %v", err)
+			case response.Mismatch:
+				return true, "", errors.New("the Graph service runs another build or protocol")
+			}
+			return true, "", errors.New("the Graph service was busy")
 		}
-		if err == nil {
-			return false, "busy", nil
+		switch {
+		case err != nil:
+			return false, "unavailable", nil
+		case response.Mismatch:
+			return false, "mismatch", nil
 		}
-		return false, "unavailable", nil
+		return false, "busy", nil
 	}
 	if err != nil {
 		return true, "", err
@@ -160,6 +176,10 @@ func runService(ctx context.Context, opts Options, args []string) error {
 	if socket == "" || !filepath.IsAbs(socket) {
 		return errors.New("service requires --socket with an absolute path")
 	}
+	build, err := runningBuild()
+	if err != nil {
+		return fmt.Errorf("the Graph service cannot name its own build: %w", err)
+	}
 	sem.EnableSnapshotMemory(positiveSetting(envServiceSnapshots, 2))
 	// The cache directories the service read from since it was last idle; it
 	// keeps each within its bounds when idle.
@@ -177,6 +197,7 @@ func runService(ctx context.Context, opts Options, args []string) error {
 	serveOptions := service.ServeOptions{
 		Concurrency: positiveSetting(envServiceConcurrency, 1),
 		Idle:        time.Duration(positiveSetting(envServiceIdle, 60)) * time.Second,
+		Build:       build,
 		Joined:      joinedServiceResponse,
 		OnIdle:      pruneIdle,
 	}
@@ -302,6 +323,16 @@ func joinedServiceResponse(response service.Response) service.Response {
 	stdout = append(append(append(stdout, response.Stdout[:start]...), block...), response.Stdout[end:]...)
 	response.Stdout = stdout
 	return response
+}
+
+// runningBuild is the stamp of the executable file this process runs, the
+// one it holds open from its start (sem.HoldExecutable).
+func runningBuild() (service.BuildStamp, error) {
+	held := sem.HeldExecutable()
+	if held == nil {
+		return service.BuildStamp{}, errors.New("this process does not hold its executable")
+	}
+	return service.StampOf(held)
 }
 
 // processCPU is the CPU this process and the children it has waited for (the

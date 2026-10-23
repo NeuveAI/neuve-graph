@@ -126,7 +126,7 @@ func TestServiceAnswersAsTheProcessDoes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmp)
-	base := append(os.Environ(), "TMPDIR="+tmp, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	base := append(os.Environ(), "TMPDIR="+tmp, service.EnvDirectory+"="+filepath.Join(tmp, "services"), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
 	var plainEnv []string
 	for _, entry := range base {
 		if !strings.HasPrefix(entry, envService+"=") {
@@ -166,7 +166,7 @@ func TestServiceAnswersAsTheProcessDoes(t *testing.T) {
 		{"neighbors", "--repo", repo, "--head", "--prepared-only", "--profile", "full", "--format", "json", "--symbol", "closeSession", "--cache-dir", cache},
 	}
 	sockets := func() []string {
-		matches, _ := filepath.Glob(filepath.Join(tmp, "entire-graph-*", "*.sock"))
+		matches, _ := filepath.Glob(filepath.Join(tmp, "services", "*.sock"))
 		return matches
 	}
 	// Start the service and wait for it to listen: a loaded machine can take
@@ -178,7 +178,7 @@ func TestServiceAnswersAsTheProcessDoes(t *testing.T) {
 			t.Fatal("the service never listened")
 		}
 	}
-	primed, _ := filepath.Glob(filepath.Join(tmp, "entire-graph-*", "*.sock.log"))
+	primed, _ := filepath.Glob(filepath.Join(tmp, "services", "*.sock.log"))
 	for _, path := range primed {
 		os.Remove(path)
 	}
@@ -233,7 +233,7 @@ func TestServiceAnswersAsTheProcessDoes(t *testing.T) {
 	}
 	// Each read the service answered left one line in its log, with the
 	// block it reported.
-	logs, _ := filepath.Glob(filepath.Join(tmp, "entire-graph-*", "*.sock.log"))
+	logs, _ := filepath.Glob(filepath.Join(tmp, "services", "*.sock.log"))
 	if len(logs) != 1 {
 		t.Fatalf("service logs %v, want one", logs)
 	}
@@ -329,7 +329,7 @@ func TestServiceFallbackIsImmediate(t *testing.T) {
 	if err := os.MkdirAll(long, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	env := append(os.Environ(), "TMPDIR="+long, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	env := append(os.Environ(), service.EnvDirectory+"="+long, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
 	index := exec.Command(binary, "index", "--repo", repo, "--head", "--profile", "full", "--cache-dir", cache, "--format", "json")
 	index.Env = env
 	if out, err := index.CombinedOutput(); err != nil {
