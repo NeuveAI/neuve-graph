@@ -337,6 +337,9 @@ func Start(executable, socket string, args []string) (*os.Process, error) {
 type ServeOptions struct {
 	Concurrency int           // requests run at once
 	Idle        time.Duration // exit after this long with no request
+	// Joined, when set, is applied to the response handed to a caller that
+	// joined an identical request already running, rather than started it.
+	Joined func(Response) Response
 }
 
 // Serve runs the service on socket until ctx ends or it has been idle for
@@ -441,6 +444,9 @@ func Serve(ctx context.Context, socket string, opts ServeOptions, handle func(co
 		mu.Unlock()
 		select {
 		case <-call.done:
+			if joined && opts.Joined != nil {
+				return opts.Joined(call.response), !call.cancelled
+			}
 			return call.response, !call.cancelled
 		case <-requestCtx.Done():
 			mu.Lock()

@@ -21,6 +21,7 @@ type snapshotMemory struct {
 	max      int
 	entries  map[string]*snapshotMemoryEntry
 	sequence uint64
+	reads    int
 	hits     int
 }
 
@@ -55,17 +56,34 @@ func currentSnapshotMemory() *snapshotMemory {
 	return activeSnapshotMemory
 }
 
+// SnapshotMemoryState reports the decoded snapshots this process holds, how
+// many it may hold, and how many snapshot reads it has served and how many of
+// them came from memory; all zero when the memory is off.
+func SnapshotMemoryState() (held, limit, reads, hits int) {
+	memory := currentSnapshotMemory()
+	if memory == nil {
+		return 0, 0, 0, 0
+	}
+	memory.mu.Lock()
+	defer memory.mu.Unlock()
+	return len(memory.entries), memory.max, memory.reads, memory.hits
+}
+
 // read returns the snapshot of the opened artifact, decoding it at most once
 // per identity; concurrent readers of one identity share one decode.
 func (m *snapshotMemory) read(path string, info os.FileInfo, decode func() (cachedSearchSnapshot, error)) (cachedSearchSnapshot, bool, error) {
 	identity, ok := cacheFileIdentity(info)
 	if !ok {
+		m.mu.Lock()
+		m.reads++
+		m.mu.Unlock()
 		cached, err := decode()
 		return cached, false, err
 	}
 	key := path + "\x00" + identity
 	m.mu.Lock()
 	entry, hit := m.entries[key]
+	m.reads++
 	if !hit {
 		entry = &snapshotMemoryEntry{}
 		m.entries[key] = entry

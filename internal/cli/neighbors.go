@@ -118,8 +118,11 @@ type neighborResponse struct {
 	IndexLatencyMS     int64 `json:"index_latency_ms"`
 	QueryLatencyMS     int64 `json:"query_latency_ms"`
 	TotalLatencyMS     int64 `json:"total_latency_ms"`
-	Truncated          bool  `json:"truncated"`
-	FocusMatchesTotal  int   `json:"focus_matches_total"`
+	// Service reports, whenever the shared Graph service setting is on,
+	// whether the service answered this read and what it used.
+	Service           *sem.ServiceStats `json:"service,omitempty"`
+	Truncated         bool              `json:"truncated"`
+	FocusMatchesTotal int               `json:"focus_matches_total"`
 	// FuzzyMatch reports that no EXACT match existed and these candidates came from the fuzzy ladder.
 	// FuzzyMatchKind names the rung, so a consumer is never misled about what it asked for.
 	FuzzyMatch     bool   `json:"fuzzy_match,omitempty"`
@@ -189,9 +192,13 @@ func runNeighbors(ctx context.Context, opts Options, args []string) error {
 	indexLatency := time.Since(indexStarted)
 	queryStarted := time.Now()
 	readSource, closeSource := openSnapshotLineReaderOrDegrade(ctx, snapshot, flags.Worktree, opts.Stderr)
-	if closeSource != nil {
-		defer closeSource()
+	finishSource := func() {
+		if closeSource != nil {
+			closeSource()
+			closeSource = nil
+		}
 	}
+	defer finishSource()
 	if flags.PreparedOnly && ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -213,6 +220,10 @@ func runNeighbors(ctx context.Context, opts Options, args []string) error {
 	if flags.PreparedOnly && ctx.Err() != nil {
 		return ctx.Err()
 	}
+	// The source reader's git child is waited for when it closes, so its CPU
+	// counts in the `service` block only once closed.
+	finishSource()
+	response.Service = serviceStats(ctx)
 	switch flags.Format {
 	case "json":
 		encoder := json.NewEncoder(termsafe.NewJSONWriter(opts.Stdout))

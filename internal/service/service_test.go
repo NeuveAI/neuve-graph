@@ -56,7 +56,11 @@ func TestIdenticalRequestsRunOnce(t *testing.T) {
 	socket := shortSocket(t)
 	var runs atomic.Int32
 	release := make(chan struct{})
-	serve(t, socket, ServeOptions{Concurrency: 2}, func(ctx context.Context, request Request) Response {
+	joined := func(response Response) Response {
+		response.Stdout = append([]byte("joined "), response.Stdout...)
+		return response
+	}
+	serve(t, socket, ServeOptions{Concurrency: 2, Joined: joined}, func(ctx context.Context, request Request) Response {
 		runs.Add(1)
 		<-release
 		return Response{Stdout: []byte(request.Args[0])}
@@ -77,8 +81,14 @@ func TestIdenticalRequestsRunOnce(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	close(release)
 	wg.Wait()
-	if runs.Load() != 2 || string(results[0].Stdout) != "same" || string(results[1].Stdout) != "same" || string(results[2].Stdout) != "other" {
-		t.Fatalf("runs = %d, results = %+v", runs.Load(), results)
+	// The caller that joined the running "same" gets the Joined form, the
+	// one that started it the response as it was.
+	same := []string{string(results[0].Stdout), string(results[1].Stdout)}
+	if same[0] > same[1] {
+		same[0], same[1] = same[1], same[0]
+	}
+	if runs.Load() != 2 || same[0] != "joined same" || same[1] != "same" || string(results[2].Stdout) != "other" {
+		t.Fatalf("runs = %d, results = %q %q %q", runs.Load(), results[0].Stdout, results[1].Stdout, results[2].Stdout)
 	}
 }
 

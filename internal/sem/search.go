@@ -522,6 +522,33 @@ type SearchStats struct {
 	// separate preselection, index, and query phases.
 	SearchLatencyMS    int64 `json:"search_latency_ms"`
 	PreselectLatencyMS int64 `json:"preselect_latency_ms"`
+	// Service reports, whenever the shared Graph service setting is on, whether
+	// the service answered this read and what it used. Absent otherwise.
+	Service *ServiceStats `json:"service,omitempty"`
+}
+
+// ServiceStats is what a read cost the process that answered it, with the
+// shared Graph service setting on. Answered is false when this read ran in its
+// own process instead; Reason then says why: "off" (the service does not take
+// this command line), "busy" or "unavailable". The memory fields are the
+// answering process's; the CPU fields are this read's, its git children
+// included, exact while the service runs one read at a time (with more at
+// once, they include the others'). A read that joined an identical read
+// already running in the service reports no CPU of its own: the run's CPU is
+// reported once, to the caller that started it.
+type ServiceStats struct {
+	Answered       bool   `json:"answered"`
+	Reason         string `json:"reason,omitempty"`
+	RSSBytes       uint64 `json:"rss_bytes"`
+	MaxRSSBytes    uint64 `json:"max_rss_bytes"`
+	SnapshotsHeld  int    `json:"snapshots_held"`
+	SnapshotsLimit int    `json:"snapshots_limit"`
+	// SnapshotHit is true when every prepared snapshot this read used was
+	// already decoded in the service's memory.
+	SnapshotHit bool  `json:"snapshot_hit"`
+	CPUUserMS   int64 `json:"cpu_user_ms"`
+	CPUSystemMS int64 `json:"cpu_system_ms"`
+	QueueWaitMS int64 `json:"queue_wait_ms"`
 }
 
 // SearchFormatVersion versions the search RESPONSE ENVELOPE, the same axis

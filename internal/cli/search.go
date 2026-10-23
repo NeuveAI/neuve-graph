@@ -327,6 +327,7 @@ func runSearch(ctx context.Context, opts Options, args []string) error {
 	if err := response.Validate(); err != nil {
 		return err
 	}
+	response.Stats.Service = serviceStats(ctx)
 	// With a session active the payload is teed, so the echo replays the exact bytes this call
 	// handed the agent — the stored answer is the rendered output, not a re-render of the response.
 	out := opts.Stdout

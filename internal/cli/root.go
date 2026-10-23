@@ -33,8 +33,12 @@ type Options struct {
 func Execute(version string, args []string) error {
 	ctx, stop := interruptibleContext(context.Background(), os.Exit)
 	defer stop()
-	if handled, err := forwardToService(ctx, args); handled {
+	handled, reason, err := forwardToService(ctx, args)
+	if handled {
 		return err
+	}
+	if reason != "" {
+		ctx = withServiceReport(ctx, newServiceReport(false, reason))
 	}
 	return Run(ctx, Options{
 		Version: version,
