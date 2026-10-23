@@ -229,6 +229,7 @@ func (entry cacheEntry) open() (*os.File, error) {
 		}
 		if holdArtifactForRead(root, entry.relative, file) {
 			noteCacheUse(entry.root, entry.relative)
+			noteCacheOpen(entry.root, entry.relative, file)
 			return file, nil
 		}
 		_ = file.Close()

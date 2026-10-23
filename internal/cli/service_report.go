@@ -2,10 +2,29 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/entireio/entire-graph/internal/sem"
 )
+
+// ExitServiceDeadline is the exit status of a call whose deadline
+// (ENTIRE_GRAPH_DEADLINE_MS) passed while it waited for the shared Graph
+// service, with nothing on stdout: EX_TEMPFAIL, "try again later". A search
+// the service had already taken goes on there, and an exact-commit read keeps
+// its answer for the next identical call.
+const ExitServiceDeadline = 75
+
+// ErrServiceDeadline is the error of such a call.
+var ErrServiceDeadline = errors.New("deadline passed while waiting for the Graph service")
+
+// ExitCode is the process exit status for a command's error.
+func ExitCode(err error) int {
+	if errors.Is(err, ErrServiceDeadline) {
+		return ExitServiceDeadline
+	}
+	return 1
+}
 
 // serviceReport measures one prepared read for the `service` block of its
 // JSON, whenever the shared Graph service setting is on: in the service, the

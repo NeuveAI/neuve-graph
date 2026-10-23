@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/entireio/entire-graph/internal/gitutil"
 	"github.com/entireio/entire-graph/internal/sem"
 	"github.com/entireio/entire-graph/internal/service"
 )
@@ -26,7 +27,31 @@ const (
 	envServiceIdle        = "ENTIRE_GRAPH_SERVICE_IDLE"        // seconds before an idle service exits (60)
 	envServiceConcurrency = "ENTIRE_GRAPH_SERVICE_CONCURRENCY" // commands run at once (1)
 	envServiceSnapshots   = "ENTIRE_GRAPH_SERVICE_SNAPSHOTS"   // decoded snapshots kept (2)
+
+	// A call's class and deadline, set per call; they order the service's
+	// queue and never change an answer, so they name no service.
+	envClass      = "ENTIRE_GRAPH_CLASS"       // "interactive" or "background" (default)
+	envDeadlineMS = "ENTIRE_GRAPH_DEADLINE_MS" // milliseconds from now the call waits for the service at most
 )
+
+// callTiming reads the call's class and deadline from its environment.
+func callTiming() (class string, deadline time.Time, err error) {
+	switch class = os.Getenv(envClass); class {
+	case "":
+		class = service.ClassBackground
+	case service.ClassInteractive, service.ClassBackground:
+	default:
+		return "", time.Time{}, fmt.Errorf("%s must be %q or %q, got %q", envClass, service.ClassInteractive, service.ClassBackground, class)
+	}
+	if raw := os.Getenv(envDeadlineMS); raw != "" {
+		ms, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || ms <= 0 {
+			return "", time.Time{}, fmt.Errorf("%s must be a positive number of milliseconds, got %q", envDeadlineMS, raw)
+		}
+		deadline = time.Now().Add(time.Duration(ms) * time.Millisecond)
+	}
+	return class, deadline, nil
+}
 
 // serviceCommands are the read-only prepared reads a service answers: the
 // commands whose cost is mostly loading a prepared snapshot.
@@ -95,6 +120,10 @@ func forwardToService(ctx context.Context, args []string) (handled bool, reason 
 	if !serviceSettingOn(args) {
 		return false, "", nil
 	}
+	class, deadline, err := callTiming()
+	if err != nil {
+		return true, "", err
+	}
 	if !serviceEligible(args, EnvFromOS()) {
 		return false, "off", nil
 	}
@@ -107,7 +136,7 @@ func forwardToService(ctx context.Context, args []string) (handled bool, reason 
 	if err == nil {
 		var socket string
 		if socket, err = service.SocketPath(executable, os.Environ()); err == nil {
-			return callService(ctx, executable, socket, args)
+			return callService(ctx, executable, socket, args, class, deadline)
 		}
 	}
 	if os.Getenv(envService) == "require" {
@@ -116,7 +145,7 @@ func forwardToService(ctx context.Context, args []string) (handled bool, reason 
 	return false, "unavailable", nil
 }
 
-func callService(ctx context.Context, executable, socket string, args []string) (handled bool, reason string, err error) {
+func callService(ctx context.Context, executable, socket string, args []string, class string, deadline time.Time) (handled bool, reason string, err error) {
 	build, err := runningBuild()
 	if err != nil {
 		if os.Getenv(envService) == "require" {
@@ -127,7 +156,16 @@ func callService(ctx context.Context, executable, socket string, args []string) 
 	start := func() (*os.Process, error) {
 		return service.Start(executable, socket, []string{"service", "--socket", socket})
 	}
-	response, err := service.CallStarting(ctx, socket, start, service.Request{Args: args, Build: build})
+	callCtx := ctx
+	if !deadline.IsZero() {
+		var cancel context.CancelFunc
+		callCtx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
+	}
+	response, err := service.CallStarting(callCtx, socket, start, service.Request{Args: args, Build: build, Class: class, Deadline: deadline})
+	if err != nil && ctx.Err() == nil && errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+		return true, "", ErrServiceDeadline
+	}
 	if errors.Is(err, service.ErrUnreachable) || (err == nil && (response.Retry || response.Mismatch)) {
 		if os.Getenv(envService) == "require" {
 			switch {
@@ -198,8 +236,12 @@ func runService(ctx context.Context, opts Options, args []string) error {
 		Concurrency: positiveSetting(envServiceConcurrency, 1),
 		Idle:        time.Duration(positiveSetting(envServiceIdle, 60)) * time.Second,
 		Build:       build,
-		Joined:      joinedServiceResponse,
+		Deliver:     deliverServiceResponse,
+		Keepable:    keepableServiceRead,
 		OnIdle:      pruneIdle,
+		OnExit: func(idle time.Duration) {
+			appendServiceLog(socket, map[string]any{"time": time.Now().UTC().Format(time.RFC3339Nano), "event": "exit", "idle_ms": idle.Milliseconds()})
+		},
 	}
 	return service.Serve(ctx, socket, serveOptions, func(requestCtx context.Context, request service.Request) (response service.Response) {
 		if len(request.Args) == 0 || !serviceCommands[request.Args[0]] {
@@ -215,7 +257,7 @@ func runService(ctx context.Context, opts Options, args []string) error {
 		panicked := false
 		// Deferred first so it runs last, after a panic became a Retry.
 		defer func() {
-			logServiceRead(socket, request.Args[0], report, started, response, panicked, requestCtx.Err() != nil)
+			logServiceRead(socket, request, report, started, response, panicked, requestCtx.Err() != nil)
 		}()
 		defer func() {
 			if recover() != nil {
@@ -223,11 +265,27 @@ func runService(ctx context.Context, opts Options, args []string) error {
 				response = service.Response{Retry: true}
 			}
 		}()
+		// A read whose answer may be kept records what it opened, so the
+		// kept answer is served only while all of that is unchanged.
+		var opened *sem.CacheOpenRecord
+		var policy map[string]sem.FileIdentity
+		keepable := keepableServiceRead(request)
+		if keepable {
+			policy = identifyFiles(servingPolicyFiles(requestCtx, request.Args))
+			opened = sem.RecordCacheOpens()
+		}
 		var stdout, stderr bytes.Buffer
 		err := Run(withServiceReport(requestCtx, report), Options{Version: opts.Version, Env: EnvFromOS(), Stdout: &stdout, Stderr: &stderr, Stdin: bytes.NewReader(nil)}, request.Args)
 		response = service.Response{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
 		if err != nil {
 			response.Failed, response.Error = true, err.Error()
+		}
+		if keepable {
+			inputs := opened.Stop()
+			for path, identity := range policy {
+				inputs[path] = identity
+			}
+			response.StillValid = inputsUnchanged(inputs)
 		}
 		return response
 	})
@@ -259,20 +317,30 @@ var serviceLogMu sync.Mutex
 // <socket>.log: its command, outcome (failed, a panic handed back as Retry,
 // or cancelled because its callers left), duration and `service` block
 // (measured at its end when the read wrote none, as a text read does).
-func logServiceRead(socket, command string, report *serviceReport, started time.Time, response service.Response, panicked, cancelled bool) {
+func logServiceRead(socket string, request service.Request, report *serviceReport, started time.Time, response service.Response, panicked, cancelled bool) {
 	stats := report.stats
 	if stats == nil {
 		stats = serviceStats(withServiceReport(context.Background(), report), "")
 	}
-	line, err := json.Marshal(struct {
-		Time      string            `json:"time"`
-		Command   string            `json:"command"`
-		Failed    bool              `json:"failed,omitempty"`
-		Panicked  bool              `json:"panicked,omitempty"`
-		Cancelled bool              `json:"cancelled,omitempty"`
-		TotalMS   int64             `json:"total_ms"`
-		Service   *sem.ServiceStats `json:"service"`
-	}{time.Now().UTC().Format(time.RFC3339Nano), command, response.Failed, panicked, cancelled, time.Since(started).Milliseconds(), stats})
+	appendServiceLog(socket, struct {
+		Time      string `json:"time"`
+		Command   string `json:"command"`
+		Class     string `json:"class"`
+		Failed    bool   `json:"failed,omitempty"`
+		Panicked  bool   `json:"panicked,omitempty"`
+		Cancelled bool   `json:"cancelled,omitempty"`
+		TotalMS   int64  `json:"total_ms"`
+		// IdleBeforeMS is how long the service had been idle when this
+		// read's first caller arrived: the gaps the idle exit is set from.
+		IdleBeforeMS int64             `json:"idle_before_ms"`
+		KeptBytes    int64             `json:"kept_bytes"`
+		Service      *sem.ServiceStats `json:"service"`
+	}{time.Now().UTC().Format(time.RFC3339Nano), request.Args[0], request.Class, response.Failed, panicked, cancelled, time.Since(started).Milliseconds(), request.IdleBefore.Milliseconds(), service.KeptBytes(), stats})
+}
+
+// appendServiceLog appends one JSON line to <socket>.log.
+func appendServiceLog(socket string, value any) {
+	line, err := json.Marshal(value)
 	if err != nil {
 		return
 	}
@@ -295,11 +363,112 @@ func logServiceRead(socket, command string, report *serviceReport, started time.
 // key, and the block holds no nested object, so it ends at the next brace.
 var joinedServiceBlock = []byte(`"service":{"answered":true`)
 
-// joinedServiceResponse is the answer handed to a caller whose read joined an
-// identical one already running: the same bytes, except that its `service`
-// block reports no CPU of its own, so the CPU of one run is counted once
-// however many callers shared it.
+// keepableServiceRead reports whether a read's task runs on when its callers
+// leave, with its answer kept: a prepared read at an exact commit, whose
+// inputs cannot move under it. A --head read follows HEAD, so it never is.
+func keepableServiceRead(request service.Request) bool {
+	args := request.Args
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "query", "search":
+		flags, _, err := parseSearchFlags(args[1:])
+		return err == nil && flags.PreparedOnly && isExactOID(flags.PreparedCommit)
+	case "neighbors":
+		flags, err := parseNeighborFlags(args[1:])
+		return err == nil && flags.PreparedOnly && isExactOID(flags.PreparedCommit)
+	}
+	return false
+}
+
+// servingPolicyFiles are the files besides the cache an exact-commit prepared
+// read's answer depends on: the serving directory's external policy (ADR
+// 0008), the repository's .graphignore and the ignore and include files the
+// read names, and the repository's git config.
+func servingPolicyFiles(ctx context.Context, args []string) []string {
+	var repo string
+	var files []string
+	switch args[0] {
+	case "query", "search":
+		flags, _, err := parseSearchFlags(args[1:])
+		if err != nil {
+			return nil
+		}
+		repo, files = flags.Repo, append(append(files, flags.IgnoreFiles...), flags.IncludeFiles...)
+	case "neighbors":
+		flags, err := parseNeighborFlags(args[1:])
+		if err != nil {
+			return nil
+		}
+		repo, files = flags.Repo, append(append(files, flags.IgnoreFile...), flags.IncludeFile...)
+	}
+	files = append(files, filepath.Join(repo, ".graphignore"))
+	if top, err := resolveRepo(ctx, EnvFromOS(), repo); err == nil && top != repo {
+		files = append(files, filepath.Join(top, ".graphignore"))
+	}
+	// The repository's config holds the remote its preparations are keyed by.
+	if common, err := gitutil.CommonDir(ctx, repo); err == nil {
+		files = append(files, filepath.Join(common, "config"))
+	}
+	return files
+}
+
+func identifyFiles(paths []string) map[string]sem.FileIdentity {
+	identities := make(map[string]sem.FileIdentity, len(paths))
+	for _, path := range paths {
+		identities[path] = sem.IdentifyFile(path)
+	}
+	return identities
+}
+
+// inputsUnchanged returns a check that each path still names what it named
+// when recorded: the same file (device and inode), size and modification
+// time, or still nothing.
+func inputsUnchanged(recorded map[string]sem.FileIdentity) func() bool {
+	return func() bool {
+		for path, identity := range recorded {
+			if sem.IdentifyFile(path) != identity {
+				return false
+			}
+		}
+		return true
+	}
+}
+
+func isExactOID(oid string) bool {
+	return (len(oid) == 40 || len(oid) == 64) && isLowerHex(oid)
+}
+
+// deliverServiceResponse is one caller's answer: the shared bytes, with the
+// `service` block saying how this caller got it. A caller that joined a task
+// another started, or was answered from a kept answer, reports no CPU of its
+// own, so the CPU of one run is counted once however many callers shared it.
+func deliverServiceResponse(response service.Response, delivery service.Delivery) service.Response {
+	return rewriteServiceBlock(response, func(stats *sem.ServiceStats) {
+		if delivery.Joined || delivery.Kept {
+			stats.CPUUserMS, stats.CPUSystemMS = 0, 0
+		}
+		stats.Class = delivery.Class
+		stats.KeptAnswer = delivery.Kept
+		stats.MovedUp = delivery.MovedUp
+		stats.QueueWaitMS = delivery.QueueWait.Milliseconds()
+		if delivery.Kept {
+			stats.QueueWaitMS = 0
+		}
+	})
+}
+
+// joinedServiceResponse is the answer handed to a caller that joined a task
+// another caller started.
 func joinedServiceResponse(response service.Response) service.Response {
+	return deliverServiceResponse(response, service.Delivery{Joined: true})
+}
+
+// rewriteServiceBlock changes the `service` block of an answer the service
+// gave, leaving every other byte as it was; an answer with none (a text
+// format) is returned unchanged.
+func rewriteServiceBlock(response service.Response, change func(*sem.ServiceStats)) service.Response {
 	at := bytes.Index(response.Stdout, joinedServiceBlock)
 	if at < 0 {
 		return response
@@ -314,7 +483,7 @@ func joinedServiceResponse(response service.Response) service.Response {
 	if err := json.Unmarshal(response.Stdout[start:end], &stats); err != nil {
 		return response
 	}
-	stats.CPUUserMS, stats.CPUSystemMS = 0, 0
+	change(&stats)
 	block, err := json.Marshal(stats)
 	if err != nil {
 		return response

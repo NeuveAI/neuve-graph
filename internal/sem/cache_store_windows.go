@@ -18,3 +18,7 @@ func holdArtifactForRead(*os.Root, string, *os.File) bool { return true }
 func holdExecutableLock(*os.File) {}
 
 func freeDiskBytes(string) int64 { return -1 }
+
+func identityOf(info os.FileInfo) FileIdentity {
+	return FileIdentity{Present: true, Size: info.Size(), ModTime: info.ModTime().UnixNano()}
+}

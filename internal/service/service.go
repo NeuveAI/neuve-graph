@@ -68,10 +68,17 @@ func stampOf(info os.FileInfo) (BuildStamp, error) {
 }
 
 // Request is one command line for the service to run, from a caller running
-// the build Build.
+// the build Build, of class Class (interactive or background) that waits until
+// Deadline (zero: no deadline). Class and deadline order the queue; they never
+// change the answer.
 type Request struct {
-	Args  []string   `json:"args"`
-	Build BuildStamp `json:"build"`
+	Args     []string
+	Build    BuildStamp
+	Class    string
+	Deadline time.Time
+	// IdleBefore is how long the service had been idle when this request
+	// arrived, set by the service for the request that starts a task.
+	IdleBefore time.Duration
 }
 
 // Response is what running it printed and returned.
@@ -86,6 +93,10 @@ type Response struct {
 	// Mismatch reports that the service runs another build or protocol than
 	// the caller, so it did not run the command; the caller runs it itself.
 	Mismatch bool `json:"mismatch,omitempty"`
+	// StillValid, set by the service's handler for an answer it may keep,
+	// reports whether every input the answer came from is as it was; a kept
+	// answer is served only while it is. Never sent.
+	StillValid func() bool `json:"-"`
 }
 
 const maxFrameBytes = 1 << 30
@@ -93,9 +104,11 @@ const maxFrameBytes = 1 << 30
 // wireRequest and wireResponse carry text as bytes, so arguments, output and
 // errors that are not valid UTF-8 arrive exactly as they were sent.
 type wireRequest struct {
-	Protocol int        `json:"protocol"`
-	Build    BuildStamp `json:"build"`
-	Args     [][]byte   `json:"args"`
+	Protocol       int        `json:"protocol"`
+	Build          BuildStamp `json:"build"`
+	Args           [][]byte   `json:"args"`
+	Class          string     `json:"class,omitempty"`
+	DeadlineUnixMS int64      `json:"deadline_unix_ms,omitempty"`
 }
 
 type wireResponse struct {
@@ -112,7 +125,11 @@ func (r Request) wire() wireRequest {
 	for i, arg := range r.Args {
 		args[i] = []byte(arg)
 	}
-	return wireRequest{Protocol: ProtocolVersion, Build: r.Build, Args: args}
+	wire := wireRequest{Protocol: ProtocolVersion, Build: r.Build, Args: args, Class: r.Class}
+	if !r.Deadline.IsZero() {
+		wire.DeadlineUnixMS = r.Deadline.UnixMilli()
+	}
+	return wire
 }
 
 func (w wireRequest) request() Request {
@@ -120,7 +137,14 @@ func (w wireRequest) request() Request {
 	for i, arg := range w.Args {
 		args[i] = string(arg)
 	}
-	return Request{Args: args, Build: w.Build}
+	request := Request{Args: args, Build: w.Build, Class: w.Class}
+	if request.Class == "" {
+		request.Class = ClassBackground
+	}
+	if w.DeadlineUnixMS > 0 {
+		request.Deadline = time.UnixMilli(w.DeadlineUnixMS)
+	}
+	return request
 }
 
 func (r Response) wire() wireResponse {
@@ -137,7 +161,11 @@ const maxSocketPath = 103
 
 // volatileEnvironment never changes what Graph computes and changes between
 // calls from one caller, so it does not choose the service.
-var volatileEnvironment = map[string]bool{"PWD": true, "OLDPWD": true, "SHLVL": true, "_": true}
+var volatileEnvironment = map[string]bool{
+	"PWD": true, "OLDPWD": true, "SHLVL": true, "_": true,
+	// A call's class and deadline: they order the queue, never the answer.
+	"ENTIRE_GRAPH_CLASS": true, "ENTIRE_GRAPH_DEADLINE_MS": true,
+}
 
 // SocketPath names the socket of the service for this executable file (its
 // resolved path, device, inode and size; see BuildStamp) and
@@ -462,9 +490,16 @@ type ServeOptions struct {
 	// Build is the stamp of the executable the service runs; a request from a
 	// caller running another, or speaking another protocol, is refused.
 	Build BuildStamp
-	// Joined, when set, is applied to the response handed to a caller that
-	// joined an identical request already running, rather than started it.
-	Joined func(Response) Response
+	// Deliver, when set, is applied to each caller's answer with how that
+	// caller got it (joined, kept, moved up, its class and queue wait).
+	Deliver func(Response, Delivery) Response
+	// Keepable reports whether a request's task runs on when its callers
+	// leave, and its answer is kept for repeat requests: only one whose
+	// inputs cannot move under it.
+	Keepable func(Request) bool
+	// OnExit, when set, runs as the idle service exits, with the idle time
+	// that ended it.
+	OnExit func(idle time.Duration)
 	// OnIdle, when set, runs once each time the service has had no request
 	// for IdleWorkAfter (default 5 s, at most half of Idle) after serving
 	// some; the service does not exit while it runs.
@@ -523,9 +558,7 @@ func Serve(ctx context.Context, socket string, opts ServeOptions, handle func(co
 		active   int
 		idleDone = true // nothing to do while idle until a request ran
 		lastSeen = time.Now()
-		inFlight = map[string]*sharedCall{}
 		wg       sync.WaitGroup
-		slots    = make(chan struct{}, opts.Concurrency)
 	)
 	touch := func(delta int) {
 		mu.Lock()
@@ -534,6 +567,9 @@ func Serve(ctx context.Context, socket string, opts ServeOptions, handle func(co
 		lastSeen = time.Now()
 		mu.Unlock()
 	}
+	// The idle timer counts from the end of the last task, queued or running,
+	// as well as from the last connection.
+	tasks := newQueue(ctx, opts.Concurrency, handle, opts.Keepable, func() { touch(0) })
 	if opts.IdleWorkAfter <= 0 {
 		opts.IdleWorkAfter = min(5*time.Second, opts.Idle/2)
 	}
@@ -546,74 +582,28 @@ func Serve(ctx context.Context, socket string, opts ServeOptions, handle func(co
 				listener.Close()
 				return
 			case <-ticker.C:
+				busy := tasks.busy()
 				mu.Lock()
 				quiet := time.Since(lastSeen)
-				idleWork := active == 0 && !idleDone && quiet >= opts.IdleWorkAfter
+				idleWork := active == 0 && !busy && !idleDone && quiet >= opts.IdleWorkAfter
 				if idleWork {
 					idleDone = true
 				}
-				idle := active == 0 && quiet >= opts.Idle
+				idle := active == 0 && !busy && quiet >= opts.Idle
 				mu.Unlock()
 				if idleWork && opts.OnIdle != nil {
 					opts.OnIdle()
 					continue // measure the idle period again after the work
 				}
 				if idle {
+					if opts.OnExit != nil {
+						opts.OnExit(quiet)
+					}
 					cancel()
 				}
 			}
 		}
 	}()
-	// run joins an identical request already in flight or starts one. The
-	// shared run lasts while any of its callers still waits, so one caller
-	// leaving never cancels another's answer.
-	run := func(requestCtx context.Context, request Request) (Response, bool) {
-		key, _ := json.Marshal(request.wire())
-		mu.Lock()
-		call, joined := inFlight[string(key)]
-		if !joined {
-			callCtx, cancelCall := context.WithCancel(ctx)
-			call = &sharedCall{done: make(chan struct{}), cancel: cancelCall}
-			inFlight[string(key)] = call
-			go func() {
-				// A busy service does not queue a different request: the
-				// caller runs it in its own process, as it would without a
-				// service, rather than wait behind another search.
-				select {
-				case slots <- struct{}{}:
-					call.response = handle(callCtx, request)
-					<-slots
-				default:
-					call.response = Response{Retry: true}
-				}
-				if callCtx.Err() != nil {
-					call.cancelled = true
-				}
-				mu.Lock()
-				delete(inFlight, string(key))
-				mu.Unlock()
-				cancelCall()
-				close(call.done)
-			}()
-		}
-		call.waiters++
-		mu.Unlock()
-		select {
-		case <-call.done:
-			if joined && opts.Joined != nil {
-				return opts.Joined(call.response), !call.cancelled
-			}
-			return call.response, !call.cancelled
-		case <-requestCtx.Done():
-			mu.Lock()
-			call.waiters--
-			if call.waiters == 0 {
-				call.cancel()
-			}
-			mu.Unlock()
-			return Response{}, false
-		}
-	}
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -623,6 +613,13 @@ func Serve(ctx context.Context, socket string, opts ServeOptions, handle func(co
 			}
 			return err
 		}
+		mu.Lock()
+		idleBefore := time.Duration(0)
+		if active == 0 && !tasks.busy() {
+			idleBefore = time.Since(lastSeen)
+		}
+		mu.Unlock()
+		arrival := time.Now()
 		touch(+1)
 		wg.Add(1)
 		go func() {
@@ -639,6 +636,7 @@ func Serve(ctx context.Context, socket string, opts ServeOptions, handle func(co
 				return
 			}
 			request := wire.request()
+			request.IdleBefore = idleBefore
 			// The client sends nothing more; a read that returns means it
 			// closed the connection, which cancels its request.
 			requestCtx, cancelRequest := context.WithCancel(ctx)
@@ -650,19 +648,14 @@ func Serve(ctx context.Context, socket string, opts ServeOptions, handle func(co
 			}()
 			// A run that was cancelled answers nothing; the client then runs
 			// the command itself.
-			if response, ok := run(requestCtx, request); ok && requestCtx.Err() == nil {
+			if response, delivery, ok := tasks.ask(requestCtx, request, arrival); ok && requestCtx.Err() == nil {
+				if opts.Deliver != nil {
+					response = opts.Deliver(response, delivery)
+				}
 				_ = writeFrame(conn, response.wire())
 			}
 		}()
 	}
-}
-
-type sharedCall struct {
-	done      chan struct{}
-	cancel    context.CancelFunc
-	waiters   int
-	response  Response
-	cancelled bool
 }
 
 func flockWait(ctx context.Context, file *os.File, how int) error {

@@ -549,11 +549,20 @@ type ServiceStats struct {
 	SnapshotHit bool  `json:"snapshot_hit"`
 	CPUUserMS   int64 `json:"cpu_user_ms"`
 	CPUSystemMS int64 `json:"cpu_system_ms"`
+	// QueueWaitMS is how long this read waited in the service's queue for its
+	// task to start.
 	QueueWaitMS int64 `json:"queue_wait_ms"`
 	// CacheBytes is the read's cache directory's size as last measured (by a
 	// prune or `cache usage`), and CacheCapBytes its cap.
 	CacheBytes    int64 `json:"cache_bytes"`
 	CacheCapBytes int64 `json:"cache_cap_bytes"`
+	// Class is the class the read's task ran at in the service (interactive
+	// or background); KeptAnswer, that the answer was kept from a task that
+	// ended before this read asked (its CPU went to the read that started
+	// it); MovedUp, that this read moved the queued task it joined up.
+	Class      string `json:"class,omitempty"`
+	KeptAnswer bool   `json:"kept_answer,omitempty"`
+	MovedUp    bool   `json:"moved_up,omitempty"`
 }
 
 // SearchFormatVersion versions the search RESPONSE ENVELOPE, the same axis

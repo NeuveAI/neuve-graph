@@ -5,6 +5,8 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -364,5 +366,185 @@ func TestServiceFallbackIsImmediate(t *testing.T) {
 	}
 	if block := serviceBlock(t, out); block == nil || block["answered"] != false || block["reason"] != "off" {
 		t.Fatalf("an unprepared read with the setting on: service block %v", block)
+	}
+}
+
+// A call whose deadline passes while the service has not answered exits
+// with ExitServiceDeadline and prints nothing; an unknown class or deadline
+// is refused, never taken as background.
+func TestServiceDeadlineAndCallTiming(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds the binary")
+	}
+	work := t.TempDir()
+	binary := filepath.Join(work, "entire-graph")
+	if out, err := exec.Command("go", "build", "-o", binary, "../../cmd/entire-graph").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v\n%s", err, out)
+	}
+	dir, err := os.MkdirTemp("", "gd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// SocketPath reads the directory from this process's environment.
+	t.Setenv(service.EnvDirectory, dir)
+	t.Setenv(envService, "auto")
+	env := os.Environ()
+	// A service that takes the request and never answers.
+	socket, err := service.SocketPath(binary, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() { _, _ = io.Copy(io.Discard, conn) }()
+		}
+	}()
+	query := []string{"query", "--repo", work, "--head", "--prepared-only", "--format", "json", "--cache-dir", work, "--query", "x"}
+	run := func(extra ...string) ([]byte, int, time.Duration) {
+		cmd := exec.Command(binary, query...)
+		cmd.Env = append(append([]string(nil), env...), extra...)
+		started := time.Now()
+		out, err := cmd.Output()
+		code := 0
+		if exit, ok := err.(*exec.ExitError); ok {
+			code = exit.ExitCode()
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		return out, code, time.Since(started)
+	}
+	out, code, took := run(envDeadlineMS + "=300")
+	if code != ExitServiceDeadline || len(out) != 0 || took > 5*time.Second {
+		t.Fatalf("deadline: exit %d after %s, stdout %q", code, took, out)
+	}
+	for _, bad := range []string{envClass + "=urgent", envDeadlineMS + "=soon", envDeadlineMS + "=0"} {
+		if _, code, _ := run(bad); code != 1 {
+			t.Errorf("%s: exit %d, want a refusal", bad, code)
+		}
+	}
+}
+
+// Only a prepared read at an exact commit outlives its callers; a --head
+// read follows HEAD.
+func TestKeepableServiceRead(t *testing.T) {
+	oid := strings.Repeat("a", 40)
+	for args, want := range map[string]bool{
+		"query --repo /r --prepared-only --commit " + oid + " --cache-dir /c --query x":      true,
+		"neighbors --repo /r --prepared-only --commit " + oid + " --cache-dir /c --symbol S": true,
+		"query --repo /r --head --prepared-only --cache-dir /c --query x":                    false,
+		"query --repo /r --prepared-only --commit HEAD --cache-dir /c --query x":             false,
+	} {
+		if got := keepableServiceRead(service.Request{Args: strings.Fields(args)}); got != want {
+			t.Errorf("%s: keepable %v, want %v", args, got, want)
+		}
+	}
+}
+
+// Each caller's block says how it got its answer: a kept answer or a joined
+// task reports no CPU of its own.
+func TestDeliveredServiceBlocks(t *testing.T) {
+	var buf bytes.Buffer
+	response := sem.SearchResponse{Query: "q"}
+	response.Stats.Service = &sem.ServiceStats{Answered: true, RSSBytes: 1, MaxRSSBytes: 2, CPUUserMS: 30, CPUSystemMS: 4}
+	if err := writeSearchResponse(&buf, response, "json", 0); err != nil {
+		t.Fatal(err)
+	}
+	shared := service.Response{Stdout: buf.Bytes()}
+	block := func(delivery service.Delivery) map[string]any {
+		return serviceBlock(t, deliverServiceResponse(shared, delivery).Stdout)
+	}
+	starter := block(service.Delivery{Class: service.ClassInteractive, QueueWait: 1500 * time.Millisecond})
+	if starter["cpu_user_ms"] != 30.0 || starter["class"] != "interactive" || starter["queue_wait_ms"] != 1500.0 || starter["kept_answer"] != nil || starter["moved_up"] != nil {
+		t.Fatalf("starter block %v", starter)
+	}
+	kept := block(service.Delivery{Kept: true, Class: service.ClassBackground, QueueWait: time.Second})
+	if kept["cpu_user_ms"] != 0.0 || kept["kept_answer"] != true || kept["queue_wait_ms"] != 0.0 {
+		t.Fatalf("kept block %v", kept)
+	}
+	moved := block(service.Delivery{Joined: true, MovedUp: true, Class: service.ClassInteractive})
+	if moved["cpu_system_ms"] != 0.0 || moved["moved_up"] != true {
+		t.Fatalf("joined block %v", moved)
+	}
+}
+
+// A kept exact-commit answer is served only while its inputs are as they
+// were: an edit to the serving directory's .graphignore, or a forced
+// re-preparation, makes the next identical read run again.
+func TestKeptAnswerFollowsItsInputs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds the binary")
+	}
+	work := t.TempDir()
+	binary := filepath.Join(work, "entire-graph")
+	if out, err := exec.Command("go", "build", "-o", binary, "../../cmd/entire-graph").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v\n%s", err, out)
+	}
+	repo := t.TempDir()
+	git(t, repo, "init")
+	git(t, repo, "config", "user.name", "Entire Graph Test")
+	git(t, repo, "config", "user.email", "graph@example.com")
+	write(t, repo, "auth.go", "package auth\n\nfunc ValidateToken(token string) bool { return token != \"\" }\n")
+	git(t, repo, "add", ".")
+	git(t, repo, "commit", "-m", "initial")
+	commit := revParse(t, repo, "HEAD")
+	cache := t.TempDir()
+	dir, err := os.MkdirTemp("", "gk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	env := append(os.Environ(), service.EnvDirectory+"="+dir, envServiceIdle+"=20", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	run := func(extra []string, args ...string) []byte {
+		t.Helper()
+		cmd := exec.Command(binary, args...)
+		cmd.Env = append(append([]string(nil), env...), extra...)
+		out, _ := cmd.Output()
+		return out
+	}
+	index := func(force bool) {
+		args := []string{"index", "--repo", repo, "--head", "--profile", "full", "--cache-dir", cache, "--format", "json"}
+		if force {
+			args = append(args, "--force")
+		}
+		run(nil, args...)
+	}
+	read := func() map[string]any {
+		t.Helper()
+		out := run([]string{envService + "=require"}, "query", "--repo", repo, "--prepared-only", "--commit", commit, "--profile", "full", "--format", "json", "--cache-dir", cache, "--query", "validate token")
+		if len(out) == 0 {
+			return nil
+		}
+		return serviceBlock(t, out)
+	}
+	index(false)
+	if first := read(); first == nil || first["kept_answer"] != nil {
+		t.Fatalf("first read: %v", first)
+	}
+	if kept := read(); kept == nil || kept["kept_answer"] != true {
+		t.Fatalf("repeat read was not kept: %v", kept)
+	}
+	index(true)
+	if forced := read(); forced != nil && forced["kept_answer"] == true {
+		t.Fatal("a kept answer outlived a forced re-preparation")
+	}
+	if kept := read(); kept == nil || kept["kept_answer"] != true {
+		t.Fatalf("the read after re-preparation was not kept: %v", kept)
+	}
+	write(t, repo, ".graphignore", "auth.go\n")
+	if edited := read(); edited != nil && edited["kept_answer"] == true {
+		t.Fatal("a kept answer outlived an edit to .graphignore")
 	}
 }

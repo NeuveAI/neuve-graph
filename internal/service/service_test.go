@@ -5,9 +5,11 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -58,11 +60,13 @@ func TestIdenticalRequestsRunOnce(t *testing.T) {
 	socket := shortSocket(t)
 	var runs atomic.Int32
 	release := make(chan struct{})
-	joined := func(response Response) Response {
-		response.Stdout = append([]byte("joined "), response.Stdout...)
+	deliver := func(response Response, delivery Delivery) Response {
+		if delivery.Joined {
+			response.Stdout = append([]byte("joined "), response.Stdout...)
+		}
 		return response
 	}
-	serve(t, socket, ServeOptions{Concurrency: 2, Joined: joined}, func(ctx context.Context, request Request) Response {
+	serve(t, socket, ServeOptions{Concurrency: 2, Deliver: deliver}, func(ctx context.Context, request Request) Response {
 		runs.Add(1)
 		<-release
 		return Response{Stdout: []byte(request.Args[0])}
@@ -317,28 +321,132 @@ func TestServiceRefusesAnotherBuildOrProtocol(t *testing.T) {
 }
 
 // A busy service never queues a different request: it tells the caller to
-// run the command itself, as it would have without a service.
-func TestBusyServiceTellsTheCallerToRunItself(t *testing.T) {
+// A busy service queues a request instead of turning it away, and serves the
+// queue interactive first, then by earliest deadline, then by arrival; a
+// caller that needs a queued task sooner moves it up, and each caller learns
+// how long it waited and at which class its task ran.
+func TestBusyServiceQueuesByClassDeadlineAndArrival(t *testing.T) {
 	socket := shortSocket(t)
 	release := make(chan struct{})
-	serve(t, socket, ServeOptions{Concurrency: 1}, func(ctx context.Context, request Request) Response {
-		<-release
-		return Response{Stdout: []byte("done")}
+	var mu sync.Mutex
+	var order []string
+	deliveries := map[string]Delivery{}
+	var deliveriesMu sync.Mutex
+	serve(t, socket, ServeOptions{Concurrency: 1, Deliver: func(response Response, delivery Delivery) Response {
+		deliveriesMu.Lock()
+		deliveries[string(response.Stdout)+fmt.Sprint(delivery.Joined)] = delivery
+		deliveriesMu.Unlock()
+		return response
+	}}, func(ctx context.Context, request Request) Response {
+		if request.Args[0] == "blocker" {
+			<-release
+		}
+		mu.Lock()
+		order = append(order, request.Args[0])
+		mu.Unlock()
+		return Response{Stdout: []byte(request.Args[0])}
 	})
-	first := make(chan Response, 1)
-	go func() {
-		response, _ := Call(t.Context(), socket, Request{Args: []string{"long"}})
-		first <- response
-	}()
-	time.Sleep(150 * time.Millisecond)
-	started := time.Now()
-	response, err := Call(t.Context(), socket, Request{Args: []string{"other"}})
-	if err != nil || !response.Retry || time.Since(started) > time.Second {
-		t.Fatalf("second request = %+v %v after %s, want an immediate retry", response, err, time.Since(started))
+	var wg sync.WaitGroup
+	call := func(request Request) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if response, err := Call(t.Context(), socket, request); err != nil || string(response.Stdout) != request.Args[0] {
+				t.Errorf("%v: %+v %v", request.Args, response, err)
+			}
+		}()
+		time.Sleep(60 * time.Millisecond)
+	}
+	soon := time.Now().Add(time.Minute)
+	call(Request{Args: []string{"blocker"}, Class: ClassBackground})
+	call(Request{Args: []string{"background-first"}, Class: ClassBackground})
+	call(Request{Args: []string{"background-deadline"}, Class: ClassBackground, Deadline: soon})
+	call(Request{Args: []string{"interactive"}, Class: ClassInteractive})
+	call(Request{Args: []string{"moved"}, Class: ClassBackground})
+	// An interactive caller of "moved" moves it up, ahead of everything
+	// queued after the interactive one already there.
+	call(Request{Args: []string{"moved"}, Class: ClassInteractive})
+	close(release)
+	wg.Wait()
+	want := []string{"blocker", "interactive", "moved", "background-deadline", "background-first"}
+	if !slices.Equal(order, want) {
+		t.Fatalf("served %v, want %v", order, want)
+	}
+	if d := deliveries["movedtrue"]; !d.MovedUp || d.Class != ClassInteractive || d.QueueWait <= 0 {
+		t.Fatalf("the caller that moved the task up got %+v", d)
+	}
+	if d := deliveries["background-firstfalse"]; d.MovedUp || d.Class != ClassBackground || d.QueueWait <= 0 {
+		t.Fatalf("a queued background caller got %+v", d)
+	}
+}
+
+// A keepable task outlives its callers: it runs to the end and its answer
+// is kept, so the next identical request is answered at once without a run.
+// Another task, whose inputs could move, is cancelled when its callers leave.
+func TestKeptTaskOutlivesItsCallers(t *testing.T) {
+	socket := shortSocket(t)
+	var runs atomic.Int32
+	var inputsMoved atomic.Bool
+	release := make(chan struct{})
+	serve(t, socket, ServeOptions{Keepable: func(request Request) bool { return request.Args[0] == "exact" }}, func(ctx context.Context, request Request) Response {
+		runs.Add(1)
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return Response{}
+		}
+		return Response{Stdout: []byte("answer " + request.Args[0]), StillValid: func() bool { return !inputsMoved.Load() }}
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 150*time.Millisecond)
+	defer cancel()
+	if _, err := Call(ctx, socket, Request{Args: []string{"exact"}}); err == nil {
+		t.Fatal("the first caller was answered before the task could end")
 	}
 	close(release)
-	if got := <-first; string(got.Stdout) != "done" {
-		t.Fatalf("first request = %+v", got)
+	deadline := time.Now().Add(5 * time.Second)
+	for KeptBytes() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the task's answer was never kept")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	response, err := Call(t.Context(), socket, Request{Args: []string{"exact"}})
+	if err != nil || string(response.Stdout) != "answer exact" || runs.Load() != 1 {
+		t.Fatalf("repeat = %+v %v after %d runs, want the kept answer", response, err, runs.Load())
+	}
+	// Once an input it came from moved, the kept answer is not served: the
+	// request runs again.
+	inputsMoved.Store(true)
+	if response, err := Call(t.Context(), socket, Request{Args: []string{"exact"}}); err != nil || string(response.Stdout) != "answer exact" || runs.Load() != 2 {
+		t.Fatalf("after its inputs moved: %+v %v after %d runs, want a new run", response, err, runs.Load())
+	}
+}
+
+// An idle service exits only once its last task, queued or running, has
+// ended, though no caller waits for it.
+func TestIdleWaitsForTheLastTask(t *testing.T) {
+	socket := shortSocket(t)
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	done, _ := serve(t, socket, ServeOptions{Idle: 200 * time.Millisecond, Keepable: func(Request) bool { return true }}, func(ctx context.Context, request Request) Response {
+		<-release
+		close(finished)
+		return Response{Stdout: []byte("late")}
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	Call(ctx, socket, Request{Args: []string{"x"}})
+	select {
+	case <-done:
+		t.Fatal("the service exited with a task running")
+	case <-time.After(time.Second):
+	}
+	close(release)
+	<-finished
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the idle service did not exit after its last task")
 	}
 }
 

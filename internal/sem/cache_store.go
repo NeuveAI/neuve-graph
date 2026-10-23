@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
@@ -230,6 +231,81 @@ var cacheUses = struct {
 	sync.Mutex
 	byRoot map[string]map[string]int64
 }{byRoot: map[string]map[string]int64{}}
+
+// FileIdentity is what a path named at one moment: whether anything, and
+// then the file (device and inode), its size and modification time.
+type FileIdentity struct {
+	Present bool
+	Device  uint64
+	Inode   uint64
+	Size    int64
+	ModTime int64
+}
+
+// IdentifyFile is what path names now (following links).
+func IdentifyFile(path string) FileIdentity {
+	info, err := os.Stat(path)
+	if err != nil {
+		return FileIdentity{}
+	}
+	return identityOf(info)
+}
+
+// CacheOpenRecord collects the cache artifacts opened while it records, each
+// as the file it was when opened: the inputs, besides its arguments, a
+// prepared read's answer came from. Several may record at once; each sees
+// every open in the process.
+type CacheOpenRecord struct {
+	mu     sync.Mutex
+	opened map[string]FileIdentity
+}
+
+var cacheOpenRecords = struct {
+	sync.Mutex
+	active map[*CacheOpenRecord]bool
+}{active: map[*CacheOpenRecord]bool{}}
+
+// RecordCacheOpens starts recording the cache artifacts this process opens.
+func RecordCacheOpens() *CacheOpenRecord {
+	record := &CacheOpenRecord{opened: map[string]FileIdentity{}}
+	cacheOpenRecords.Lock()
+	cacheOpenRecords.active[record] = true
+	cacheOpenRecords.Unlock()
+	return record
+}
+
+// Stop ends the record and returns each artifact opened, by path, as the
+// file it was when first opened.
+func (record *CacheOpenRecord) Stop() map[string]FileIdentity {
+	cacheOpenRecords.Lock()
+	delete(cacheOpenRecords.active, record)
+	cacheOpenRecords.Unlock()
+	record.mu.Lock()
+	defer record.mu.Unlock()
+	return record.opened
+}
+
+// noteCacheOpen records, for every active record, the artifact a read just
+// opened, as the file it opened.
+func noteCacheOpen(cacheDir, relative string, file *os.File) {
+	cacheOpenRecords.Lock()
+	defer cacheOpenRecords.Unlock()
+	if len(cacheOpenRecords.active) == 0 {
+		return
+	}
+	identity := FileIdentity{}
+	if info, err := file.Stat(); err == nil {
+		identity = identityOf(info)
+	}
+	path := filepath.Join(cacheDir, relative)
+	for record := range cacheOpenRecords.active {
+		record.mu.Lock()
+		if _, seen := record.opened[path]; !seen {
+			record.opened[path] = identity
+		}
+		record.mu.Unlock()
+	}
+}
 
 // noteCacheUse records that an artifact was read now.
 func noteCacheUse(cacheDir, relative string) {

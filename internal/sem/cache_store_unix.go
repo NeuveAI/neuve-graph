@@ -62,6 +62,14 @@ func holdArtifactForRead(root *os.Root, name string, file *os.File) bool {
 	return stillNamed(root, name, file)
 }
 
+func identityOf(info os.FileInfo) FileIdentity {
+	identity := FileIdentity{Present: true, Size: info.Size(), ModTime: info.ModTime().UnixNano()}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		identity.Device, identity.Inode = uint64(stat.Dev), uint64(stat.Ino)
+	}
+	return identity
+}
+
 func stillNamed(root *os.Root, name string, file *os.File) bool {
 	opened, err := file.Stat()
 	if err != nil {

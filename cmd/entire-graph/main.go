@@ -44,6 +44,6 @@ func main() {
 		// one-line report that is honest about its breaks beats a multi-line
 		// one a repository can append to.
 		fmt.Fprintln(os.Stderr, termsafe.Line(err.Error()))
-		os.Exit(1)
+		os.Exit(cli.ExitCode(err))
 	}
 }
