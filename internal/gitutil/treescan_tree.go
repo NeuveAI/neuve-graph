@@ -1,10 +1,12 @@
 package gitutil
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -12,6 +14,10 @@ import (
 
 // TreeScanRouteOnePass names the one-pass blob scan in TreeScanStats.Route.
 const TreeScanRouteOnePass = "tree-scan"
+
+// TreeScanRouteTextIndex names the one-pass scan when a text index ruled
+// blobs out before any was read.
+const TreeScanRouteTextIndex = "text-index"
 
 // TreeScanRouteGitGrep names the per-pattern git grep route, kept for
 // platforms without the system regex engine.
@@ -29,13 +35,50 @@ type TreeScanStats struct {
 	AnswerHits   int
 	AnswerMisses int
 	AnswerWaits  int
+	// The text index: lookups made, candidate blobs they returned, blobs
+	// they ruled out unread, and why the index was not used when it was not
+	// ("no-trigram": a pattern has no literal of three ASCII bytes; "index-
+	// absent": no index holds the tree's blobs; "index-error").
+	TextIndexLookups    int
+	TextIndexCandidates int
+	TextIndexExcluded   int
+	FallbackReason      string
 }
+
+// TreeScanCandidates narrows a scan through a text index: for blobs and
+// literals (ASCII, folded to lower case, at least three bytes) it returns a
+// superset of the blobs whose content contains one of the literals,
+// ignoring ASCII case, and how many lookups that took. A blob it does not
+// hold must be returned.
+type TreeScanCandidates func(ctx context.Context, oids []string, literals []string) (map[string]bool, int, error)
 
 // TreeScanOptions carries what a scan may share with other scans.
 type TreeScanOptions struct {
 	// Answers, when set, remembers each blob's answer per pattern across
 	// scans and processes (OpenTreeScanAnswers).
 	Answers *TreeScanAnswers
+	// Candidates, when set, lets a text index rule blobs out unread.
+	Candidates TreeScanCandidates
+}
+
+// indexLiteral is the longest run of ASCII bytes in a required string, when
+// it is at least three long: every line holding the string holds the run, so
+// a blob without the run cannot match through that string.
+func indexLiteral(required string) (string, bool) {
+	best, start := "", -1
+	for i := 0; i <= len(required); i++ {
+		if i < len(required) && required[i] < 0x80 {
+			if start < 0 {
+				start = i
+			}
+			continue
+		}
+		if start >= 0 && i-start > len(best) {
+			best = required[start:i]
+		}
+		start = -1
+	}
+	return best, len(best) >= 3
 }
 
 // attrDecision is git's userdiff verdict on whether a path is binary.
@@ -302,4 +345,108 @@ func gitSearchedPaths(ctx context.Context, repo, treeish string, paths []string)
 		}
 	}
 	return searched, nil
+}
+
+// readBlobs writes oids to `git cat-file --batch` from one goroutine and
+// reads each object back in order.
+func readBlobs(ctx context.Context, repo string, oids []string, visit func(oid string, data []byte) error) error {
+	cmd := newCmd(ctx, repo, "git", "cat-file", "--batch")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	writeDone := make(chan error, 1)
+	go func() {
+		w := bufio.NewWriter(stdin)
+		var werr error
+		for _, oid := range oids {
+			if _, werr = w.WriteString(oid + "\n"); werr != nil {
+				break
+			}
+		}
+		if werr == nil {
+			werr = w.Flush()
+		}
+		_ = stdin.Close()
+		writeDone <- werr
+	}()
+	reader := bufio.NewReaderSize(stdout, 1<<20)
+	readErr := func() error {
+		for _, want := range oids {
+			header, err := reader.ReadString('\n')
+			if err != nil {
+				return fmt.Errorf("git cat-file batch header: %w", err)
+			}
+			fields := strings.Fields(header)
+			if len(fields) != 3 || fields[0] != want || fields[1] != "blob" {
+				return fmt.Errorf("git cat-file returned %q for blob %s", strings.TrimSpace(header), want)
+			}
+			size, err := strconv.ParseInt(fields[2], 10, 64)
+			if err != nil || size < 0 {
+				return fmt.Errorf("git cat-file returned malformed size %q", fields[2])
+			}
+			data := make([]byte, size)
+			if _, err := io.ReadFull(reader, data); err != nil {
+				return fmt.Errorf("git cat-file blob %s: %w", want, err)
+			}
+			if b, err := reader.ReadByte(); err != nil || b != '\n' {
+				return fmt.Errorf("git cat-file blob %s: missing terminator", want)
+			}
+			if err := visit(want, data); err != nil {
+				return err
+			}
+		}
+		return nil
+	}()
+	if readErr != nil {
+		_ = cmd.Process.Kill()
+	}
+	waitErr := cmd.Wait()
+	writeErr := <-writeDone
+	if readErr != nil {
+		return readErr
+	}
+	if waitErr != nil {
+		return fmt.Errorf("git cat-file --batch: %w: %s", waitErr, strings.TrimSpace(stderr.String()))
+	}
+	if writeErr != nil && !errors.Is(writeErr, io.ErrClosedPipe) {
+		return writeErr
+	}
+	return nil
+}
+
+// ListTreeBlobs lists the object ids of an immutable tree's regular files,
+// the blobs a tree scan reads, in path order with repeats removed.
+func ListTreeBlobs(ctx context.Context, repo, treeish string) ([]string, error) {
+	if treeish == "" || strings.HasPrefix(treeish, "-") || strings.ContainsRune(treeish, '\x00') {
+		return nil, fmt.Errorf("invalid treeish %q", treeish)
+	}
+	entries, err := listTreeRegularFiles(ctx, repo, treeish)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(entries))
+	oids := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !seen[entry.oid] {
+			seen[entry.oid] = true
+			oids = append(oids, entry.oid)
+		}
+	}
+	return oids, nil
+}
+
+// ReadBlobs streams the content of blobs by object id, in order, through one
+// `git cat-file --batch`.
+func ReadBlobs(ctx context.Context, repo string, oids []string, visit func(oid string, data []byte) error) error {
+	return readBlobs(ctx, repo, oids, visit)
 }

@@ -18,6 +18,7 @@ import (
 
 	"github.com/entireio/entire-graph/internal/gitutil"
 	"github.com/entireio/entire-graph/internal/termsafe"
+	"github.com/entireio/entire-graph/internal/textindex"
 )
 
 const (
@@ -383,9 +384,15 @@ type SearchStats struct {
 	PreselectionBytesRead int64 `json:"preselection_bytes_read,omitempty"`
 	// Remembered tree-scan answers, per blob and pattern: found, computed, and
 	// patterns waited for while another process computed them.
-	AnswerCacheHits                int     `json:"answer_cache_hits,omitempty"`
-	AnswerCacheMisses              int     `json:"answer_cache_misses,omitempty"`
-	AnswerCacheWaits               int     `json:"answer_cache_waits,omitempty"`
+	AnswerCacheHits   int `json:"answer_cache_hits,omitempty"`
+	AnswerCacheMisses int `json:"answer_cache_misses,omitempty"`
+	AnswerCacheWaits  int `json:"answer_cache_waits,omitempty"`
+	// The text index behind the tree scan: lookups made, the candidate blobs
+	// they returned, and why the scan did without the index when it did
+	// ("no-trigram", "index-absent", "index-error").
+	TextIndexLookups               int     `json:"text_index_lookups,omitempty"`
+	TextIndexCandidates            int     `json:"text_index_candidates,omitempty"`
+	PreselectionFallbackReason     string  `json:"preselection_fallback_reason,omitempty"`
 	PreselectionConfidence         float64 `json:"preselection_confidence,omitempty"`
 	PreselectionCoverage           float64 `json:"preselection_coverage,omitempty"`
 	PreselectionDiversity          float64 `json:"preselection_diversity,omitempty"`
@@ -1377,34 +1384,37 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 			Results:               []SearchResult{},
 			replayProvenancePaths: replayProvenancePaths,
 			Stats: SearchStats{
-				QueryConstraintsTruncated: q.constraints.Truncated,
-				FilesScanned:              selection.filesScanned,
-				RepoIgnoredFiles:          repoIgnoredFileCount(selection.repoIgnored),
-				PreselectionBackend:       selection.preselectionBackend,
-				PreselectionPasses:        selection.preselectionPasses,
-				PreselectionFilesExamined: selection.preselectionFilesExamined,
-				PreselectionPatterns:      selection.preselectionPatterns,
-				PreselectionBlobsRead:     selection.preselectionBlobsRead,
-				PreselectionBytesRead:     selection.preselectionBytesRead,
-				AnswerCacheHits:           selection.answerCacheHits,
-				AnswerCacheMisses:         selection.answerCacheMisses,
-				AnswerCacheWaits:          selection.answerCacheWaits,
-				PreselectionConfidence:    selection.preselectionConfidence,
-				PreselectionCoverage:      selection.preselectionCoverage,
-				PreselectionDiversity:     selection.preselectionDiversity,
-				PreselectionWidened:       selection.preselectionWidened,
-				PreselectionBounded:       selection.preselectionBounded,
-				FilesContentRead:          selection.filesContentRead,
-				FilesIndexed:              0,
-				SymbolsConsidered:         symbolsConsidered,
-				ResultBytes:               serializedSearchResultBytes([]SearchResult{}),
-				ContainedCallablesStatus:  searchContainedCallablesComplete,
-				ContextBudgetBytes:        callerContextBytes,
-				IndexCacheHit:             cacheHit,
-				IndexLatencyMS:            preindexLoadLatency.Milliseconds(),
-				PreselectLatencyMS:        preselectLatency.Milliseconds(),
-				TotalLatencyMS:            totalLatency,
-				SearchLatencyMS:           totalLatency,
+				QueryConstraintsTruncated:  q.constraints.Truncated,
+				FilesScanned:               selection.filesScanned,
+				RepoIgnoredFiles:           repoIgnoredFileCount(selection.repoIgnored),
+				PreselectionBackend:        selection.preselectionBackend,
+				PreselectionPasses:         selection.preselectionPasses,
+				PreselectionFilesExamined:  selection.preselectionFilesExamined,
+				PreselectionPatterns:       selection.preselectionPatterns,
+				PreselectionBlobsRead:      selection.preselectionBlobsRead,
+				PreselectionBytesRead:      selection.preselectionBytesRead,
+				AnswerCacheHits:            selection.answerCacheHits,
+				AnswerCacheMisses:          selection.answerCacheMisses,
+				AnswerCacheWaits:           selection.answerCacheWaits,
+				TextIndexLookups:           selection.textIndexLookups,
+				TextIndexCandidates:        selection.textIndexCandidates,
+				PreselectionFallbackReason: selection.preselectionFallbackReason,
+				PreselectionConfidence:     selection.preselectionConfidence,
+				PreselectionCoverage:       selection.preselectionCoverage,
+				PreselectionDiversity:      selection.preselectionDiversity,
+				PreselectionWidened:        selection.preselectionWidened,
+				PreselectionBounded:        selection.preselectionBounded,
+				FilesContentRead:           selection.filesContentRead,
+				FilesIndexed:               0,
+				SymbolsConsidered:          symbolsConsidered,
+				ResultBytes:                serializedSearchResultBytes([]SearchResult{}),
+				ContainedCallablesStatus:   searchContainedCallablesComplete,
+				ContextBudgetBytes:         callerContextBytes,
+				IndexCacheHit:              cacheHit,
+				IndexLatencyMS:             preindexLoadLatency.Milliseconds(),
+				PreselectLatencyMS:         preselectLatency.Milliseconds(),
+				TotalLatencyMS:             totalLatency,
+				SearchLatencyMS:            totalLatency,
 			},
 			RepoIgnored:     selection.repoIgnored,
 			Warnings:        withPreselectionWarnings(withRepoIgnoreDisclosure(warnings, selection.repoIgnored), selection.preselectionWarnings),
@@ -1594,32 +1604,35 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 	}
 
 	stats := SearchStats{
-		QueryConstraintsTruncated: q.constraints.Truncated,
-		FilesScanned:              selection.filesScanned,
-		PreselectionBackend:       selection.preselectionBackend,
-		PreselectionPasses:        selection.preselectionPasses,
-		PreselectionFilesExamined: selection.preselectionFilesExamined,
-		PreselectionPatterns:      selection.preselectionPatterns,
-		PreselectionBlobsRead:     selection.preselectionBlobsRead,
-		PreselectionBytesRead:     selection.preselectionBytesRead,
-		AnswerCacheHits:           selection.answerCacheHits,
-		AnswerCacheMisses:         selection.answerCacheMisses,
-		AnswerCacheWaits:          selection.answerCacheWaits,
-		PreselectionConfidence:    selection.preselectionConfidence,
-		PreselectionCoverage:      selection.preselectionCoverage,
-		PreselectionDiversity:     selection.preselectionDiversity,
-		PreselectionWidened:       selection.preselectionWidened,
-		PreselectionBounded:       selection.preselectionBounded,
-		FilesContentRead:          selection.filesContentRead,
-		FilesIndexed:              len(selectedFiles),
-		SymbolsConsidered:         len(snapshot.Symbols),
-		LexicalCandidates:         len(candidates),
-		SparseCandidates:          len(sparseCandidates),
-		SparseFilesRead:           sparseFilesRead,
-		IndexCacheHit:             cacheHit,
-		IndexLatencyMS:            indexLatency.Milliseconds(),
-		ContainedCallablesStatus:  searchContainedCallablesComplete,
-		PreselectLatencyMS:        preselectLatency.Milliseconds(),
+		QueryConstraintsTruncated:  q.constraints.Truncated,
+		FilesScanned:               selection.filesScanned,
+		PreselectionBackend:        selection.preselectionBackend,
+		PreselectionPasses:         selection.preselectionPasses,
+		PreselectionFilesExamined:  selection.preselectionFilesExamined,
+		PreselectionPatterns:       selection.preselectionPatterns,
+		PreselectionBlobsRead:      selection.preselectionBlobsRead,
+		PreselectionBytesRead:      selection.preselectionBytesRead,
+		AnswerCacheHits:            selection.answerCacheHits,
+		AnswerCacheMisses:          selection.answerCacheMisses,
+		AnswerCacheWaits:           selection.answerCacheWaits,
+		TextIndexLookups:           selection.textIndexLookups,
+		TextIndexCandidates:        selection.textIndexCandidates,
+		PreselectionFallbackReason: selection.preselectionFallbackReason,
+		PreselectionConfidence:     selection.preselectionConfidence,
+		PreselectionCoverage:       selection.preselectionCoverage,
+		PreselectionDiversity:      selection.preselectionDiversity,
+		PreselectionWidened:        selection.preselectionWidened,
+		PreselectionBounded:        selection.preselectionBounded,
+		FilesContentRead:           selection.filesContentRead,
+		FilesIndexed:               len(selectedFiles),
+		SymbolsConsidered:          len(snapshot.Symbols),
+		LexicalCandidates:          len(candidates),
+		SparseCandidates:           len(sparseCandidates),
+		SparseFilesRead:            sparseFilesRead,
+		IndexCacheHit:              cacheHit,
+		IndexLatencyMS:             indexLatency.Milliseconds(),
+		ContainedCallablesStatus:   searchContainedCallablesComplete,
+		PreselectLatencyMS:         preselectLatency.Milliseconds(),
 	}
 	scoreSearchCandidates(candidates, q, fileDF, maxInt(1, len(selectedFiles)))
 	callerBoosts := searchGraphCallerBoosts(snapshot.Relations, symbolsByID)
@@ -2483,17 +2496,20 @@ type searchFileSelection struct {
 	preselectionPasses        int
 	preselectionFilesExamined int
 	// The tree scan's own report (gitutil.TreeScanStats) when one ran.
-	preselectionPatterns   int
-	preselectionBlobsRead  int
-	preselectionBytesRead  int64
-	answerCacheHits        int
-	answerCacheMisses      int
-	answerCacheWaits       int
-	preselectionConfidence float64
-	preselectionCoverage   float64
-	preselectionDiversity  float64
-	preselectionWidened    bool
-	preselectionBounded    bool
+	preselectionPatterns       int
+	preselectionBlobsRead      int
+	preselectionBytesRead      int64
+	answerCacheHits            int
+	answerCacheMisses          int
+	answerCacheWaits           int
+	textIndexLookups           int
+	textIndexCandidates        int
+	preselectionFallbackReason string
+	preselectionConfidence     float64
+	preselectionCoverage       float64
+	preselectionDiversity      float64
+	preselectionWidened        bool
+	preselectionBounded        bool
 	// allFiles is every file preselection discovered, kept so a repository-wide literal lookup has
 	// a corpus to fall back on when it is small enough to read (search_needle.go). It costs one
 	// slice of paths, which the sparse file list already pays for.
@@ -2621,6 +2637,9 @@ func preselectSearchFiles(
 				scanOptions := gitutil.TreeScanOptions{}
 				if !options.DisableCache {
 					scanOptions.Answers = gitutil.OpenTreeScanAnswers(options.CacheDir)
+					if index := textindex.Open(options.CacheDir, 0); index != nil {
+						scanOptions.Candidates = index.ScanCandidates
+					}
 				}
 				scan, grepErr = gitutil.ScanTreePatternLinesWith(ctx, source.absRepo, source.commit, patterns, scanOptions, func(match gitutil.GrepMatch) error {
 					if allowed[match.Path] && !seen[match.Path] {
@@ -2674,6 +2693,9 @@ func preselectSearchFiles(
 				selection.answerCacheHits = scan.AnswerHits
 				selection.answerCacheMisses = scan.AnswerMisses
 				selection.answerCacheWaits = scan.AnswerWaits
+				selection.textIndexLookups = scan.TextIndexLookups
+				selection.textIndexCandidates = scan.TextIndexCandidates
+				selection.preselectionFallbackReason = scan.FallbackReason
 			}
 			selection.preselectionPasses = 1
 			selection.preselectionFilesExamined = len(source.paths)

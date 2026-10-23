@@ -3,15 +3,12 @@
 package gitutil
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os/exec"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 )
@@ -89,7 +86,7 @@ func scanTreeFirstPatternLines(ctx context.Context, repo, treeish string, patter
 		needed[entry.oid] = true
 		blobs = append(blobs, entry.oid)
 	}
-	answers, err := answerBlobs(ctx, repo, blobs, plan, options.Answers, &stats)
+	answers, err := answerBlobs(ctx, repo, blobs, plan, options, &stats)
 	if err != nil {
 		return stats, err
 	}
@@ -118,7 +115,8 @@ func scanTreeFirstPatternLines(ctx context.Context, repo, treeish string, patter
 // pattern it lacks answers for; a pattern another process holds is waited
 // for, and the blobs that need only such patterns are scanned afterwards only
 // if that process left them unanswered.
-func answerBlobs(ctx context.Context, repo string, blobs []string, plan *treeScanPlan, store *TreeScanAnswers, stats *TreeScanStats) (map[string]blobAnswer, error) {
+func answerBlobs(ctx context.Context, repo string, blobs []string, plan *treeScanPlan, options TreeScanOptions, stats *TreeScanStats) (map[string]blobAnswer, error) {
+	store := options.Answers
 	// The empty tail git can report (phantomLine) belongs to a whole pattern
 	// list, not to one pattern, so such lists are never remembered.
 	if plan.matchesEmpty {
@@ -131,6 +129,7 @@ func answerBlobs(ctx context.Context, repo string, blobs []string, plan *treeSca
 		_, ok := known.answers[oid][index]
 		return !ok
 	}
+	ruledOut := narrowByTextIndex(ctx, blobs, plan, known, lacks, options.Candidates, stats)
 	var claims []*answerClaim
 	releaseClaims := func() {
 		for _, claim := range claims {
@@ -198,8 +197,8 @@ func answerBlobs(ctx context.Context, repo string, blobs []string, plan *treeSca
 			answer := blobAnswer{nulInHead: partial.nulInHead, lines: make([]blobLine, len(sources)), phantom: partial.phantom}
 			for index, line := range known.answers[oid] {
 				answer.lines[index] = line
-				stats.AnswerHits++
 			}
+			stats.AnswerHits += len(known.answers[oid]) - ruledOut[oid]
 			for k, index := range lacking {
 				if lacks(oid, index) && store != nil {
 					stats.AnswerMisses++
@@ -268,7 +267,7 @@ func answerBlobs(ctx context.Context, repo string, blobs []string, plan *treeSca
 			answer.lines[index] = line
 		}
 		answers[oid] = answer
-		stats.AnswerHits += len(sources)
+		stats.AnswerHits += len(sources) - ruledOut[oid]
 	}
 	if err := resolveLineTexts(ctx, repo, answers, plan, stats); err != nil {
 		return nil, err
@@ -325,6 +324,104 @@ func resolveLineTexts(ctx context.Context, repo string, answers map[string]blobA
 		answers[oid] = answer
 	}
 	return nil
+}
+
+// narrowByTextIndex asks the text index which blobs can match and answers
+// "no match" for the rest without reading them. Only a blob all of whose
+// unanswered patterns have literals is narrowed: a pattern with no literal
+// can match a line the index knows nothing about. It returns, per blob, how
+// many answers it supplied, and leaves the scan as it was on any failure.
+func narrowByTextIndex(ctx context.Context, blobs []string, plan *treeScanPlan, known knownAnswers, lacks func(string, int) bool, candidates TreeScanCandidates, stats *TreeScanStats) map[string]int {
+	ruledOut := map[string]int{}
+	if candidates == nil {
+		return ruledOut
+	}
+	literals := make([][]string, len(plan.patterns))
+	usable := make([]bool, len(plan.patterns))
+	for index, pattern := range plan.patterns {
+		if pattern.require == nil {
+			continue
+		}
+		usable[index] = true
+		for _, required := range pattern.require {
+			literal, ok := indexLiteral(required)
+			if !ok {
+				usable[index], literals[index] = false, nil
+				break
+			}
+			literals[index] = append(literals[index], literal)
+		}
+	}
+	var narrowable []string
+	wanted := map[string]bool{}
+	anyLacking := false
+	for _, oid := range blobs {
+		lacking, allUsable := 0, true
+		for index := range plan.patterns {
+			if lacks(oid, index) {
+				lacking++
+				allUsable = allUsable && usable[index]
+			}
+		}
+		if lacking == 0 {
+			continue
+		}
+		anyLacking = true
+		if !allUsable {
+			continue
+		}
+		narrowable = append(narrowable, oid)
+		for index := range plan.patterns {
+			if lacks(oid, index) {
+				for _, literal := range literals[index] {
+					wanted[literal] = true
+				}
+			}
+		}
+	}
+	if len(narrowable) == 0 {
+		if anyLacking {
+			stats.FallbackReason = "no-trigram"
+		}
+		return ruledOut
+	}
+	query := make([]string, 0, len(wanted))
+	for literal := range wanted {
+		query = append(query, literal)
+	}
+	sort.Strings(query)
+	hits, lookups, err := candidates(ctx, narrowable, query)
+	if err != nil {
+		stats.FallbackReason = "index-error"
+		return ruledOut
+	}
+	stats.TextIndexLookups += lookups
+	if lookups == 0 {
+		stats.FallbackReason = "index-absent"
+		return ruledOut
+	}
+	stats.TextIndexCandidates += len(hits)
+	for _, oid := range narrowable {
+		if hits[oid] {
+			continue
+		}
+		byPattern := known.answers[oid]
+		if byPattern == nil {
+			byPattern = map[int]blobLine{}
+			known.answers[oid] = byPattern
+		}
+		for index := range plan.patterns {
+			if _, ok := byPattern[index]; !ok {
+				byPattern[index] = blobLine{} // no line can hold any literal
+				ruledOut[oid]++
+			}
+		}
+		stats.TextIndexExcluded++
+	}
+	if stats.TextIndexExcluded > 0 {
+		stats.Route = TreeScanRouteTextIndex
+	}
+	return ruledOut
 }
 
 type treeScanPattern struct {
@@ -696,83 +793,6 @@ func scanBlobs(ctx context.Context, repo string, blobs []string, plan *treeScanP
 		return nil, counts, err
 	}
 	return answers, counts, nil
-}
-
-// readBlobs writes oids to `git cat-file --batch` from one goroutine and
-// reads each object back in order.
-func readBlobs(ctx context.Context, repo string, oids []string, visit func(oid string, data []byte) error) error {
-	cmd := newCmd(ctx, repo, "git", "cat-file", "--batch")
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return err
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	writeDone := make(chan error, 1)
-	go func() {
-		w := bufio.NewWriter(stdin)
-		var werr error
-		for _, oid := range oids {
-			if _, werr = w.WriteString(oid + "\n"); werr != nil {
-				break
-			}
-		}
-		if werr == nil {
-			werr = w.Flush()
-		}
-		_ = stdin.Close()
-		writeDone <- werr
-	}()
-	reader := bufio.NewReaderSize(stdout, 1<<20)
-	readErr := func() error {
-		for _, want := range oids {
-			header, err := reader.ReadString('\n')
-			if err != nil {
-				return fmt.Errorf("git cat-file batch header: %w", err)
-			}
-			fields := strings.Fields(header)
-			if len(fields) != 3 || fields[0] != want || fields[1] != "blob" {
-				return fmt.Errorf("git cat-file returned %q for blob %s", strings.TrimSpace(header), want)
-			}
-			size, err := strconv.ParseInt(fields[2], 10, 64)
-			if err != nil || size < 0 {
-				return fmt.Errorf("git cat-file returned malformed size %q", fields[2])
-			}
-			data := make([]byte, size)
-			if _, err := io.ReadFull(reader, data); err != nil {
-				return fmt.Errorf("git cat-file blob %s: %w", want, err)
-			}
-			if b, err := reader.ReadByte(); err != nil || b != '\n' {
-				return fmt.Errorf("git cat-file blob %s: missing terminator", want)
-			}
-			if err := visit(want, data); err != nil {
-				return err
-			}
-		}
-		return nil
-	}()
-	if readErr != nil {
-		_ = cmd.Process.Kill()
-	}
-	waitErr := cmd.Wait()
-	writeErr := <-writeDone
-	if readErr != nil {
-		return readErr
-	}
-	if waitErr != nil {
-		return fmt.Errorf("git cat-file --batch: %w: %s", waitErr, strings.TrimSpace(stderr.String()))
-	}
-	if writeErr != nil && !errors.Is(writeErr, io.ErrClosedPipe) {
-		return writeErr
-	}
-	return nil
 }
 
 var (

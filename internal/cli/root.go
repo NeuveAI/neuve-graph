@@ -93,6 +93,8 @@ func Run(ctx context.Context, opts Options, args []string) error {
 		return runSearch(ctx, opts, args[1:])
 	case "index":
 		return runIndex(ctx, opts, args[1:])
+	case "text-index":
+		return runTextIndex(ctx, opts, args[1:])
 	case "health":
 		return runHealth(ctx, opts, args[1:])
 	case "def":

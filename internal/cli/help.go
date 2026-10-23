@@ -111,6 +111,22 @@ var commandDocs = []commandDoc{
 		examples: []string{"entire graph agent-guide"},
 	},
 	{
+		name:    "text-index",
+		group:   groupSetup,
+		summary: "Index a commit's blobs so tree scans read only candidate files",
+		usage:   []string{"entire graph text-index --repo . --commit <exact-commit-OID> [--cache-dir path] [--max-bytes N] [--format json|text]"},
+		long: "Adds to the cache directory's text index every blob of the commit's tree that no shard holds yet: one Zoekt shard per build, named by content, so a tree is a base shard plus a small shard for each later commit's changed blobs, and a blob shared by commits or repositories is indexed once. Prepared searches then let the index rule out files before the first-line tree scan reads them; every file it names, and every file it cannot vouch for (binary, invalid UTF-8, over 1 MiB), is still scanned, so answers never depend on the index.\n\n" +
+			"The index stays under --max-bytes (default 512 MiB, one or two bases of a repository Neuve's size; ENTIRE_GRAPH_TEXT_INDEX_MAX_BYTES overrides): the least recently used shards are evicted, never those of the tree just built. The JSON receipt reports the tree's index bytes, what was indexed, the bytes on disk and the bytes evicted. Not available on Windows.",
+		flags: []flagDoc{
+			{name: "--repo", arg: "path", desc: "Repository holding the commit (default: current repo)"},
+			{name: "--commit", arg: "OID", desc: "Exact lowercase commit identity whose tree to index"},
+			{name: "--cache-dir", arg: "path", desc: "Cache directory shared with searches"},
+			{name: "--max-bytes", arg: "N", desc: "Bound on the index's disk use"},
+			{name: "--format", arg: "json|text", def: "json", desc: "Receipt format"},
+		},
+		examples: []string{"entire graph text-index --repo . --commit $(git rev-parse HEAD) --cache-dir ~/.cache/entire-graph"},
+	},
+	{
 		name:    "index",
 		group:   groupSetup,
 		summary: "Build/warm a committed-tree cache variant for matching queries",

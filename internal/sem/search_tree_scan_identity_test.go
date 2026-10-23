@@ -1,6 +1,7 @@
 package sem
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"reflect"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/entireio/entire-graph/internal/gitutil"
+	"github.com/entireio/entire-graph/internal/textindex"
 )
 
 // The one-pass tree scan replaced the per-pattern Git route under answers the
@@ -102,6 +104,8 @@ func TestTreeScanMatchesGitRouteOnBenchmarkSearches(t *testing.T) {
 		return out, time.Since(started), err
 	}
 	answers := gitutil.OpenTreeScanAnswers(t.TempDir())
+	indexDir := t.TempDir()
+	indexed := map[string]bool{}
 	for index, s := range searches {
 		reference, gitTime, err := collect(func(visit func(gitutil.GrepMatch) error) error {
 			return gitutil.GrepTreePatternLinesGit(t.Context(), s.repo, s.base, s.patterns, visit)
@@ -135,9 +139,39 @@ func TestTreeScanMatchesGitRouteOnBenchmarkSearches(t *testing.T) {
 		if !reflect.DeepEqual(viaStore, reference) {
 			t.Fatalf("search %d at %s differs with remembered answers: %d matches against the Git route's %d", index, s.base, len(viaStore), len(reference))
 		}
-		t.Logf("search %d at %.12s: %d patterns, %d files matched, identical (route %s, %d blobs, %d bytes; Git route %s, tree scan %s; with remembered answers %s, %d hits, %d misses, %d blobs read)",
+		// And through a text index built at the base, as commit time would.
+		store := textindex.Open(indexDir, 0)
+		if !indexed[s.repo+s.base] {
+			indexed[s.repo+s.base] = true
+			oids, err := gitutil.ListTreeBlobs(t.Context(), s.repo, s.base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			repo := s.repo
+			if _, err := store.Build(t.Context(), oids, func(ctx context.Context, oids []string, visit func(string, []byte) error) error {
+				return gitutil.ReadBlobs(ctx, repo, oids, visit)
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var narrowed gitutil.TreeScanStats
+		viaIndex, indexTime, err := collect(func(visit func(gitutil.GrepMatch) error) error {
+			var scanErr error
+			narrowed, scanErr = gitutil.ScanTreePatternLinesWith(t.Context(), s.repo, s.base, s.patterns, gitutil.TreeScanOptions{
+				Candidates: store.ScanCandidates,
+			}, visit)
+			return scanErr
+		})
+		if err != nil {
+			t.Fatalf("search %d at %s: tree scan through the text index: %v", index, s.base, err)
+		}
+		if !reflect.DeepEqual(viaIndex, reference) {
+			t.Fatalf("search %d at %s differs through the text index: %d matches against the Git route's %d", index, s.base, len(viaIndex), len(reference))
+		}
+		t.Logf("search %d at %.12s: %d patterns, %d files matched, identical (route %s, %d blobs, %d bytes; Git route %s, tree scan %s; with remembered answers %s, %d hits, %d misses, %d blobs read; through the text index %s, route %s, %d ruled out, %d blobs read, fallback %q)",
 			index, s.base, len(s.patterns), len(got), stats.Route, stats.BlobsRead, stats.BytesRead, gitTime.Round(time.Millisecond), scanTime.Round(time.Millisecond),
-			storeTime.Round(time.Millisecond), remembered.AnswerHits, remembered.AnswerMisses, remembered.BlobsRead)
+			storeTime.Round(time.Millisecond), remembered.AnswerHits, remembered.AnswerMisses, remembered.BlobsRead,
+			indexTime.Round(time.Millisecond), narrowed.Route, narrowed.TextIndexExcluded, narrowed.BlobsRead, narrowed.FallbackReason)
 	}
 	t.Logf("%d distinct alias searches identical", len(searches))
 }
