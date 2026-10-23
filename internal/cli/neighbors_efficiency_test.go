@@ -503,7 +503,7 @@ func TestAgentNeighborsCompactsCartesianPathsIntoExactFamily(t *testing.T) {
 func TestAgentNeighborsExactByteCapPreservesCoverageAndTruncationMarkers(t *testing.T) {
 	response := neighborResponse{
 		Query:           "Focus",
-		Stats:           sem.ProviderStats{Files: 5, ParsedFiles: 4, CompletenessLevel: "degraded"},
+		Stats:           neighborStats{ProviderStats: sem.ProviderStats{Files: 5, ParsedFiles: 4, CompletenessLevel: "degraded"}},
 		Warnings:        []sem.ProviderWarning{{Code: "W_DIRTY", FilePath: "src/focus.go"}},
 		PartialFailures: []sem.PartialFailure{{Code: "E_PARSE_ERROR", FilePath: "broken.go"}},
 		Matches: []neighborFocus{{

@@ -118,11 +118,8 @@ type neighborResponse struct {
 	IndexLatencyMS     int64 `json:"index_latency_ms"`
 	QueryLatencyMS     int64 `json:"query_latency_ms"`
 	TotalLatencyMS     int64 `json:"total_latency_ms"`
-	// Service reports, whenever the shared Graph service setting is on,
-	// whether the service answered this read and what it used.
-	Service           *sem.ServiceStats `json:"service,omitempty"`
-	Truncated         bool              `json:"truncated"`
-	FocusMatchesTotal int               `json:"focus_matches_total"`
+	Truncated          bool  `json:"truncated"`
+	FocusMatchesTotal  int   `json:"focus_matches_total"`
 	// FuzzyMatch reports that no EXACT match existed and these candidates came from the fuzzy ladder.
 	// FuzzyMatchKind names the rung, so a consumer is never misled about what it asked for.
 	FuzzyMatch     bool   `json:"fuzzy_match,omitempty"`
@@ -135,7 +132,7 @@ type neighborResponse struct {
 	Matches                []neighborFocus        `json:"matches"`
 	Warnings               []sem.ProviderWarning  `json:"warnings,omitempty"`
 	PartialFailures        []sem.PartialFailure   `json:"partial_failures"`
-	Stats                  sem.ProviderStats      `json:"stats"`
+	Stats                  neighborStats          `json:"stats"`
 	Completeness           sem.CompletenessReport `json:"completeness"`
 	// CompletenessScope is the query-relative reading of the diagnostics above.
 	// The full lists stay untouched; this says which of them can matter here.
@@ -223,7 +220,7 @@ func runNeighbors(ctx context.Context, opts Options, args []string) error {
 	// The source reader's git child is waited for when it closes, so its CPU
 	// counts in the `service` block only once closed.
 	finishSource()
-	response.Service = serviceStats(ctx)
+	response.Stats.Service = serviceStats(ctx)
 	switch flags.Format {
 	case "json":
 		encoder := json.NewEncoder(termsafe.NewJSONWriter(opts.Stdout))
@@ -490,7 +487,7 @@ func buildNeighborResponseFromReader(
 		Matches:               make([]neighborFocus, 0, len(focuses)),
 		Warnings:              snapshot.Header.Warnings,
 		PartialFailures:       partialFailures,
-		Stats:                 snapshot.Header.Stats,
+		Stats:                 neighborStats{ProviderStats: snapshot.Header.Stats},
 		Completeness:          snapshot.Header.Completeness,
 		CompletenessScope:     buildCompletenessScope(snapshot, focusQueryLanguage(focuses)),
 	}
@@ -936,7 +933,7 @@ func compactAgentNeighbors(response neighborResponse, budget int) []byte {
 	// The coverage marker is scoped: a parse failure in a language this answer
 	// cannot contain a relation from is not a reason to distrust the answer.
 	scope := completenessScopeOrAll(response.CompletenessScope,
-		response.Warnings, response.PartialFailures, response.Stats)
+		response.Warnings, response.PartialFailures, response.Stats.ProviderStats)
 	coverageIssue := len(scope.InScopeWarnings) > 0 || scope.LanguageFailed > 0
 	marker := "!output-truncated"
 	if coverageIssue {
@@ -1001,7 +998,7 @@ func compactAgentNeighbors(response neighborResponse, budget int) []byte {
 
 	// Under a hard byte cap, only the diagnostics that could have affected THIS
 	// answer are worth a line; the rest is one count.
-	appendVariant(compactCompletenessLine(scope, response.Stats))
+	appendVariant(compactCompletenessLine(scope, response.Stats.ProviderStats))
 	if coverageIssue {
 		for _, warning := range scope.InScopeWarnings {
 			appendVariant(fmt.Sprintf("W %s%s\n", warning.Code, agentDiagnosticPath(warning.FilePath)))
@@ -1056,8 +1053,8 @@ func compactNeighborEdge(direction string, edge neighborEdge) string {
 
 func writeAgentNeighborCompleteness(out io.Writer, response neighborResponse) {
 	writeScopedCompletenessBlock(out,
-		completenessScopeOrAll(response.CompletenessScope, response.Warnings, response.PartialFailures, response.Stats),
-		response.Warnings, response.PartialFailures, response.Stats)
+		completenessScopeOrAll(response.CompletenessScope, response.Warnings, response.PartialFailures, response.Stats.ProviderStats),
+		response.Warnings, response.PartialFailures, response.Stats.ProviderStats)
 }
 
 // neighborDirectionQueried reports whether a --direction value asked for the
@@ -1198,4 +1195,12 @@ func endpointDisplayName(endpoint neighborEndpoint) string {
 		return endpoint.QualifiedName
 	}
 	return endpoint.Name
+}
+
+// neighborStats is a neighbors answer's `stats`: the snapshot's provider
+// stats and, whenever the shared Graph service setting is on, the `service`
+// block, as in a search's stats.
+type neighborStats struct {
+	sem.ProviderStats
+	Service *sem.ServiceStats `json:"service,omitempty"`
 }

@@ -48,7 +48,7 @@ func withoutTimings(t *testing.T, data []byte) any {
 	return value
 }
 
-// serviceBlock is the `service` block of a search's stats or of a neighbors
+// serviceBlock is the `service` block in the stats of a search or neighbors
 // read, nil when it has none.
 func serviceBlock(t *testing.T, data []byte) map[string]any {
 	t.Helper()
@@ -62,7 +62,7 @@ func serviceBlock(t *testing.T, data []byte) map[string]any {
 		t.Fatalf("decode %q: %v", data, err)
 	}
 	if value.Service != nil {
-		return value.Service
+		t.Fatalf("a service block outside stats: %s", data)
 	}
 	return value.Stats.Service
 }
