@@ -549,6 +549,10 @@ type ServiceStats struct {
 	CPUUserMS   int64 `json:"cpu_user_ms"`
 	CPUSystemMS int64 `json:"cpu_system_ms"`
 	QueueWaitMS int64 `json:"queue_wait_ms"`
+	// CacheBytes is the read's cache directory's size as last measured (by a
+	// prune or `cache usage`), and CacheCapBytes its cap.
+	CacheBytes    int64 `json:"cache_bytes"`
+	CacheCapBytes int64 `json:"cache_cap_bytes"`
 }
 
 // SearchFormatVersion versions the search RESPONSE ENVELOPE, the same axis

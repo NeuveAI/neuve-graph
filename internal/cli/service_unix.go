@@ -156,14 +156,33 @@ func runService(ctx context.Context, opts Options, args []string) error {
 		return errors.New("service requires --socket with an absolute path")
 	}
 	sem.EnableSnapshotMemory(positiveSetting(envServiceSnapshots, 2))
+	// The cache directories the service read from since it was last idle; it
+	// keeps each within its bounds when idle.
+	var cacheDirsMu sync.Mutex
+	cacheDirs := map[string]bool{}
+	pruneIdle := func() {
+		cacheDirsMu.Lock()
+		dirs := cacheDirs
+		cacheDirs = map[string]bool{}
+		cacheDirsMu.Unlock()
+		for dir := range dirs {
+			_, _ = sem.PruneCache(dir, sem.CacheLimitsFromEnv())
+		}
+	}
 	serveOptions := service.ServeOptions{
 		Concurrency: positiveSetting(envServiceConcurrency, 1),
 		Idle:        time.Duration(positiveSetting(envServiceIdle, 60)) * time.Second,
 		Joined:      joinedServiceResponse,
+		OnIdle:      pruneIdle,
 	}
 	return service.Serve(ctx, socket, serveOptions, func(requestCtx context.Context, request service.Request) (response service.Response) {
 		if len(request.Args) == 0 || !serviceCommands[request.Args[0]] {
 			return service.Response{Failed: true, Error: fmt.Sprintf("the Graph service does not run %q", request.Args)}
+		}
+		if dir := serviceCacheDir(request.Args); dir != "" {
+			cacheDirsMu.Lock()
+			cacheDirs[dir] = true
+			cacheDirsMu.Unlock()
 		}
 		report := newServiceReport(true, "")
 		started := time.Now()
@@ -188,6 +207,21 @@ func runService(ctx context.Context, opts Options, args []string) error {
 	})
 }
 
+// serviceCacheDir is the cache directory a read the service runs names.
+func serviceCacheDir(args []string) string {
+	switch args[0] {
+	case "query", "search":
+		if flags, _, err := parseSearchFlags(args[1:]); err == nil {
+			return flags.CacheDir
+		}
+	case "neighbors":
+		if flags, err := parseNeighborFlags(args[1:]); err == nil {
+			return flags.CacheDir
+		}
+	}
+	return ""
+}
+
 // serviceLogLimit bounds the service's log: past it, the log is kept as
 // <socket>.log.1 and a new one begun.
 const serviceLogLimit = 1 << 20
@@ -202,7 +236,7 @@ var serviceLogMu sync.Mutex
 func logServiceRead(socket, command string, report *serviceReport, started time.Time, response service.Response, panicked, cancelled bool) {
 	stats := report.stats
 	if stats == nil {
-		stats = serviceStats(withServiceReport(context.Background(), report))
+		stats = serviceStats(withServiceReport(context.Background(), report), "")
 	}
 	line, err := json.Marshal(struct {
 		Time      string            `json:"time"`

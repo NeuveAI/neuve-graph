@@ -50,6 +50,9 @@ func Execute(version string, args []string) error {
 }
 
 func Run(ctx context.Context, opts Options, args []string) error {
+	// The artifacts this command read are recorded as used when it ends, for
+	// the cache store's least-recently-used order.
+	defer sem.FlushCacheUse()
 	if opts.Version == "" {
 		opts.Version = "dev"
 	}
@@ -102,6 +105,8 @@ func Run(ctx context.Context, opts Options, args []string) error {
 		return runIndex(ctx, opts, args[1:])
 	case "text-index":
 		return runTextIndex(ctx, opts, args[1:])
+	case "cache":
+		return runCache(ctx, opts, args[1:])
 	case "service":
 		return runService(ctx, opts, args[1:])
 	case "health":

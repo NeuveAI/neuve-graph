@@ -340,6 +340,11 @@ type ServeOptions struct {
 	// Joined, when set, is applied to the response handed to a caller that
 	// joined an identical request already running, rather than started it.
 	Joined func(Response) Response
+	// OnIdle, when set, runs once each time the service has had no request
+	// for IdleWorkAfter (default 5 s, at most half of Idle) after serving
+	// some; the service does not exit while it runs.
+	OnIdle        func()
+	IdleWorkAfter time.Duration
 }
 
 // Serve runs the service on socket until ctx ends or it has been idle for
@@ -379,6 +384,7 @@ func Serve(ctx context.Context, socket string, opts ServeOptions, handle func(co
 	var (
 		mu       sync.Mutex
 		active   int
+		idleDone = true // nothing to do while idle until a request ran
 		lastSeen = time.Now()
 		inFlight = map[string]*sharedCall{}
 		wg       sync.WaitGroup
@@ -387,8 +393,12 @@ func Serve(ctx context.Context, socket string, opts ServeOptions, handle func(co
 	touch := func(delta int) {
 		mu.Lock()
 		active += delta
+		idleDone = false
 		lastSeen = time.Now()
 		mu.Unlock()
+	}
+	if opts.IdleWorkAfter <= 0 {
+		opts.IdleWorkAfter = min(5*time.Second, opts.Idle/2)
 	}
 	go func() {
 		ticker := time.NewTicker(min(opts.Idle/4, time.Second))
@@ -400,8 +410,17 @@ func Serve(ctx context.Context, socket string, opts ServeOptions, handle func(co
 				return
 			case <-ticker.C:
 				mu.Lock()
-				idle := active == 0 && time.Since(lastSeen) >= opts.Idle
+				quiet := time.Since(lastSeen)
+				idleWork := active == 0 && !idleDone && quiet >= opts.IdleWorkAfter
+				if idleWork {
+					idleDone = true
+				}
+				idle := active == 0 && quiet >= opts.Idle
 				mu.Unlock()
+				if idleWork && opts.OnIdle != nil {
+					opts.OnIdle()
+					continue // measure the idle period again after the work
+				}
 				if idle {
 					cancel()
 				}

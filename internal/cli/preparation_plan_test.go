@@ -130,3 +130,25 @@ func TestPreparationPlanAdmissionAndCancellationDoNotPublish(t *testing.T) {
 		t.Fatal("admission/cancellation wrote cache")
 	}
 }
+
+// A plan that finds its generation ready writes nothing to the cache, not
+// even the cache store's record that it read the generation (ADR 0009).
+func TestReadyPreparationPlanWritesNothing(t *testing.T) {
+	repo, cache := incrementalCommandFixture(t)
+	commit := incrementalCommandCommit(t, repo)
+	var output bytes.Buffer
+	if err := Run(t.Context(), Options{Version: "test", Stdout: &output}, []string{"index", "--repo", repo, "--cache-dir", cache, "--incremental", "--commit", commit, "--profile", "syntax-only", "--format", "json"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(cache, "cache-store")); err != nil {
+		t.Fatal(err)
+	}
+	ready := preparationPlanCommand(t, repo, cache, commit, "")
+	preparationPlanCommand(t, repo, cache, commit, ready.PreparedRead.GenerationID)
+	if ready.PreparationPlan.Availability != "ready" {
+		t.Fatalf("plan availability %q, want ready", ready.PreparationPlan.Availability)
+	}
+	if _, err := os.Lstat(filepath.Join(cache, "cache-store")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a ready plan wrote the cache store: %v", err)
+	}
+}

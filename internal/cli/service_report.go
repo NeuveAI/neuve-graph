@@ -36,8 +36,9 @@ func withServiceReport(ctx context.Context, report *serviceReport) context.Conte
 }
 
 // serviceStats is the `service` block for the read ctx carries, measured
-// now; nil when the setting is off.
-func serviceStats(ctx context.Context) *sem.ServiceStats {
+// now, with the size of its cache directory as last measured; nil when the
+// setting is off.
+func serviceStats(ctx context.Context, cacheDir string) *sem.ServiceStats {
 	report, _ := ctx.Value(serviceReportKey{}).(*serviceReport)
 	if report == nil {
 		return nil
@@ -56,6 +57,13 @@ func serviceStats(ctx context.Context) *sem.ServiceStats {
 		CPUUserMS:      (user - report.cpuUser).Milliseconds(),
 		CPUSystemMS:    (system - report.cpuSystem).Milliseconds(),
 		QueueWaitMS:    report.queueWait.Milliseconds(),
+	}
+	if cacheDir != "" {
+		limits := sem.CacheLimitsFromEnv()
+		stats.CacheCapBytes = limits.MaxBytes
+		if usage, err := sem.LastCacheUsage(cacheDir, limits); err == nil {
+			stats.CacheBytes = usage.Bytes
+		}
 	}
 	report.stats = stats
 	return stats

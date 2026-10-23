@@ -220,7 +220,7 @@ func runNeighbors(ctx context.Context, opts Options, args []string) error {
 	// The source reader's git child is waited for when it closes, so its CPU
 	// counts in the `service` block only once closed.
 	finishSource()
-	response.Stats.Service = serviceStats(ctx)
+	response.Stats.Service = serviceStats(ctx, cacheDir)
 	switch flags.Format {
 	case "json":
 		encoder := json.NewEncoder(termsafe.NewJSONWriter(opts.Stdout))

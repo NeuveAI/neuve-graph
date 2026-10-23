@@ -51,6 +51,9 @@ type indexResponse struct {
 	Completeness           sem.CompletenessReport          `json:"completeness"`
 	IncrementalPreparation *incrementalPreparationResponse `json:"incremental_preparation,omitempty"`
 	PreparedRead           *sem.PreparedReadReceipt        `json:"prepared_read,omitempty"`
+	// Cache is the cache directory's size: measured by the prune an index that
+	// wrote runs, otherwise as last measured.
+	Cache *sem.CacheUsage `json:"cache,omitempty"`
 }
 
 type indexPreparationPlanResponse struct {
@@ -140,6 +143,9 @@ func runIndexCommand(ctx context.Context, opts Options, args []string, health bo
 		ForceRebuild: flags.Force,
 	}
 	if flags.Plan {
+		// A plan writes nothing to the cache, not even the record that it
+		// read a generation (ADR 0009).
+		defer sem.DiscardCacheUse()
 		plan, err := sem.PlanIncrementalProviderSnapshot(ctx, repo, flags.Commit, opts.Version, snapOptions, cacheDir, flags.ExpectedGeneration)
 		if err != nil {
 			return err
@@ -224,6 +230,20 @@ func runIndexCommand(ctx context.Context, opts Options, args []string, health bo
 		Completeness:           snapshot.Header.Completeness,
 		IncrementalPreparation: preparation,
 		PreparedRead:           preparedRead,
+	}
+	// An index that wrote keeps the cache within its bounds, keeping the tree
+	// it prepared; one that found its artifact ready reports the size last
+	// measured.
+	limits := sem.CacheLimitsFromEnv()
+	var usage sem.CacheUsage
+	if cacheHit {
+		usage, err = sem.LastCacheUsage(cacheDir, limits)
+	} else {
+		sem.FlushCacheUse()
+		usage, err = sem.PruneCache(cacheDir, limits, snapshot.Header.Tree)
+	}
+	if err == nil {
+		response.Cache = &usage
 	}
 	if health {
 		return writeHealth(opts.Stdout, response, outputText, flags.Force)

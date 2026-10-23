@@ -218,6 +218,29 @@ func (entry cacheEntry) open() (*os.File, error) {
 		return nil, err
 	}
 	defer root.Close()
+	// The cache store neither removes an artifact while it is read nor
+	// forgets that it was (cache_store.go). The file opened may already be
+	// replaced by the time the read holds it: open again. One removed reads
+	// as absent.
+	for attempt := 0; ; attempt++ {
+		file, err := entry.openIn(root)
+		if err != nil {
+			return nil, err
+		}
+		if holdArtifactForRead(root, entry.relative, file) {
+			noteCacheUse(entry.root, entry.relative)
+			return file, nil
+		}
+		_ = file.Close()
+		if attempt == 2 {
+			// Not ErrNotExist: an absent generation marker reads as the
+			// legacy generation, and a name being rewritten is not absent.
+			return nil, fmt.Errorf("cache artifact %q kept being replaced while it was opened", entry.relative)
+		}
+	}
+}
+
+func (entry cacheEntry) openIn(root *os.Root) (*os.File, error) {
 	// The existing platform-qualified opener uses O_NONBLOCK on POSIX so a
 	// raced-in FIFO cannot park before the opened-handle type check. Root
 	// confinement and caller-selected cache-root links retain their semantics.

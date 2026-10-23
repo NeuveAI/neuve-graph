@@ -138,6 +138,27 @@ var commandDocs = []commandDoc{
 		examples: []string{"entire graph text-index --repo . --commit $(git rev-parse HEAD) --cache-dir ~/.cache/entire-graph"},
 	},
 	{
+		name:    "cache",
+		group:   groupSetup,
+		summary: "Keep a cache directory within its cap and free-space floor",
+		usage: []string{
+			"entire graph cache declare --cache-dir path [--repo .] [--commit <exact-commit-OID>...] [--format json|text]",
+			"entire graph cache prune --cache-dir path [--max-bytes N] [--min-free-bytes N] [--format json|text]",
+			"entire graph cache usage --cache-dir path [--max-bytes N] [--min-free-bytes N] [--format json|text]",
+		},
+		long: "A cache directory stays under a cap (default 4 GiB; ENTIRE_GRAPH_CACHE_MAX_BYTES overrides) while its disk keeps a floor of free space (default 10 GiB; ENTIRE_GRAPH_CACHE_MIN_FREE_BYTES overrides). Everything Graph writes there counts; the remembered tree-scan answers and the text index keep their own bounds within it. A prune removes artifacts of other engine versions first, then the least recently used search snapshots, syntax generations, provider records and per-file extractions, and never an artifact a read holds open or one of a declared base. Last use is recorded by each command as it ends, not taken from file access times.\n\n" +
+			"declare replaces the declared bases: the commits whose prepared artifacts are kept whatever their last use, such as the bases queued reviews start from. With --repo, each commit's tree is declared too, which keeps an artifact prepared at another commit of the same tree. An index that writes prunes afterwards, and so does the shared Graph service when idle. usage reports the size, by top-level directory, without removing anything.",
+		flags: []flagDoc{
+			{name: "--cache-dir", arg: "path", desc: "Cache directory to keep within bounds"},
+			{name: "--commit", arg: "OID", desc: "A declared base (declare; repeatable; none clears the set)"},
+			{name: "--repo", arg: "path", desc: "Repository holding the declared commits, to declare their trees too (declare)"},
+			{name: "--max-bytes", arg: "N", desc: "Cap for this prune or report"},
+			{name: "--min-free-bytes", arg: "N", desc: "Free-space floor for this prune or report"},
+			{name: "--format", arg: "json|text", def: "json", desc: "Receipt format"},
+		},
+		examples: []string{"entire graph cache declare --cache-dir ~/.cache/entire-graph --repo . --commit $(git merge-base HEAD origin/main)", "entire graph cache prune --cache-dir ~/.cache/entire-graph --format text"},
+	},
+	{
 		name:    "index",
 		group:   groupSetup,
 		summary: "Build/warm a committed-tree cache variant for matching queries",

@@ -207,7 +207,8 @@ func TestServiceAnswersAsTheProcessDoes(t *testing.T) {
 			if block == nil || block["answered"] != true || block["reason"] != nil ||
 				block["rss_bytes"].(float64) <= 0 || block["max_rss_bytes"].(float64) < block["rss_bytes"].(float64) ||
 				block["snapshots_limit"] != 2.0 || block["snapshots_held"].(float64) < 1 ||
-				block["cpu_user_ms"].(float64) < 0 || block["cpu_system_ms"].(float64) < 0 || block["queue_wait_ms"] != 0.0 {
+				block["cpu_user_ms"].(float64) < 0 || block["cpu_system_ms"].(float64) < 0 || block["queue_wait_ms"] != 0.0 ||
+				block["cache_bytes"].(float64) <= 0 || block["cache_cap_bytes"] != float64(4<<30) {
 				t.Fatalf("%s call %d through the service: service block %v", args[0], index+1, block)
 			}
 			if index == 1 && block["snapshot_hit"] != true {
@@ -253,12 +254,21 @@ func TestServiceAnswersAsTheProcessDoes(t *testing.T) {
 			t.Fatalf("service log line %q: %v", line, err)
 		}
 	}
+	usageFile := filepath.Join(cache, "cache-store", "usage-v1.json")
+	usageBefore, err := os.Stat(usageFile)
+	if err != nil {
+		t.Fatal(err)
+	}
 	deadline := time.Now().Add(40 * time.Second)
 	for len(sockets()) != 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("the idle service did not exit")
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+	// Idle, it kept the cache directory it read from within its bounds.
+	if usageAfter, err := os.Stat(usageFile); err != nil || !usageAfter.ModTime().After(usageBefore.ModTime()) {
+		t.Fatalf("the idle service did not prune its cache directory: %v", err)
 	}
 }
 
