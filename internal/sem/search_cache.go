@@ -1131,6 +1131,18 @@ func readSearchSnapshot(entry cacheEntry) (cachedSearchSnapshot, error) {
 		return cachedSearchSnapshot{}, err
 	}
 	defer file.Close()
+	if memory := currentSnapshotMemory(); memory != nil {
+		if info, err := file.Stat(); err == nil {
+			cached, _, err := memory.read(filepath.Join(entry.root, entry.relative), info, func() (cachedSearchSnapshot, error) {
+				return decodeSearchSnapshot(file)
+			})
+			return cached, err
+		}
+	}
+	return decodeSearchSnapshot(file)
+}
+
+func decodeSearchSnapshot(file io.Reader) (cachedSearchSnapshot, error) {
 	reader, err := gzip.NewReader(file)
 	if err != nil {
 		return cachedSearchSnapshot{}, err

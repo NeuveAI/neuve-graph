@@ -33,6 +33,9 @@ type Options struct {
 func Execute(version string, args []string) error {
 	ctx, stop := interruptibleContext(context.Background(), os.Exit)
 	defer stop()
+	if handled, err := forwardToService(ctx, args); handled {
+		return err
+	}
 	return Run(ctx, Options{
 		Version: version,
 		Env:     EnvFromOS(),
@@ -95,6 +98,8 @@ func Run(ctx context.Context, opts Options, args []string) error {
 		return runIndex(ctx, opts, args[1:])
 	case "text-index":
 		return runTextIndex(ctx, opts, args[1:])
+	case "service":
+		return runService(ctx, opts, args[1:])
 	case "health":
 		return runHealth(ctx, opts, args[1:])
 	case "def":

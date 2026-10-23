@@ -111,6 +111,17 @@ var commandDocs = []commandDoc{
 		examples: []string{"entire graph agent-guide"},
 	},
 	{
+		name:    "service",
+		group:   groupMeta,
+		summary: "Run the shared Graph service (started on demand by searches)",
+		usage:   []string{"entire graph service --socket <absolute-path>"},
+		long:    "With ENTIRE_GRAPH_SERVICE=auto, a prepared query, search or neighbors call whose --repo and --cache-dir are absolute and whose output is not a terminal is answered by one long-lived Graph process per user, executable and environment instead of a fresh process. The first such call starts the service; it keeps up to ENTIRE_GRAPH_SERVICE_SNAPSHOTS decoded snapshots (default 2), runs ENTIRE_GRAPH_SERVICE_CONCURRENCY calls at once (default 1), and exits after ENTIRE_GRAPH_SERVICE_IDLE seconds without a call (default 60). Answers are the ones the call's own process would give; whenever the service cannot answer, the call runs in its own process (ENTIRE_GRAPH_SERVICE=require makes it fail instead, to diagnose a deployment). Not available on Windows.",
+		flags: []flagDoc{
+			{name: "--socket", arg: "path", desc: "The service's socket, chosen by the calling search"},
+		},
+		examples: []string{"ENTIRE_GRAPH_SERVICE=auto entire graph query --repo /abs/repo --head --prepared-only --cache-dir /abs/cache --format json --query \"...\""},
+	},
+	{
 		name:    "text-index",
 		group:   groupSetup,
 		summary: "Index a commit's blobs so tree scans read only candidate files",
