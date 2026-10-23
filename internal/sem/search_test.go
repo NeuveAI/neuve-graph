@@ -2605,7 +2605,7 @@ func TestCommittedPreselectionFiltersInferredAliasSubstrings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.Stats.PreselectionBackend != "git-tree-grep" {
+	if response.Stats.PreselectionBackend != gitutil.TreeScanRoute {
 		t.Fatalf("expected committed Git path: %#v", response.Stats)
 	}
 	if response.Stats.FilesContentRead != 0 {

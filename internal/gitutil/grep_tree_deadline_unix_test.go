@@ -17,7 +17,8 @@ import (
 // typed deadline error rather than waited for.
 func TestGrepTreePatternLinesStopsAtDeadline(t *testing.T) {
 	repo := treeFirstLineFixture(t)
-	logDir := installGitShim(t, `echo $$ > "$LOG/pid"; exec sleep 60`)
+	// Whichever route runs, its scanning child is git grep or git cat-file.
+	logDir := installGitShimFor(t, `[ "$1" = grep ] || [ "$1" = cat-file ]`, `echo $$ > "$LOG/pid"; exec sleep 60`)
 	previous := TreePatternGrepDeadline
 	TreePatternGrepDeadline = 300 * time.Millisecond
 	t.Cleanup(func() { TreePatternGrepDeadline = previous })
@@ -36,7 +37,7 @@ func TestGrepTreePatternLinesStopsAtDeadline(t *testing.T) {
 		t.Fatal(convErr)
 	}
 	if processAlive(pid) {
-		t.Fatalf("git grep process %d still running after its deadline", pid)
+		t.Fatalf("scan process %d still running after its deadline", pid)
 	}
 }
 

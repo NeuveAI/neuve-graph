@@ -54,8 +54,8 @@ func TestPreparedSearchDisclosesStoppedAliasGrep(t *testing.T) {
 	}
 
 	completed := search()
-	if hasDeadlineWarning(completed) || completed.Stats.PreselectionBackend != "git-tree-grep" {
-		t.Fatalf("a completed scan was disclosed as stopped or left the Git route: %#v %#v", completed.Warnings, completed.Stats)
+	if hasDeadlineWarning(completed) || completed.Stats.PreselectionBackend != gitutil.TreeScanRoute {
+		t.Fatalf("a completed scan was disclosed as stopped or left the tree scan route: %#v %#v", completed.Warnings, completed.Stats)
 	}
 
 	realGit, err := exec.LookPath("git")
@@ -63,8 +63,10 @@ func TestPreparedSearchDisclosesStoppedAliasGrep(t *testing.T) {
 		t.Skip("git not found")
 	}
 	shim := t.TempDir()
-	// Only the alias scan (-E -m 1 -f -) hangs; every other Git command is real.
-	script := "#!/bin/sh\nif [ \"$1\" = grep ]; then case \" $* \" in *\" -E -m 1 -f - \"*) exec sleep 60;; esac; fi\nexec " + realGit + " \"$@\"\n"
+	// Only the alias scan hangs: its git grep (-E -m 1 -f -) on the Git route, its
+	// blob stream (cat-file --batch) on the one-pass route. Every other Git
+	// command is real.
+	script := "#!/bin/sh\ncase \" $* \" in *\" -E -m 1 -f - \"*|\" cat-file --batch \") exec sleep 60;; esac\nexec " + realGit + " \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(shim, "git"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +83,7 @@ func TestPreparedSearchDisclosesStoppedAliasGrep(t *testing.T) {
 	if !hasDeadlineWarning(stopped) {
 		t.Fatalf("stopped alias grep was not disclosed: %#v", stopped.Warnings)
 	}
-	if stopped.Stats.PreselectionBackend == "git-tree-grep" {
-		t.Fatalf("stopped scan still reported the Git route: %#v", stopped.Stats)
+	if stopped.Stats.PreselectionBackend == gitutil.TreeScanRoute {
+		t.Fatalf("stopped scan still reported the tree scan route: %#v", stopped.Stats)
 	}
 }

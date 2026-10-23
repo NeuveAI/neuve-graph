@@ -372,10 +372,15 @@ type SearchStats struct {
 	// ignore rules removed from this corpus before FilesScanned was taken. It sits
 	// beside FilesScanned deliberately: read alone, "scanned N files" invites the
 	// reading that N is what the repository contains.
-	RepoIgnoredFiles               int     `json:"files_excluded_by_repo_ignore_rules,omitempty"`
-	PreselectionBackend            string  `json:"preselection_backend,omitempty"`
-	PreselectionPasses             int     `json:"preselection_passes,omitempty"`
-	PreselectionFilesExamined      int     `json:"preselection_files_examined,omitempty"`
+	RepoIgnoredFiles          int    `json:"files_excluded_by_repo_ignore_rules,omitempty"`
+	PreselectionBackend       string `json:"preselection_backend,omitempty"`
+	PreselectionPasses        int    `json:"preselection_passes,omitempty"`
+	PreselectionFilesExamined int    `json:"preselection_files_examined,omitempty"`
+	// What the one-pass tree scan matched and read: distinct patterns, and the
+	// blobs (with their bytes) whose content it read once for all of them.
+	PreselectionPatterns           int     `json:"preselection_patterns,omitempty"`
+	PreselectionBlobsRead          int     `json:"preselection_blobs_read,omitempty"`
+	PreselectionBytesRead          int64   `json:"preselection_bytes_read,omitempty"`
 	PreselectionConfidence         float64 `json:"preselection_confidence,omitempty"`
 	PreselectionCoverage           float64 `json:"preselection_coverage,omitempty"`
 	PreselectionDiversity          float64 `json:"preselection_diversity,omitempty"`
@@ -1373,6 +1378,9 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 				PreselectionBackend:       selection.preselectionBackend,
 				PreselectionPasses:        selection.preselectionPasses,
 				PreselectionFilesExamined: selection.preselectionFilesExamined,
+				PreselectionPatterns:      selection.preselectionPatterns,
+				PreselectionBlobsRead:     selection.preselectionBlobsRead,
+				PreselectionBytesRead:     selection.preselectionBytesRead,
 				PreselectionConfidence:    selection.preselectionConfidence,
 				PreselectionCoverage:      selection.preselectionCoverage,
 				PreselectionDiversity:     selection.preselectionDiversity,
@@ -1583,6 +1591,9 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 		PreselectionBackend:       selection.preselectionBackend,
 		PreselectionPasses:        selection.preselectionPasses,
 		PreselectionFilesExamined: selection.preselectionFilesExamined,
+		PreselectionPatterns:      selection.preselectionPatterns,
+		PreselectionBlobsRead:     selection.preselectionBlobsRead,
+		PreselectionBytesRead:     selection.preselectionBytesRead,
 		PreselectionConfidence:    selection.preselectionConfidence,
 		PreselectionCoverage:      selection.preselectionCoverage,
 		PreselectionDiversity:     selection.preselectionDiversity,
@@ -2460,11 +2471,15 @@ type searchFileSelection struct {
 	preselectionBackend       string
 	preselectionPasses        int
 	preselectionFilesExamined int
-	preselectionConfidence    float64
-	preselectionCoverage      float64
-	preselectionDiversity     float64
-	preselectionWidened       bool
-	preselectionBounded       bool
+	// The tree scan's own report (gitutil.TreeScanStats) when one ran.
+	preselectionPatterns   int
+	preselectionBlobsRead  int
+	preselectionBytesRead  int64
+	preselectionConfidence float64
+	preselectionCoverage   float64
+	preselectionDiversity  float64
+	preselectionWidened    bool
+	preselectionBounded    bool
 	// allFiles is every file preselection discovered, kept so a repository-wide literal lookup has
 	// a corpus to fall back on when it is small enough to read (search_needle.go). It costs one
 	// slice of paths, which the sparse file list already pays for.
@@ -2566,6 +2581,7 @@ func preselectSearchFiles(
 	if exactFullPreindex && !options.Worktree && !options.Deep && grepSafe {
 		var matches []string
 		var grepErr error
+		var scan gitutil.TreeScanStats
 		if len(q.inferredAbbreviations) > 0 {
 			validationRead := source.read
 			if limit := resolveMaxParseBytes(options.MaxParseBytes); limit > 0 && limit < defaultMaxParseBytes {
@@ -2588,7 +2604,7 @@ func preselectSearchFiles(
 			if patterns == nil {
 				grepErr = fmt.Errorf("query requires Unicode content preselection")
 			} else {
-				grepErr = gitutil.GrepTreePatternLines(ctx, source.absRepo, source.commit, patterns, func(match gitutil.GrepMatch) error {
+				scan, grepErr = gitutil.ScanTreePatternLines(ctx, source.absRepo, source.commit, patterns, func(match gitutil.GrepMatch) error {
 					if allowed[match.Path] && !seen[match.Path] {
 						text := match.Text
 						if !textMatchesSearchQuery(q, text) {
@@ -2615,7 +2631,7 @@ func preselectSearchFiles(
 			selection.preselectionWarnings = append(selection.preselectionWarnings, ProviderWarning{
 				Code:                 searchGitGrepDeadlineCode,
 				Severity:             "warning",
-				EffectOnCompleteness: "Git's tree grep for this query stopped at its deadline, so content preselection used the fallback route; ranking may differ from a completed scan",
+				EffectOnCompleteness: "The tree scan for this query stopped at its deadline, so content preselection used the fallback route; ranking may differ from a completed scan",
 				Detail:               grepErr.Error(),
 			})
 		}
@@ -2631,6 +2647,13 @@ func preselectSearchFiles(
 			}
 			selection.sparseFiles = append([]string(nil), selection.files...)
 			selection.preselectionBackend = "git-tree-grep"
+			if scan.Route != "" {
+				// The alias first-line scan names its own route and reports what it read.
+				selection.preselectionBackend = scan.Route
+				selection.preselectionPatterns = scan.Patterns
+				selection.preselectionBlobsRead = scan.BlobsRead
+				selection.preselectionBytesRead = scan.BytesRead
+			}
 			selection.preselectionPasses = 1
 			selection.preselectionFilesExamined = len(source.paths)
 			// Git scanned content but returned only paths, so the provider has no posting lists.

@@ -15,6 +15,13 @@ import (
 // invocations and hands every other command to the real Git.
 func installGitShim(t *testing.T, body string) string {
 	t.Helper()
+	return installGitShimFor(t, `[ "$1" = grep ]`, body)
+}
+
+// installGitShimFor runs body for the Git invocations test (a shell condition
+// over the arguments) selects.
+func installGitShimFor(t *testing.T, test, body string) string {
+	t.Helper()
 	realGit, err := exec.LookPath("git")
 	if err != nil {
 		t.Skip("git not found")
@@ -22,7 +29,7 @@ func installGitShim(t *testing.T, body string) string {
 	dir := t.TempDir()
 	logDir := t.TempDir()
 	script := "#!/bin/sh\nLOG=" + logDir + "\nREAL=" + realGit + "\n" +
-		"if [ \"$1\" = grep ]; then\n" + body + "\nfi\nexec \"$REAL\" \"$@\"\n"
+		"if " + test + "; then\n" + body + "\nfi\nexec \"$REAL\" \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -31,12 +38,12 @@ func installGitShim(t *testing.T, body string) string {
 }
 
 // One `git grep -m 1` with several patterns is quadratic in Git (see
-// grepTreeFirstPatternLines), so a committed-tree first-line scan must give
-// each Git process exactly one pattern.
-func TestGrepTreePatternLinesRunsOnePatternPerGitProcess(t *testing.T) {
+// grepTreeFirstPatternLinesGit), so the Git route must give each Git process
+// exactly one pattern.
+func TestGrepTreePatternLinesGitRunsOnePatternPerGitProcess(t *testing.T) {
 	repo := treeFirstLineFixture(t)
 	logDir := installGitShim(t, `tee "$LOG/$$.patterns" | "$REAL" "$@"; exit $?`)
-	if err := GrepTreePatternLines(t.Context(), repo, "HEAD", treeFirstLinePatterns, func(GrepMatch) error { return nil }); err != nil {
+	if err := grepTreeFirstPatternLinesGit(t.Context(), repo, "HEAD", treeFirstLinePatterns, func(GrepMatch) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	logs, err := filepath.Glob(filepath.Join(logDir, "*.patterns"))
@@ -60,15 +67,15 @@ func TestGrepTreePatternLinesRunsOnePatternPerGitProcess(t *testing.T) {
 // The per-pattern scans share one CPU budget: no more than budget/threads Git
 // processes at once, each told its thread cap, and more than one at once when
 // the budget allows it (never strictly one after another).
-func TestGrepTreePatternLinesStaysWithinItsBudget(t *testing.T) {
+func TestGrepTreePatternLinesGitStaysWithinItsBudget(t *testing.T) {
 	repo := treeFirstLineFixture(t)
 	t.Setenv(treePatternGrepCPUEnv, "6")
 	t.Setenv(treePatternGrepThreadsEnv, "2")
 	// Each scan registers itself, records how many scans were running, holds
 	// long enough to overlap, then leaves. mkdir is the atomic step.
-	logDir := installGitShim(t, `mkdir "$LOG/run.$$"; ls -d "$LOG"/run.* | wc -l | tr -d ' ' > "$LOG/count.$$"; printf '%s\n' "$*" > "$LOG/args.$$"; sleep 0.3; "$REAL" "$@"; rc=$?; rmdir "$LOG/run.$$"; exit $rc`)
+	logDir := installGitShim(t, `mkdir "$LOG/run.$$"; ls -d "$LOG"/run.* 2>/dev/null | wc -l | tr -d ' ' > "$LOG/count.$$"; printf '%s\n' "$*" > "$LOG/args.$$"; sleep 0.3; "$REAL" "$@"; rc=$?; rmdir "$LOG/run.$$"; exit $rc`)
 	patterns := []string{"[aA]lpha", "[bB]eta", "zz[q]", "yy[q]", "xx[q]", "ww[q]", "vv[q]", "uu[q]", "tt[q]"}
-	if err := GrepTreePatternLines(t.Context(), repo, "HEAD", patterns, func(GrepMatch) error { return nil }); err != nil {
+	if err := grepTreeFirstPatternLinesGit(t.Context(), repo, "HEAD", patterns, func(GrepMatch) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	counts, err := filepath.Glob(filepath.Join(logDir, "count.*"))

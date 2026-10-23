@@ -667,8 +667,29 @@ func GrepIndexPatternSample(ctx context.Context, repo string, patterns []string,
 // matches already visited before that are not retracted. A scan that finishes
 // within the deadline is unaffected by it.
 func GrepTreePatternLines(ctx context.Context, repo, treeish string, patterns []string, visit func(GrepMatch) error) error {
+	_, err := ScanTreePatternLines(ctx, repo, treeish, patterns, visit)
+	return err
+}
+
+// GrepTreePatternLinesGit answers GrepTreePatternLines through the per-pattern
+// Git route on every platform, without its deadline. It is the reference the
+// one-pass scan is checked against on real trees.
+func GrepTreePatternLinesGit(ctx context.Context, repo, treeish string, patterns []string, visit func(GrepMatch) error) error {
 	if treeish == "" || strings.HasPrefix(treeish, "-") || strings.ContainsRune(treeish, '\x00') {
 		return fmt.Errorf("invalid git grep treeish %q", treeish)
+	}
+	return grepTreeFirstPatternLinesGit(ctx, repo, treeish, patterns, visit)
+}
+
+// ScanTreePatternLines is GrepTreePatternLines with a report of the route it
+// took and what it read. Where the platform's POSIX regex engine is reachable
+// (cgo, not Windows) Graph reads each blob once for every pattern
+// (scanTreeFirstPatternLines); elsewhere Git scans once per pattern
+// (grepTreeFirstPatternLinesGit). Both answer what one multi-pattern
+// `git grep -m 1` answers.
+func ScanTreePatternLines(ctx context.Context, repo, treeish string, patterns []string, visit func(GrepMatch) error) (TreeScanStats, error) {
+	if treeish == "" || strings.HasPrefix(treeish, "-") || strings.ContainsRune(treeish, '\x00') {
+		return TreeScanStats{}, fmt.Errorf("invalid git grep treeish %q", treeish)
 	}
 	deadline := TreePatternGrepDeadline
 	runCtx, cancel := ctx, context.CancelFunc(func() {})
@@ -676,11 +697,11 @@ func GrepTreePatternLines(ctx context.Context, repo, treeish string, patterns []
 		runCtx, cancel = context.WithTimeout(ctx, deadline)
 	}
 	defer cancel()
-	err := grepTreeFirstPatternLines(runCtx, repo, treeish, patterns, visit)
+	stats, err := treeFirstPatternLines(runCtx, repo, treeish, patterns, visit)
 	if err != nil && ctx.Err() == nil && errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-		return &GrepDeadlineError{Limit: deadline}
+		return stats, &GrepDeadlineError{Limit: deadline}
 	}
-	return err
+	return stats, err
 }
 
 // TreePatternGrepDeadline bounds one GrepTreePatternLines call. It is a
@@ -711,7 +732,7 @@ func (e *GrepDeadlineError) Is(target error) bool { return target == ErrGrepDead
 // and an alias contributes at most nine boundary alternatives.
 const maxSeparateTreePatternGreps = 256
 
-// grepTreeFirstPatternLines returns, per file of an immutable tree, the first
+// grepTreeFirstPatternLinesGit returns, per file of an immutable tree, the first
 // line matching any of patterns, in Git's path order, exactly as one
 // `git grep -m 1 -f -` over all patterns would.
 //
@@ -740,7 +761,7 @@ const maxSeparateTreePatternGreps = 256
 // pre-pass (`git grep -l` over every pattern) was measured and not adopted:
 // on the stalled queries it listed 91-97% of the files and itself cost about
 // half of all the per-pattern scans together.
-func grepTreeFirstPatternLines(ctx context.Context, repo, treeish string, patterns []string, visit func(GrepMatch) error) error {
+func grepTreeFirstPatternLinesGit(ctx context.Context, repo, treeish string, patterns []string, visit func(GrepMatch) error) error {
 	distinct := make([]string, 0, len(patterns))
 	seen := make(map[string]bool, len(patterns))
 	for _, pattern := range patterns {
