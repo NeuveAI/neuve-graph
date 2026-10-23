@@ -16,3 +16,9 @@ func performanceCores() int {
 	}
 	return runtime.NumCPU()
 }
+
+// osBuild is the macOS build, which also fixes the C library's regex engine.
+func osBuild() string {
+	build, _ := syscall.Sysctl("kern.osversion")
+	return build
+}

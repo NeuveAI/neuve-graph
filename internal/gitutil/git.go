@@ -688,6 +688,12 @@ func GrepTreePatternLinesGit(ctx context.Context, repo, treeish string, patterns
 // (grepTreeFirstPatternLinesGit). Both answer what one multi-pattern
 // `git grep -m 1` answers.
 func ScanTreePatternLines(ctx context.Context, repo, treeish string, patterns []string, visit func(GrepMatch) error) (TreeScanStats, error) {
+	return ScanTreePatternLinesWith(ctx, repo, treeish, patterns, TreeScanOptions{}, visit)
+}
+
+// ScanTreePatternLinesWith is ScanTreePatternLines with what the scan may share
+// with others; remembered answers never change an answer, only what is read.
+func ScanTreePatternLinesWith(ctx context.Context, repo, treeish string, patterns []string, options TreeScanOptions, visit func(GrepMatch) error) (TreeScanStats, error) {
 	if treeish == "" || strings.HasPrefix(treeish, "-") || strings.ContainsRune(treeish, '\x00') {
 		return TreeScanStats{}, fmt.Errorf("invalid git grep treeish %q", treeish)
 	}
@@ -697,7 +703,7 @@ func ScanTreePatternLines(ctx context.Context, repo, treeish string, patterns []
 		runCtx, cancel = context.WithTimeout(ctx, deadline)
 	}
 	defer cancel()
-	stats, err := treeFirstPatternLines(runCtx, repo, treeish, patterns, visit)
+	stats, err := treeFirstPatternLines(runCtx, repo, treeish, patterns, options, visit)
 	if err != nil && ctx.Err() == nil && errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return stats, &GrepDeadlineError{Limit: deadline}
 	}

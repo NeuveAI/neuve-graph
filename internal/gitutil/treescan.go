@@ -43,7 +43,10 @@ import (
 //
 // Each pattern's own first matching line is kept (blobAnswer), and a file's
 // line is the smallest of them, which is the first line matching any.
-func scanTreeFirstPatternLines(ctx context.Context, repo, treeish string, patterns []string, visit func(GrepMatch) error) (TreeScanStats, error) {
+//
+// With options.Answers, a blob's answer to a pattern computed by any earlier
+// scan, in any process, is read instead of computed (see TreeScanAnswers).
+func scanTreeFirstPatternLines(ctx context.Context, repo, treeish string, patterns []string, options TreeScanOptions, visit func(GrepMatch) error) (TreeScanStats, error) {
 	if len(patterns) == 0 {
 		return TreeScanStats{Route: TreeScanRouteOnePass}, nil // git grep is never started
 	}
@@ -86,8 +89,7 @@ func scanTreeFirstPatternLines(ctx context.Context, repo, treeish string, patter
 		needed[entry.oid] = true
 		blobs = append(blobs, entry.oid)
 	}
-	answers, read, err := scanBlobs(ctx, repo, blobs, plan)
-	stats.BlobsRead, stats.BytesRead = read.blobs, read.bytes
+	answers, err := answerBlobs(ctx, repo, blobs, plan, options.Answers, &stats)
 	if err != nil {
 		return stats, err
 	}
@@ -111,6 +113,220 @@ func scanTreeFirstPatternLines(ctx context.Context, repo, treeish string, patter
 	return stats, nil
 }
 
+// answerBlobs answers every blob for every pattern of plan, from the store
+// where it can and by scanning the rest. Before scanning, it claims each
+// pattern it lacks answers for; a pattern another process holds is waited
+// for, and the blobs that need only such patterns are scanned afterwards only
+// if that process left them unanswered.
+func answerBlobs(ctx context.Context, repo string, blobs []string, plan *treeScanPlan, store *TreeScanAnswers, stats *TreeScanStats) (map[string]blobAnswer, error) {
+	// The empty tail git can report (phantomLine) belongs to a whole pattern
+	// list, not to one pattern, so such lists are never remembered.
+	if plan.matchesEmpty {
+		store = nil
+	}
+	sources := plan.sources()
+	answers := make(map[string]blobAnswer, len(blobs))
+	known := store.lookup(sources, blobs)
+	lacks := func(oid string, index int) bool {
+		_, ok := known.answers[oid][index]
+		return !ok
+	}
+	var claims []*answerClaim
+	releaseClaims := func() {
+		for _, claim := range claims {
+			claim.release()
+		}
+		claims = nil
+	}
+	defer releaseClaims()
+	mine := make([]bool, len(sources))
+	var theirs []string
+	for index, source := range sources {
+		lacking := false
+		for _, oid := range blobs {
+			if lacks(oid, index) {
+				lacking = true
+				break
+			}
+		}
+		if !lacking {
+			continue
+		}
+		claim, held := store.tryClaim(source)
+		if held {
+			theirs = append(theirs, source)
+			continue
+		}
+		mine[index] = true
+		if claim != nil {
+			claims = append(claims, claim)
+		}
+	}
+	// scan reads oids once and computes, for all of them, every pattern any
+	// of them lacks; remembered answers fill in the rest.
+	scan := func(oids []string) error {
+		if len(oids) == 0 {
+			return nil
+		}
+		var lacking []int
+		for index := range sources {
+			for _, oid := range oids {
+				if lacks(oid, index) {
+					lacking = append(lacking, index)
+					break
+				}
+			}
+		}
+		sub := plan
+		if len(lacking) < len(sources) {
+			subSources := make([]string, len(lacking))
+			for k, index := range lacking {
+				subSources[k] = sources[index]
+			}
+			var err error
+			if sub, err = newTreeScanPlan(subSources); err != nil {
+				return err
+			}
+		}
+		scanned, read, err := scanBlobs(ctx, repo, oids, sub)
+		stats.BlobsRead += read.blobs
+		stats.BytesRead += read.bytes
+		if err != nil {
+			return err
+		}
+		for oid, partial := range scanned {
+			answer := blobAnswer{nulInHead: partial.nulInHead, lines: make([]blobLine, len(sources)), phantom: partial.phantom}
+			for index, line := range known.answers[oid] {
+				answer.lines[index] = line
+				stats.AnswerHits++
+			}
+			for k, index := range lacking {
+				if lacks(oid, index) && store != nil {
+					stats.AnswerMisses++
+				}
+				answer.lines[index] = partial.lines[k]
+			}
+			answers[oid] = answer
+		}
+		store.record(sub.sources(), scanned)
+		store.evict()
+		return nil
+	}
+	var now, later []string
+	for _, oid := range blobs {
+		ownWork, waits := false, false
+		for index := range sources {
+			if lacks(oid, index) {
+				if mine[index] {
+					ownWork = true
+				} else {
+					waits = true
+				}
+			}
+		}
+		switch {
+		case ownWork:
+			now = append(now, oid)
+		case waits:
+			later = append(later, oid)
+		}
+	}
+	if err := scan(now); err != nil {
+		return nil, err
+	}
+	releaseClaims()
+	if len(later) > 0 {
+		for _, source := range theirs {
+			waited, err := store.awaitClaim(ctx, source)
+			if err != nil {
+				return nil, err
+			}
+			if waited {
+				stats.AnswerWaits++
+			}
+		}
+		again := store.lookup(sources, later)
+		var rest []string
+		for _, oid := range later {
+			if len(again.answers[oid]) < len(sources) {
+				rest = append(rest, oid) // the holder covered other blobs, or failed
+				continue
+			}
+			known.answers[oid] = again.answers[oid]
+			known.nul[oid] = again.nul[oid]
+		}
+		if err := scan(rest); err != nil {
+			return nil, err
+		}
+	}
+	for _, oid := range blobs {
+		if _, scanned := answers[oid]; scanned {
+			continue
+		}
+		answer := blobAnswer{nulInHead: known.nul[oid], lines: make([]blobLine, len(sources))}
+		for index, line := range known.answers[oid] {
+			answer.lines[index] = line
+		}
+		answers[oid] = answer
+		stats.AnswerHits += len(sources)
+	}
+	if err := resolveLineTexts(ctx, repo, answers, plan, stats); err != nil {
+		return nil, err
+	}
+	return answers, nil
+}
+
+// resolveLineTexts reads back, from their blobs, the texts of the lines a
+// search will report that the store kept by place only. A remembered place
+// that does not hold a whole line of that length is treated as damage: the
+// blob is scanned again, which answers it from its content alone.
+func resolveLineTexts(ctx context.Context, repo string, answers map[string]blobAnswer, plan *treeScanPlan, stats *TreeScanStats) error {
+	var oids []string
+	for oid, answer := range answers {
+		if line, ok := answer.first(); ok && !line.stored {
+			oids = append(oids, oid)
+		}
+	}
+	if len(oids) == 0 {
+		return nil
+	}
+	sort.Strings(oids)
+	var damaged []string
+	err := readBlobs(ctx, repo, oids, func(oid string, data []byte) error {
+		stats.BlobsRead++
+		stats.BytesRead += int64(len(data))
+		answer := answers[oid]
+		line, _ := answer.first()
+		start, end := line.offset, line.offset+int64(line.size)
+		if start < 0 || end > int64(len(data)) || (start > 0 && data[start-1] != '\n') ||
+			(end < int64(len(data)) && data[end] != '\n') || bytes.IndexByte(data[start:end], '\n') >= 0 ||
+			bytes.Count(data[:start], []byte{'\n'}) != line.number-1 {
+			damaged = append(damaged, oid)
+			return nil
+		}
+		text := string(data[start:end])
+		for index := range answer.lines {
+			if answer.lines[index].number == line.number {
+				answer.lines[index].text, answer.lines[index].stored = text, true
+			}
+		}
+		return nil
+	})
+	if err != nil || len(damaged) == 0 {
+		return err
+	}
+	rescanned, read, err := scanBlobs(ctx, repo, damaged, plan)
+	stats.BlobsRead += read.blobs
+	stats.BytesRead += read.bytes
+	if err != nil {
+		return err
+	}
+	for oid, answer := range rescanned {
+		answers[oid] = answer
+	}
+	return nil
+}
+
 type treeScanPattern struct {
 	source  string
 	fixed   []byte // non-nil for a git-fixed pattern, matched as bytes
@@ -125,6 +341,14 @@ type treeScanPlan struct {
 	// matchesEmpty is set when some expression matches an empty line, which
 	// lets git report the empty tail of a file (phantomLine).
 	matchesEmpty bool
+}
+
+func (p *treeScanPlan) sources() []string {
+	sources := make([]string, len(p.patterns))
+	for i, pattern := range p.patterns {
+		sources[i] = pattern.source
+	}
+	return sources
 }
 
 // gitPatternFileLines is the pattern list git grep reads from `-f -` when it
@@ -219,36 +443,6 @@ func asciiOnlyLower(s string) string {
 	return string(b)
 }
 
-// blobLine is a 1-based line number and the line's text without its LF.
-type blobLine struct {
-	number int
-	text   string
-}
-
-// blobAnswer is one blob's result for every pattern of a plan.
-type blobAnswer struct {
-	nulInHead bool
-	// lines[pattern] is that pattern's first matching line; number 0 is none.
-	lines []blobLine
-	// phantom is the line number git reports for the empty tail of a file no
-	// line of which matched (phantomLine), or 0. It belongs to the whole
-	// plan, not to one pattern.
-	phantom int
-}
-
-func (a blobAnswer) first() (blobLine, bool) {
-	best := blobLine{}
-	for _, line := range a.lines {
-		if line.number > 0 && (best.number == 0 || line.number < best.number) {
-			best = line
-		}
-	}
-	if best.number == 0 && a.phantom > 0 {
-		return blobLine{number: a.phantom}, true
-	}
-	return best, best.number > 0
-}
-
 // blobScanner holds one worker's compiled expressions; it lives on one locked
 // thread.
 type blobScanner struct {
@@ -333,7 +527,7 @@ func (s *blobScanner) scan(ctx context.Context, data []byte) (blobAnswer, error)
 		state = 0
 		decide := func(p int) {
 			if answer.lines[p].number == 0 && s.matches(p, line) {
-				answer.lines[p] = blobLine{number: number, text: string(line)}
+				answer.lines[p] = blobLine{number: number, offset: int64(start), size: len(line), text: string(line), stored: true}
 				unresolved--
 			}
 		}

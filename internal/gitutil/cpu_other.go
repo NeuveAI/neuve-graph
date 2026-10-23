@@ -9,3 +9,6 @@ import "runtime"
 func performanceCores() int {
 	return runtime.NumCPU()
 }
+
+// osBuild is empty off macOS, where the C library names itself.
+func osBuild() string { return "" }

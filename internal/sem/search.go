@@ -378,9 +378,14 @@ type SearchStats struct {
 	PreselectionFilesExamined int    `json:"preselection_files_examined,omitempty"`
 	// What the one-pass tree scan matched and read: distinct patterns, and the
 	// blobs (with their bytes) whose content it read once for all of them.
-	PreselectionPatterns           int     `json:"preselection_patterns,omitempty"`
-	PreselectionBlobsRead          int     `json:"preselection_blobs_read,omitempty"`
-	PreselectionBytesRead          int64   `json:"preselection_bytes_read,omitempty"`
+	PreselectionPatterns  int   `json:"preselection_patterns,omitempty"`
+	PreselectionBlobsRead int   `json:"preselection_blobs_read,omitempty"`
+	PreselectionBytesRead int64 `json:"preselection_bytes_read,omitempty"`
+	// Remembered tree-scan answers, per blob and pattern: found, computed, and
+	// patterns waited for while another process computed them.
+	AnswerCacheHits                int     `json:"answer_cache_hits,omitempty"`
+	AnswerCacheMisses              int     `json:"answer_cache_misses,omitempty"`
+	AnswerCacheWaits               int     `json:"answer_cache_waits,omitempty"`
 	PreselectionConfidence         float64 `json:"preselection_confidence,omitempty"`
 	PreselectionCoverage           float64 `json:"preselection_coverage,omitempty"`
 	PreselectionDiversity          float64 `json:"preselection_diversity,omitempty"`
@@ -1381,6 +1386,9 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 				PreselectionPatterns:      selection.preselectionPatterns,
 				PreselectionBlobsRead:     selection.preselectionBlobsRead,
 				PreselectionBytesRead:     selection.preselectionBytesRead,
+				AnswerCacheHits:           selection.answerCacheHits,
+				AnswerCacheMisses:         selection.answerCacheMisses,
+				AnswerCacheWaits:          selection.answerCacheWaits,
 				PreselectionConfidence:    selection.preselectionConfidence,
 				PreselectionCoverage:      selection.preselectionCoverage,
 				PreselectionDiversity:     selection.preselectionDiversity,
@@ -1594,6 +1602,9 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 		PreselectionPatterns:      selection.preselectionPatterns,
 		PreselectionBlobsRead:     selection.preselectionBlobsRead,
 		PreselectionBytesRead:     selection.preselectionBytesRead,
+		AnswerCacheHits:           selection.answerCacheHits,
+		AnswerCacheMisses:         selection.answerCacheMisses,
+		AnswerCacheWaits:          selection.answerCacheWaits,
 		PreselectionConfidence:    selection.preselectionConfidence,
 		PreselectionCoverage:      selection.preselectionCoverage,
 		PreselectionDiversity:     selection.preselectionDiversity,
@@ -2475,6 +2486,9 @@ type searchFileSelection struct {
 	preselectionPatterns   int
 	preselectionBlobsRead  int
 	preselectionBytesRead  int64
+	answerCacheHits        int
+	answerCacheMisses      int
+	answerCacheWaits       int
 	preselectionConfidence float64
 	preselectionCoverage   float64
 	preselectionDiversity  float64
@@ -2604,7 +2618,11 @@ func preselectSearchFiles(
 			if patterns == nil {
 				grepErr = fmt.Errorf("query requires Unicode content preselection")
 			} else {
-				scan, grepErr = gitutil.ScanTreePatternLines(ctx, source.absRepo, source.commit, patterns, func(match gitutil.GrepMatch) error {
+				scanOptions := gitutil.TreeScanOptions{}
+				if !options.DisableCache {
+					scanOptions.Answers = gitutil.OpenTreeScanAnswers(options.CacheDir)
+				}
+				scan, grepErr = gitutil.ScanTreePatternLinesWith(ctx, source.absRepo, source.commit, patterns, scanOptions, func(match gitutil.GrepMatch) error {
 					if allowed[match.Path] && !seen[match.Path] {
 						text := match.Text
 						if !textMatchesSearchQuery(q, text) {
@@ -2653,6 +2671,9 @@ func preselectSearchFiles(
 				selection.preselectionPatterns = scan.Patterns
 				selection.preselectionBlobsRead = scan.BlobsRead
 				selection.preselectionBytesRead = scan.BytesRead
+				selection.answerCacheHits = scan.AnswerHits
+				selection.answerCacheMisses = scan.AnswerMisses
+				selection.answerCacheWaits = scan.AnswerWaits
 			}
 			selection.preselectionPasses = 1
 			selection.preselectionFilesExamined = len(source.paths)

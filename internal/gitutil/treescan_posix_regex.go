@@ -5,6 +5,9 @@ package gitutil
 /*
 #include <stdlib.h>
 #include <locale.h>
+#ifdef __GLIBC__
+#include <gnu/libc-version.h>
+#endif
 #include <regex.h>
 #ifdef __APPLE__
 #include <xlocale.h>
@@ -17,6 +20,15 @@ static locale_t graph_scan_locale(void) {
 	if (loc == (locale_t)0)
 		loc = newlocale(LC_CTYPE_MASK, "C", (locale_t)0);
 	return loc;
+}
+
+// The C library build, whose regex engine decides lines.
+static const char *graph_scan_libc(void) {
+#ifdef __GLIBC__
+	return gnu_get_libc_version();
+#else
+	return "";
+#endif
 }
 
 static locale_t graph_scan_uselocale(locale_t loc) { return uselocale(loc); }
@@ -77,9 +89,22 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"unsafe"
 )
+
+// treeScanEngineIdentity names everything a remembered answer depends on
+// besides the blob and the pattern: the scanner's rules, the platform and its
+// C library (whose regex engine decides lines; on macOS it ships with the OS
+// build) and the locale a git child would use.
+func treeScanEngineIdentity() string {
+	return strings.Join([]string{
+		treeScanEngineVersion, runtime.GOOS, runtime.GOARCH, osBuild(), C.GoString(C.graph_scan_libc()),
+		"LC_ALL=" + os.Getenv("LC_ALL"), "LC_CTYPE=" + os.Getenv("LC_CTYPE"), "LANG=" + os.Getenv("LANG"),
+		"LOCPATH=" + os.Getenv("LOCPATH"),
+	}, "\x00")
+}
 
 // Locale objects are immutable and may be installed on any number of threads,
 // so one is kept per distinct locale environment, never freed.

@@ -75,6 +75,11 @@ func TestPreparedSearchDisclosesStoppedAliasGrep(t *testing.T) {
 	gitutil.TreePatternGrepDeadline = 300 * time.Millisecond
 	t.Cleanup(func() { gitutil.TreePatternGrepDeadline = previous })
 
+	// The completed search remembered its answers, which would let the next one
+	// skip the scan entirely; forget them so it scans, and stops.
+	if err := os.RemoveAll(filepath.Join(cacheDir, "tree-scan-answers")); err != nil {
+		t.Fatal(err)
+	}
 	started := time.Now()
 	stopped := search()
 	if elapsed := time.Since(started); elapsed > 30*time.Second {

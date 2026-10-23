@@ -24,6 +24,18 @@ type TreeScanStats struct {
 	FilesExamined int   // regular files in the tree
 	BlobsRead     int   // blobs whose content Graph read
 	BytesRead     int64 // their total size
+	// Remembered answers, counted per blob and pattern: found, computed, and
+	// patterns waited for while another process computed them.
+	AnswerHits   int
+	AnswerMisses int
+	AnswerWaits  int
+}
+
+// TreeScanOptions carries what a scan may share with other scans.
+type TreeScanOptions struct {
+	// Answers, when set, remembers each blob's answer per pattern across
+	// scans and processes (OpenTreeScanAnswers).
+	Answers *TreeScanAnswers
 }
 
 // attrDecision is git's userdiff verdict on whether a path is binary.

@@ -7,9 +7,13 @@ import "context"
 // TreeScanRoute is the route ScanTreePatternLines takes in this build.
 const TreeScanRoute = TreeScanRouteGitGrep
 
+// The Git route remembers nothing; the identity only keeps the store's
+// layout the same on every build.
+func treeScanEngineIdentity() string { return treeScanEngineVersion + "\x00git-route" }
+
 // Without the platform's POSIX regex engine Graph cannot decide lines the way
 // git grep does, so Git scans once per pattern.
-func treeFirstPatternLines(ctx context.Context, repo, treeish string, patterns []string, visit func(GrepMatch) error) (TreeScanStats, error) {
+func treeFirstPatternLines(ctx context.Context, repo, treeish string, patterns []string, _ TreeScanOptions, visit func(GrepMatch) error) (TreeScanStats, error) {
 	distinct := map[string]bool{}
 	for _, pattern := range patterns {
 		distinct[pattern] = true

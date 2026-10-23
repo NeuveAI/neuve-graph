@@ -101,6 +101,7 @@ func TestTreeScanMatchesGitRouteOnBenchmarkSearches(t *testing.T) {
 		})
 		return out, time.Since(started), err
 	}
+	answers := gitutil.OpenTreeScanAnswers(t.TempDir())
 	for index, s := range searches {
 		reference, gitTime, err := collect(func(visit func(gitutil.GrepMatch) error) error {
 			return gitutil.GrepTreePatternLinesGit(t.Context(), s.repo, s.base, s.patterns, visit)
@@ -120,8 +121,23 @@ func TestTreeScanMatchesGitRouteOnBenchmarkSearches(t *testing.T) {
 		if !reflect.DeepEqual(got, reference) {
 			t.Fatalf("search %d at %s (%d patterns) differs: %d matches against the Git route's %d", index, s.base, len(s.patterns), len(got), len(reference))
 		}
-		t.Logf("search %d at %.12s: %d patterns, %d files matched, identical (route %s, %d blobs, %d bytes; Git route %s, tree scan %s)",
-			index, s.base, len(s.patterns), len(got), stats.Route, stats.BlobsRead, stats.BytesRead, gitTime.Round(time.Millisecond), scanTime.Round(time.Millisecond))
+		// The same search through one store shared by every search of the
+		// run, as hunks at one base share it in a review.
+		var remembered gitutil.TreeScanStats
+		viaStore, storeTime, err := collect(func(visit func(gitutil.GrepMatch) error) error {
+			var scanErr error
+			remembered, scanErr = gitutil.ScanTreePatternLinesWith(t.Context(), s.repo, s.base, s.patterns, gitutil.TreeScanOptions{Answers: answers}, visit)
+			return scanErr
+		})
+		if err != nil {
+			t.Fatalf("search %d at %s: tree scan with remembered answers: %v", index, s.base, err)
+		}
+		if !reflect.DeepEqual(viaStore, reference) {
+			t.Fatalf("search %d at %s differs with remembered answers: %d matches against the Git route's %d", index, s.base, len(viaStore), len(reference))
+		}
+		t.Logf("search %d at %.12s: %d patterns, %d files matched, identical (route %s, %d blobs, %d bytes; Git route %s, tree scan %s; with remembered answers %s, %d hits, %d misses, %d blobs read)",
+			index, s.base, len(s.patterns), len(got), stats.Route, stats.BlobsRead, stats.BytesRead, gitTime.Round(time.Millisecond), scanTime.Round(time.Millisecond),
+			storeTime.Round(time.Millisecond), remembered.AnswerHits, remembered.AnswerMisses, remembered.BlobsRead)
 	}
 	t.Logf("%d distinct alias searches identical", len(searches))
 }
