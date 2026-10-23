@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -232,6 +233,51 @@ func TestSocketPathFollowsTheFileNotItsTimes(t *testing.T) {
 	}
 	if installed, _ := SocketPath(executable, nil); installed == before {
 		t.Fatal("a new file at the same path shared the old one's service")
+	}
+}
+
+// A starting service removes the files of services gone for a day, never
+// those of a live service, recent ones, its own, or anyone else's sockets.
+func TestStartingServiceSweepsStaleSets(t *testing.T) {
+	dir := t.TempDir()
+	old := time.Now().Add(-48 * time.Hour)
+	place := func(name string, modTime time.Time) {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, modTime, modTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, suffix := range []string{".lock", ".start", ".log", ".failed"} {
+		place("graph-aaaa.sock"+suffix, old) // gone a day
+		place("graph-bbbb.sock"+suffix, old) // held below
+	}
+	place("graph-cccc.sock.lock", old)
+	place("graph-cccc.sock.log", time.Now()) // used today
+	place("budget.sock", old)                // Neuve's, not Graph's
+	place("0123456789abcdef0123456789abcdef.sock", old)
+	held, err := os.OpenFile(filepath.Join(dir, "graph-bbbb.sock.lock"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	place("graph-self.sock.lock", old)
+	sweepStaleServices(dir, filepath.Join(dir, "graph-self.sock"), time.Now().Add(-staleServiceAge))
+	for name, want := range map[string]bool{
+		"graph-aaaa.sock.lock": false, "graph-aaaa.sock.start": false, "graph-aaaa.sock.log": false, "graph-aaaa.sock.failed": false,
+		"graph-bbbb.sock.lock": true, "graph-bbbb.sock.log": true,
+		"graph-cccc.sock.lock": true, "graph-cccc.sock.log": true,
+		"graph-self.sock.lock": true, "budget.sock": true, "0123456789abcdef0123456789abcdef.sock": true,
+	} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); (err == nil) != want {
+			t.Errorf("%s present = %v, want %v", name, err == nil, want)
+		}
 	}
 }
 

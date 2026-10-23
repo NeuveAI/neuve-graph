@@ -209,6 +209,60 @@ func socketDirectory() (string, error) {
 	return dir, nil
 }
 
+// staleServiceAge is how long a service's files must have been left alone
+// before a starting service removes them, when no service holds them.
+const staleServiceAge = 24 * time.Hour
+
+// sweepStaleServices removes the files of services that are gone: each set
+// beside a socket graph-<hash>.sock in dir (.sock, .lock, .start, .failed,
+// .log, .log.1), when none was touched since before and no service holds its
+// lock. Only Graph's own sets: the directory is shared with Neuve's other
+// sockets. The lock goes last, while held, so a service starting for that
+// set takes a fresh one.
+func sweepStaleServices(dir, self string, before time.Time) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	newest := map[string]time.Time{}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, "graph-") {
+			continue
+		}
+		base, _, ok := strings.Cut(name, ".sock")
+		if !ok {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		set := filepath.Join(dir, base+".sock")
+		if info.ModTime().After(newest[set]) {
+			newest[set] = info.ModTime()
+		}
+	}
+	for set, touched := range newest {
+		if set == self || touched.After(before) {
+			continue
+		}
+		lock, err := os.OpenFile(set+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+		if err != nil {
+			continue
+		}
+		if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+			lock.Close() // a live service
+			continue
+		}
+		for _, suffix := range []string{"", ".start", ".failed", ".log", ".log.1"} {
+			_ = os.Remove(set + suffix)
+		}
+		_ = os.Remove(set + ".lock")
+		lock.Close()
+	}
+}
+
 func writeFrame(w io.Writer, value any) error {
 	payload, err := json.Marshal(value)
 	if err != nil {
@@ -434,7 +488,19 @@ func Serve(ctx context.Context, socket string, opts ServeOptions, handle func(co
 		}
 		return err
 	}
+	// A lock a sweep removed after this service opened it names no one: step
+	// aside, and the starter tries again with the fresh one.
+	if locked, err := lock.Stat(); err != nil {
+		return err
+	} else if named, err := os.Stat(socket + ".lock"); err != nil || !os.SameFile(locked, named) {
+		return nil
+	}
 	_ = os.Remove(socket) // a dead service's socket
+	// Sweep only Neuve's own socket directory, never one a hand-run service
+	// was pointed at.
+	if dir, err := socketDirectory(); err == nil && dir == filepath.Dir(socket) {
+		go sweepStaleServices(dir, socket, time.Now().Add(-staleServiceAge))
+	}
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		return err
