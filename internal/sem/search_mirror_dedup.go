@@ -1,6 +1,9 @@
 package sem
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
 	"path/filepath"
 	"strings"
 )
@@ -70,7 +73,10 @@ func searchMirrorFingerprint(result SearchResult, symbolsByID map[string]SymbolR
 	if qualified == "" {
 		qualified = normalize(result.SymbolName)
 	}
-	signature := normalize(result.Signature)
+	// The signature only ever groups candidates by equality, and some are
+	// whole regions: the fingerprint holds its normalized form's SHA-256,
+	// streamed, not that form.
+	signature := normalizedDigest(result.Signature)
 	if symbol, ok := symbolsByID[result.SymbolID]; ok {
 		if language == "" {
 			language = strings.ToLower(strings.TrimSpace(symbol.Language))
@@ -85,7 +91,7 @@ func searchMirrorFingerprint(result SearchResult, symbolsByID map[string]SymbolR
 			}
 		}
 		if signature == "" {
-			signature = normalize(symbol.Signature)
+			signature = normalizedDigest(symbol.Signature)
 		}
 		// BodyHash is the parser's exact normalized implementation identity. A
 		// few declaration kinds do not expose a useful signature, but language,
@@ -101,7 +107,40 @@ func searchMirrorFingerprint(result SearchResult, symbolsByID map[string]SymbolR
 	if language == "" || kind == "" || qualified == "" || signature == "" || result.Snippet == "" {
 		return "", false
 	}
-	return strings.Join([]string{language, kind, qualified, signature, hash(normalize(result.Snippet))}, "\x00"), true
+	return strings.Join([]string{language, kind, qualified, signature, hashNormalized(result.Snippet)}, "\x00"), true
+}
+
+// hashNormalized is hash(normalize(value)), streaming the fields into the
+// digest instead of splitting value into a slice and joining it again: a
+// snippet can be a whole file.
+func hashNormalized(value string) string {
+	sum, _ := normalizedSum(value)
+	return hex.EncodeToString(sum)[:16]
+}
+
+// normalizedDigest is the full SHA-256 of normalize(value), or "" where that
+// is empty, as normalize's own result is.
+func normalizedDigest(value string) string {
+	sum, any := normalizedSum(value)
+	if !any {
+		return ""
+	}
+	return hex.EncodeToString(sum)
+}
+
+// normalizedSum is the SHA-256 of normalize(value) and whether it holds a
+// field, streamed.
+func normalizedSum(value string) ([]byte, bool) {
+	digest := sha256.New()
+	first := true
+	for field := range strings.FieldsSeq(value) {
+		if !first {
+			digest.Write([]byte{' '})
+		}
+		first = false
+		io.WriteString(digest, field)
+	}
+	return digest.Sum(nil), !first
 }
 
 func searchMirrorPathPair(left, right string) bool {

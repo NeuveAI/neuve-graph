@@ -1,6 +1,9 @@
 package sem
 
-import "strings"
+import (
+	"strings"
+	"unsafe"
+)
 
 // searchLineCache remembers, for one file and one query, what each line
 // contributes to ranking: its term counts and length, its focus weight, and
@@ -16,8 +19,16 @@ import "strings"
 // the sum of its lines' counts and lengths; searchFocusLine and
 // textMatchesSearchQuery look at one line at a time.
 type searchLineCache struct {
-	q       searchQuery
-	lines   []string
+	q     searchQuery
+	lines []string
+	// tokens[line] is that line's constraint tokens, split when first asked
+	// for (constraintTokens).
+	tokens []*searchLineTokens
+	// parts holds the constraint tokens of a candidate's other parts (its
+	// symbol's name, qualified name and signature, its aliases), by the
+	// string's bytes in memory: one symbol's signature, which can be a whole
+	// declaration, is shared by every candidate of that symbol.
+	parts   map[searchPartKey]*searchLineTokens
 	counts  []map[string]int
 	lengths []int
 	weights []float64
@@ -127,4 +138,86 @@ func searchLineAliases(q searchQuery, line string) map[string]bool {
 		}
 	}
 	return aliases
+}
+
+// searchLineTokens is one line as a candidate's constraint check reads it:
+// its words and raw tokens (appendSearchConstraintTokens) and its lowered
+// text.
+type searchLineTokens struct {
+	words []string
+	raw   []string
+	lower string
+}
+
+// constraintTokens is a line's searchLineTokens, split once per file however
+// many overlapping candidates hold the line. line is 1-based.
+func (c *searchLineCache) constraintTokens(line int) *searchLineTokens {
+	if c.tokens == nil {
+		c.tokens = make([]*searchLineTokens, len(c.lines))
+	}
+	index := line - 1
+	if c.tokens[index] == nil {
+		c.tokens[index] = splitSearchLineTokens(c.lines[index])
+	}
+	return c.tokens[index]
+}
+
+// splitSearchLineTokens is a text's searchLineTokens. For ASCII text, which
+// most source lines are, every word and token is a piece of the lowered text
+// itself, so none is copied: appendSearchConstraintTokens lowers ASCII
+// letters and digits and the class bytes byte for byte, and words and tokens
+// are runs of them.
+func splitSearchLineTokens(text string) *searchLineTokens {
+	tokens := &searchLineTokens{lower: strings.ToLower(text)}
+	for index := 0; index < len(text); index++ {
+		if text[index] >= 0x80 {
+			tokens.words, tokens.raw = appendSearchConstraintTokens(text, nil, nil)
+			return tokens
+		}
+	}
+	lower := tokens.lower
+	run := func(in func(byte) bool) []string {
+		var out []string
+		for start := 0; start < len(lower); {
+			if !in(lower[start]) {
+				start++
+				continue
+			}
+			end := start + 1
+			for end < len(lower) && in(lower[end]) {
+				end++
+			}
+			out = append(out, lower[start:end])
+			start = end
+		}
+		return out
+	}
+	tokens.words = run(func(c byte) bool { return c >= 'a' && c <= 'z' || c >= '0' && c <= '9' })
+	tokens.raw = run(searchWordByte)
+	return tokens
+}
+
+// searchPartKey names a string by its bytes in memory: strings are
+// immutable, so two strings at the same place and length are equal.
+type searchPartKey struct {
+	data   *byte
+	length int
+}
+
+// partTokens is a candidate part's searchLineTokens, split once per file for
+// every candidate holding that very string.
+func (c *searchLineCache) partTokens(part string) *searchLineTokens {
+	if part == "" {
+		return &searchLineTokens{}
+	}
+	key := searchPartKey{data: unsafe.StringData(part), length: len(part)}
+	if tokens, ok := c.parts[key]; ok {
+		return tokens
+	}
+	if c.parts == nil {
+		c.parts = map[searchPartKey]*searchLineTokens{}
+	}
+	tokens := splitSearchLineTokens(part)
+	c.parts[key] = tokens
+	return tokens
 }

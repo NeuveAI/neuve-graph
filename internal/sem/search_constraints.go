@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"unicode"
+	"unsafe"
 )
 
 const (
@@ -178,12 +179,25 @@ func searchOrderedPhraseMatch(words, phrase []string, maxInterveningContent int,
 	if len(phrase) == 0 {
 		return false
 	}
-	equal := func(left, right string) bool { return left == right }
+	equal := func(word string, want int) bool { return word == phrase[want] }
 	if looseMorphology {
-		equal = searchConstraintWordsLooselyEqual
+		// The words searchConstraintWordsLooselyEqual accepts for each phrase
+		// word, found once instead of on every comparison.
+		forms := make([][]string, len(phrase))
+		for index, want := range phrase {
+			forms[index] = searchConstraintLooseForms(want)
+		}
+		equal = func(word string, want int) bool {
+			for _, form := range forms[want] {
+				if word == form {
+					return true
+				}
+			}
+			return false
+		}
 	}
 	for start := range words {
-		if !equal(words[start], phrase[0]) {
+		if !equal(words[start], 0) {
 			continue
 		}
 		at := start + 1
@@ -192,7 +206,7 @@ func searchOrderedPhraseMatch(words, phrase []string, maxInterveningContent int,
 			intervening := 0
 			found := false
 			for at < len(words) {
-				if equal(words[at], phrase[want]) {
+				if equal(words[at], want) {
 					found = true
 					at++
 					break
@@ -215,6 +229,23 @@ func searchOrderedPhraseMatch(words, phrase []string, maxInterveningContent int,
 		}
 	}
 	return false
+}
+
+// searchConstraintLooseForms is every got for which
+// searchConstraintWordsLooselyEqual(got, want) holds: want itself, want with
+// a suffix when want is longer than two bytes, and want without a suffix it
+// ends in when what is left is longer than two bytes.
+func searchConstraintLooseForms(want string) []string {
+	forms := []string{want}
+	for _, suffix := range []string{"ed", "ing", "s"} {
+		if len(want) > 2 {
+			forms = append(forms, want+suffix)
+		}
+		if strings.HasSuffix(want, suffix) && len(want) > len(suffix)+2 {
+			forms = append(forms, strings.TrimSuffix(want, suffix))
+		}
+	}
+	return forms
 }
 
 func searchConstraintWordsLooselyEqual(got, want string) bool {
@@ -246,60 +277,82 @@ func buildSearchConstraintSurface(parts ...string) searchConstraintSurface {
 	surface := searchConstraintSurface{
 		wholeTokens: map[string]bool{},
 	}
-	word := make([]rune, 0, 16)
-	raw := make([]byte, 0, 16)
-	flushWord := func() {
-		if len(word) == 0 {
-			return
-		}
-		token := string(word)
-		surface.words = append(surface.words, token)
-		surface.wholeTokens[token] = true
-		word = word[:0]
-	}
-	flushRaw := func() {
-		if len(raw) == 0 {
-			return
-		}
-		surface.wholeTokens[string(raw)] = true
-		raw = raw[:0]
-	}
+	var raw []string
 	for _, part := range parts {
-		for _, character := range part {
-			if unicode.IsLetter(character) || unicode.IsDigit(character) {
-				word = append(word, unicode.ToLower(character))
-			} else {
-				flushWord()
-			}
-
-			// Go regexp POSIX character classes are ASCII. This is the exact
-			// character set of searchWordPattern, accumulated during the same
-			// scan as the Unicode word sequence above.
-			if character >= 'A' && character <= 'Z' {
-				raw = append(raw, byte(character-'A'+'a'))
-			} else if character >= 'a' && character <= 'z' ||
-				character >= '0' && character <= '9' ||
-				strings.ContainsRune("_./:+#-", character) {
-				raw = append(raw, byte(character))
-			} else {
-				flushRaw()
-			}
-		}
-		// The old implementation joined parts with a newline, which terminates
-		// both token classes between metadata fields.
-		flushWord()
-		flushRaw()
+		surface.words, raw = appendSearchConstraintTokens(part, surface.words, raw)
+	}
+	for _, word := range surface.words {
+		surface.wholeTokens[word] = true
+	}
+	for _, token := range raw {
+		surface.wholeTokens[token] = true
 	}
 	return surface
+}
+
+// appendSearchConstraintTokens appends one part's words (its runs of Unicode
+// letters and digits, lowered) and its raw tokens (its runs of
+// searchWordPattern's ASCII class, lowered), as a surface splits each of its
+// parts: the end of a part ends both, and so does a line break, so a part's
+// tokens are its lines' tokens in order.
+func appendSearchConstraintTokens(part string, words, raw []string) ([]string, []string) {
+	word := make([]rune, 0, 16)
+	token := make([]byte, 0, 16)
+	flushWord := func() {
+		if len(word) > 0 {
+			words = append(words, string(word))
+			word = word[:0]
+		}
+	}
+	flushRaw := func() {
+		if len(token) > 0 {
+			raw = append(raw, string(token))
+			token = token[:0]
+		}
+	}
+	for _, character := range part {
+		if unicode.IsLetter(character) || unicode.IsDigit(character) {
+			word = append(word, unicode.ToLower(character))
+		} else {
+			flushWord()
+		}
+		// Go regexp POSIX character classes are ASCII. This is the exact
+		// character set of searchWordPattern, accumulated during the same
+		// scan as the Unicode word sequence above.
+		if character >= 'A' && character <= 'Z' {
+			token = append(token, byte(character-'A'+'a'))
+		} else if character >= 'a' && character <= 'z' ||
+			character >= '0' && character <= '9' ||
+			strings.ContainsRune("_./:+#-", character) {
+			token = append(token, byte(character))
+		} else {
+			flushRaw()
+		}
+	}
+	// The old implementation joined parts with a newline, which terminates
+	// both token classes between metadata fields.
+	flushWord()
+	flushRaw()
+	return words, raw
 }
 
 func searchCandidateAgreementSurface(surface searchConstraintSurface, constraints searchConstraints) (float64, []string) {
 	if !searchConstraintsRequireAgreement(constraints) {
 		return 0, nil
 	}
+	found := make([]bool, len(constraints.Entities))
+	for index, entity := range constraints.Entities {
+		found[index] = surface.wholeTokens[entity.Normalized]
+	}
+	return searchCandidateAgreementWith(surface.words, found, constraints)
+}
+
+// searchCandidateAgreementWith scores agreement from a candidate's words and
+// which of the constraints' entities are among its whole tokens.
+func searchCandidateAgreementWith(words []string, entityFound []bool, constraints searchConstraints) (float64, []string) {
 	matchedEntities := 0
-	for _, entity := range constraints.Entities {
-		if surface.wholeTokens[entity.Normalized] {
+	for _, found := range entityFound {
+		if found {
 			matchedEntities++
 		}
 	}
@@ -316,7 +369,7 @@ func searchCandidateAgreementSurface(surface searchConstraintSurface, constraint
 			maxInterveningContent = 0
 			looseMorphology = false
 		}
-		if searchOrderedPhraseMatch(surface.words, phrase.Words, maxInterveningContent, looseMorphology) {
+		if searchOrderedPhraseMatch(words, phrase.Words, maxInterveningContent, looseMorphology) {
 			matchedPhrases++
 		}
 	}
@@ -358,8 +411,14 @@ func searchCandidateConstraintMayMatch(candidate searchCandidate, constraints se
 		candidate.result.Snippet,
 		strings.Join(candidate.aliases, "\n"),
 	}, "\n"))
+	return searchConstraintMayMatchWith(func(needle string) bool { return strings.Contains(text, needle) }, constraints)
+}
+
+// searchConstraintMayMatchWith is searchCandidateConstraintMayMatch's rule
+// over a candidate's lowered text, given as whether it contains a string.
+func searchConstraintMayMatchWith(contains func(string) bool, constraints searchConstraints) bool {
 	for _, entity := range constraints.Entities {
-		if strings.Contains(text, entity.Normalized) {
+		if contains(entity.Normalized) {
 			return true
 		}
 	}
@@ -368,7 +427,7 @@ func searchCandidateConstraintMayMatch(candidate searchCandidate, constraints se
 			continue
 		}
 		first := phrase.Words[0]
-		if strings.Contains(text, first) {
+		if contains(first) {
 			return true
 		}
 		if phrase.Explicit {
@@ -376,7 +435,7 @@ func searchCandidateConstraintMayMatch(candidate searchCandidate, constraints se
 		}
 		for _, suffix := range []string{"ed", "ing", "s"} {
 			if strings.HasSuffix(first, suffix) && len(first) > len(suffix)+2 &&
-				strings.Contains(text, strings.TrimSuffix(first, suffix)) {
+				contains(strings.TrimSuffix(first, suffix)) {
 				return true
 			}
 		}
@@ -393,13 +452,55 @@ type searchCandidateAgreementResult struct {
 	constraints searchConstraints
 	bonus       float64
 	signals     []string
+	// fields, for a result computed when the candidate was made, names the
+	// text it was computed from; it answers only while the candidate holds
+	// that very text. A miss is remembered then too.
+	fields *searchCandidateFields
+}
+
+// searchCandidateFields names a candidate's constraint text by its strings'
+// bytes in memory: equal names, equal text.
+type searchCandidateFields struct {
+	name, qualified, signature, snippet searchPartKey
+	aliases                             *string
+	aliasCount                          int
+}
+
+func candidateConstraintFields(candidate *searchCandidate) searchCandidateFields {
+	key := func(value string) searchPartKey {
+		return searchPartKey{data: unsafe.StringData(value), length: len(value)}
+	}
+	fields := searchCandidateFields{
+		name: key(candidate.result.SymbolName), qualified: key(candidate.result.QualifiedName),
+		signature: key(candidate.result.Signature), snippet: key(candidate.result.Snippet),
+		aliasCount: len(candidate.aliases),
+	}
+	if len(candidate.aliases) > 0 {
+		fields.aliases = &candidate.aliases[0]
+	}
+	return fields
+}
+
+// precomputeSearchCandidateAgreement computes a new candidate's agreement
+// from its file's line cache, remembered with the text it read.
+func precomputeSearchCandidateAgreement(candidate *searchCandidate, constraints searchConstraints) {
+	if !searchConstraintsRequireAgreement(constraints) {
+		return
+	}
+	bonus, signals, _, ok := searchCandidateAgreementFromLines(candidate, constraints)
+	if !ok {
+		return
+	}
+	fields := candidateConstraintFields(candidate)
+	candidate.agreement = &searchCandidateAgreementResult{constraints: constraints, bonus: bonus, signals: slices.Clone(signals), fields: &fields}
 }
 
 func searchCandidateAgreementCached(candidate *searchCandidate, constraints searchConstraints) (float64, []string) {
 	if !searchConstraintsRequireAgreement(constraints) {
 		return 0, nil
 	}
-	if cached := candidate.agreement; cached != nil && reflect.DeepEqual(cached.constraints, constraints) {
+	if cached := candidate.agreement; cached != nil && reflect.DeepEqual(cached.constraints, constraints) &&
+		(cached.fields == nil || *cached.fields == candidateConstraintFields(candidate)) {
 		return cached.bonus, slices.Clone(cached.signals)
 	}
 	if !searchCandidateConstraintMayMatch(*candidate, constraints) {
@@ -434,4 +535,106 @@ func applySearchCandidateAgreement(candidates []searchCandidate, constraints sea
 		candidates[index].score += bonus
 		candidates[index].result.Signals = appendUnique(candidates[index].result.Signals, signals...)
 	}
+}
+
+// searchCandidateAgreementFromLines answers what searchCandidateConstraintMayMatch
+// and, where it may match, the surface of buildSearchCandidateConstraintSurface
+// answer, reading the candidate's snippet lines' tokens from its file's line
+// cache instead of splitting its text again: overlapping candidates (a file,
+// its types, their members) hold the same lines. ok is false where that
+// cannot be exact: no cache, a snippet that is not its lines joined, or a
+// search term holding a line break, which a joined text could match across
+// pieces.
+func searchCandidateAgreementFromLines(candidate *searchCandidate, constraints searchConstraints) (bonus float64, signals []string, mayMatch bool, ok bool) {
+	cache := candidate.lineCache
+	result := &candidate.result
+	if cache == nil || !searchSnippetIsLines(result.Snippet, cache.lines, result.SnippetStartLine, result.SnippetEndLine) {
+		return 0, nil, false, false
+	}
+	for _, entity := range constraints.Entities {
+		if strings.Contains(entity.Normalized, "\n") {
+			return 0, nil, false, false
+		}
+	}
+	for _, phrase := range constraints.Phrases {
+		for _, word := range phrase.Words {
+			if strings.Contains(word, "\n") {
+				return 0, nil, false, false
+			}
+		}
+	}
+	// The text the surface splits, in order, as pieces split once per file:
+	// the symbol's parts, the snippet's lines, and each alias (the aliases
+	// are joined by LF, which ends every token, as a line break does).
+	pieces := make([]*searchLineTokens, 0, 3+result.SnippetEndLine-result.SnippetStartLine+1+len(candidate.aliases))
+	for _, part := range []string{result.SymbolName, result.QualifiedName, result.Signature} {
+		pieces = append(pieces, cache.partTokens(part))
+	}
+	for line := result.SnippetStartLine; line <= result.SnippetEndLine; line++ {
+		pieces = append(pieces, cache.constraintTokens(line))
+	}
+	for _, alias := range candidate.aliases {
+		if strings.Contains(alias, "\n") {
+			return 0, nil, false, false
+		}
+		pieces = append(pieces, cache.partTokens(alias))
+	}
+	// The lowered joined text, as pieces: lowering is per rune, and a term
+	// without a line break matches inside one piece or not at all.
+	contains := func(needle string) bool {
+		if needle == "" {
+			return true // the joined text always holds the empty string
+		}
+		for _, piece := range pieces {
+			if strings.Contains(piece.lower, needle) {
+				return true
+			}
+		}
+		return false
+	}
+	if !searchConstraintMayMatchWith(contains, constraints) {
+		return 0, nil, false, true
+	}
+	var words, raw []string
+	for _, piece := range pieces {
+		words = append(words, piece.words...)
+		raw = append(raw, piece.raw...)
+	}
+	found := make([]bool, len(constraints.Entities))
+	wanted := map[string][]int{}
+	for index, entity := range constraints.Entities {
+		wanted[entity.Normalized] = append(wanted[entity.Normalized], index)
+	}
+	for _, tokens := range [][]string{words, raw} {
+		for _, token := range tokens {
+			for _, index := range wanted[token] {
+				found[index] = true
+			}
+		}
+	}
+	bonus, signals = searchCandidateAgreementWith(words, found, constraints)
+	return bonus, signals, true, true
+}
+
+// searchSnippetIsLines reports whether snippet is lines[start-1:end] joined by
+// LF, comparing in place.
+func searchSnippetIsLines(snippet string, lines []string, start, end int) bool {
+	if start < 1 || end > len(lines) || start > end {
+		return false
+	}
+	at := 0
+	for line := start; line <= end; line++ {
+		if line > start {
+			if at >= len(snippet) || snippet[at] != '\n' {
+				return false
+			}
+			at++
+		}
+		text := lines[line-1]
+		if !strings.HasPrefix(snippet[at:], text) {
+			return false
+		}
+		at += len(text)
+	}
+	return at == len(snippet)
 }

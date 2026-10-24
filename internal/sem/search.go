@@ -1078,7 +1078,11 @@ type searchCandidate struct {
 	score      float64
 	// agreement is the candidate's constraint agreement, computed once per
 	// search's constraints (searchCandidateAgreementCached).
-	agreement        *searchCandidateAgreementResult
+	agreement *searchCandidateAgreementResult
+	// lineCache is, while candidatesForFile makes the candidate, the cache of
+	// its file, whose lines its snippet joins (SnippetStartLine to
+	// SnippetEndLine): its constraint check reads their tokens from it.
+	lineCache        *searchLineCache
 	prosePassagePlan []SearchPassage
 	// proseSection identifies the headed section of a prose document this region falls in. Set by
 	// attachProseSectionUnits; it is what makes the prose unit of retrieval the SECTION rather than
@@ -3835,6 +3839,12 @@ func candidatesForFile(q searchQuery, filePath, language string, lines []string,
 			out = append(out, candidate)
 		}
 	}
+	// Each candidate's constraint agreement, read from the lines' tokens
+	// while the file's cache is here; the candidates do not keep it.
+	for index := range out {
+		precomputeSearchCandidateAgreement(&out[index], q.constraints)
+		out[index].lineCache = nil
+	}
 	return out
 }
 
@@ -4254,6 +4264,7 @@ func makeSearchCandidateWith(cache *searchLineCache, q searchQuery, filePath, la
 		docLength:  length,
 		baseScore:  base,
 		aliases:    append([]string(nil), symbol.Aliases...),
+		lineCache:  cache,
 	}, true
 }
 

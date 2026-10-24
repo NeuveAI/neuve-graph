@@ -538,3 +538,46 @@ func searchTaskOneProductionLeakage(sources map[string]string) []string {
 	slices.Sort(leaks)
 	return leaks
 }
+
+// The loose forms are exactly the words searchConstraintWordsLooselyEqual
+// accepts, and the normalized-snippet digest streamed is the one built by
+// splitting and joining.
+func TestLooseFormsAndStreamedSnippetDigest(t *testing.T) {
+	words := []string{"", "a", "ab", "abc", "abcd", "reviewed", "review", "reviewing", "reviews", "reviewss", "seed", "sing", "ings", "eds", "is", "ss", "sss", "ssss", "edd", "recommend", "recommended", "recommends", "café", "cafés", "ed", "ing", "ising"}
+	for _, want := range words {
+		forms := map[string]bool{}
+		for _, form := range searchConstraintLooseForms(want) {
+			forms[form] = true
+		}
+		candidates := append([]string(nil), words...)
+		for _, suffix := range []string{"ed", "ing", "s"} {
+			candidates = append(candidates, want+suffix, strings.TrimSuffix(want, suffix))
+		}
+		for _, got := range candidates {
+			if forms[got] != searchConstraintWordsLooselyEqual(got, want) {
+				t.Fatalf("want %q, got %q: forms say %v, the comparison %v", want, got, forms[got], !forms[got])
+			}
+		}
+	}
+	for _, text := range []string{"", "  ", "a", " a  b\tc\n\nd ", "func  F() { x } y", "\xff \xfe", "日本 語"} {
+		if got, want := hashNormalized(text), hash(normalize(text)); got != want {
+			t.Fatalf("%q: streamed %s, joined %s", text, got, want)
+		}
+	}
+}
+
+// Two signatures share a fingerprint digest exactly when their normalized
+// forms are equal, and an all-space signature is empty, as before.
+func TestNormalizedDigestGroupsAsNormalize(t *testing.T) {
+	texts := []string{"", " \t\n", "func F()", "func  F()", "func\tF()\n", "func F() ", "func G()", " func F()", "x y", "x y"}
+	for _, a := range texts {
+		if (normalizedDigest(a) == "") != (normalize(a) == "") {
+			t.Fatalf("%q: digest empty %v, normalized empty %v", a, normalizedDigest(a) == "", normalize(a) == "")
+		}
+		for _, b := range texts {
+			if (normalizedDigest(a) == normalizedDigest(b)) != (normalize(a) == normalize(b)) {
+				t.Fatalf("%q and %q: digests equal %v, normalized equal %v", a, b, normalizedDigest(a) == normalizedDigest(b), normalize(a) == normalize(b))
+			}
+		}
+	}
+}
