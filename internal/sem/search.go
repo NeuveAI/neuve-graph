@@ -547,8 +547,10 @@ type ServiceStats struct {
 	// SnapshotHit is true when every prepared snapshot this read used was
 	// already decoded in the service's memory. Counted for the whole process
 	// over the read's run, so with CPUShared it is false when any read
-	// running alongside decoded one.
-	SnapshotHit bool  `json:"snapshot_hit"`
+	// running alongside decoded one. Absent when nothing in the process
+	// looked a snapshot up over the read's run, as for a syntax-only read,
+	// which loads its prepared generation instead, or a preparation.
+	SnapshotHit *bool `json:"snapshot_hit,omitempty"`
 	CPUUserMS   int64 `json:"cpu_user_ms"`
 	CPUSystemMS int64 `json:"cpu_system_ms"`
 	// QueueWaitMS is how long this read waited in the service's queue for its

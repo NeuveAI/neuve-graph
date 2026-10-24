@@ -75,7 +75,7 @@ func serviceBlock(t *testing.T, data []byte) map[string]any {
 func TestJoinedServiceResponseCountsTheRunOnce(t *testing.T) {
 	var buf bytes.Buffer
 	response := sem.SearchResponse{Query: `"service":{"answered":true,"cpu_user_ms":9}`}
-	response.Stats.Service = &sem.ServiceStats{Answered: true, RSSBytes: 7, MaxRSSBytes: 8, SnapshotsHeld: 1, SnapshotsLimit: 2, SnapshotHit: true, CPUUserMS: 40, CPUSystemMS: 5}
+	response.Stats.Service = &sem.ServiceStats{Answered: true, RSSBytes: 7, MaxRSSBytes: 8, SnapshotsHeld: 1, SnapshotsLimit: 2, SnapshotHit: new(true), CPUUserMS: 40, CPUSystemMS: 5}
 	if err := writeSearchResponse(&buf, response, "json", 0); err != nil {
 		t.Fatal(err)
 	}
@@ -631,7 +631,7 @@ func TestPreparationThroughTheService(t *testing.T) {
 	block := indexServiceBlock(t, serviceOut)
 	if block["answered"] != true || block["lane"] != "prepare" || block["class"] != "background" ||
 		block["max_rss_bytes"].(float64) <= 0 || block["cache_bytes"].(float64) <= 0 ||
-		block["snapshots_held"] != nil || block["snapshots_limit"] != nil || block["cpu_shared"] != nil {
+		block["snapshots_held"] != nil || block["snapshots_limit"] != nil || block["cpu_shared"] != nil || block["snapshot_hit"] != nil {
 		t.Fatalf("the preparation's block: %v", block)
 	}
 	// A plan through the service carries no cache size, which it does not
@@ -641,8 +641,21 @@ func TestPreparationThroughTheService(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("plan through the service exited %d: %s", code, planErr)
 	}
-	if plan := indexServiceBlock(t, planOut); plan == nil || plan["answered"] != true || plan["lane"] != "prepare" || plan["cache_bytes"] != nil || plan["cache_cap_bytes"] != nil {
+	if plan := indexServiceBlock(t, planOut); plan == nil || plan["answered"] != true || plan["lane"] != "prepare" || plan["cache_bytes"] != nil || plan["cache_cap_bytes"] != nil || plan["snapshot_hit"] != nil {
 		t.Fatalf("a plan's block: %v", plan)
+	}
+	// A syntax-only read loads its prepared generation, not a snapshot: its
+	// block says nothing of snapshot hits rather than reporting a miss.
+	syntaxCache := t.TempDir()
+	if _, prepareErr, code := run(serviceEnv, "index", "--repo", repo, "--incremental", "--commit", commit, "--profile", "syntax-only", "--cache-dir", syntaxCache, "--format", "json"); code != 0 {
+		t.Fatalf("syntax preparation through the service exited %d: %s", code, prepareErr)
+	}
+	syntaxOut, syntaxErr, code := run(serviceEnv, "query", "--repo", repo, "--commit", commit, "--profile", "syntax-only", "--prepared-only", "--query", "validate token", "--cache-dir", syntaxCache, "--format", "json")
+	if code != 0 {
+		t.Fatalf("syntax-only read through the service exited %d: %s", code, syntaxErr)
+	}
+	if read := serviceBlock(t, syntaxOut); read == nil || read["answered"] != true || read["snapshot_hit"] != nil {
+		t.Fatalf("a syntax-only read's block: %v", read)
 	}
 	// It fails as its own process fails: the same exit status and error.
 	bad := []string{"index", "--repo", repo, "--commit", "HEAD", "--cache-dir", t.TempDir(), "--format", "json"}

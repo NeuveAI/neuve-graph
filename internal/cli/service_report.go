@@ -180,11 +180,14 @@ func serviceStats(ctx context.Context, cacheDir string) *sem.ServiceStats {
 		MaxRSSBytes:    maxRSS,
 		SnapshotsHeld:  held,
 		SnapshotsLimit: limit,
-		SnapshotHit:    reads > report.reads && hits-report.hits == reads-report.reads,
 		CPUUserMS:      cpuUser.Milliseconds(),
 		CPUSystemMS:    cpuSys.Milliseconds(),
 		CPUShared:      shared,
 		QueueWaitMS:    report.queueWait.Milliseconds(),
+	}
+	if reads > report.reads {
+		hit := hits-report.hits == reads-report.reads
+		stats.SnapshotHit = &hit
 	}
 	if cacheDir != "" {
 		limits := sem.CacheLimitsFromEnv()
