@@ -2,6 +2,7 @@ package sem
 
 import (
 	"context"
+	"math/rand"
 	"os"
 	"reflect"
 	"slices"
@@ -578,6 +579,87 @@ func TestNormalizedDigestGroupsAsNormalize(t *testing.T) {
 			if (normalizedDigest(a) == normalizedDigest(b)) != (normalize(a) == normalize(b)) {
 				t.Fatalf("%q and %q: digests equal %v, normalized equal %v", a, b, normalizedDigest(a) == normalizedDigest(b), normalize(a) == normalize(b))
 			}
+		}
+	}
+}
+
+// searchOrderedPhraseMatchBefore is searchOrderedPhraseMatch as it was before
+// it skipped starts by length: the reference it must agree with.
+func searchOrderedPhraseMatchBefore(words, phrase []string, maxInterveningContent int, looseMorphology bool) bool {
+	if len(phrase) == 0 {
+		return false
+	}
+	equal := func(word string, want int) bool { return word == phrase[want] }
+	if looseMorphology {
+		forms := make([][]string, len(phrase))
+		for index, want := range phrase {
+			forms[index] = searchConstraintLooseForms(want)
+		}
+		equal = func(word string, want int) bool {
+			for _, form := range forms[want] {
+				if word == form {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	for start := range words {
+		if !equal(words[start], 0) {
+			continue
+		}
+		at := start + 1
+		matched := true
+		for want := 1; want < len(phrase); want++ {
+			intervening := 0
+			found := false
+			for at < len(words) {
+				if equal(words[at], want) {
+					found = true
+					at++
+					break
+				}
+				if !searchStopWords[words[at]] {
+					intervening++
+				}
+				if intervening > maxInterveningContent {
+					break
+				}
+				at++
+			}
+			if !found {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
+// Skipping phrase starts by length answers as comparing every word did:
+// loose and strict, any slack, stop words between, inflected forms, empty
+// and very long words.
+func TestSearchOrderedPhraseMatchSkipsOnlyNonStarts(t *testing.T) {
+	long := strings.Repeat("x", 70)
+	vocabulary := []string{"parse", "parsed", "parsing", "parses", "pars", "config", "configs", "the", "a", "of", "file", "files", "fil", "", long, long + "s", "yaml", "is"}
+	random := rand.New(rand.NewSource(11))
+	pick := func(count int) []string {
+		out := make([]string, count)
+		for index := range out {
+			out[index] = vocabulary[random.Intn(len(vocabulary))]
+		}
+		return out
+	}
+	for round := 0; round < 50000; round++ {
+		words := pick(random.Intn(14))
+		phrase := pick(1 + random.Intn(3))
+		slack := random.Intn(3)
+		loose := random.Intn(2) == 0
+		if got, want := searchOrderedPhraseMatch(words, phrase, slack, loose), searchOrderedPhraseMatchBefore(words, phrase, slack, loose); got != want {
+			t.Fatalf("words %q phrase %q slack %d loose %v: %v, want %v", words, phrase, slack, loose, got, want)
 		}
 	}
 }

@@ -179,25 +179,41 @@ func searchOrderedPhraseMatch(words, phrase []string, maxInterveningContent int,
 	if len(phrase) == 0 {
 		return false
 	}
-	equal := func(word string, want int) bool { return word == phrase[want] }
-	if looseMorphology {
-		// The words searchConstraintWordsLooselyEqual accepts for each phrase
-		// word, found once instead of on every comparison.
-		forms := make([][]string, len(phrase))
-		for index, want := range phrase {
-			forms[index] = searchConstraintLooseForms(want)
-		}
-		equal = func(word string, want int) bool {
-			for _, form := range forms[want] {
-				if word == form {
-					return true
-				}
-			}
-			return false
+	// The words each phrase word accepts: itself, or with loose morphology
+	// the words searchConstraintWordsLooselyEqual accepts, found once instead
+	// of on every comparison.
+	forms := make([][]string, len(phrase))
+	for index := range phrase {
+		if looseMorphology {
+			forms[index] = searchConstraintLooseForms(phrase[index])
+		} else {
+			forms[index] = phrase[index : index+1]
 		}
 	}
-	for start := range words {
-		if !equal(words[start], 0) {
+	equal := func(word string, want int) bool {
+		for _, form := range forms[want] {
+			if word == form {
+				return true
+			}
+		}
+		return false
+	}
+	// A phrase starts only at a word as long as one of its first word's
+	// forms: most words are skipped on their length alone.
+	var firstLengths uint64
+	firstLong := false
+	for _, form := range forms[0] {
+		if len(form) < 64 {
+			firstLengths |= 1 << len(form)
+		} else {
+			firstLong = true
+		}
+	}
+	for start, word := range words {
+		if length := len(word); length < 64 && firstLengths&(1<<length) == 0 || length >= 64 && !firstLong {
+			continue
+		}
+		if !equal(word, 0) {
 			continue
 		}
 		at := start + 1
