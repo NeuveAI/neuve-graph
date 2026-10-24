@@ -1872,7 +1872,7 @@ func prepareSource(ctx context.Context, repo string, options ProviderSnapshotOpt
 	commit := ""
 	tree := ""
 	var headErr error
-	ctx, metadataSafe := newGitMetadataValidation(ctx, absRepo)
+	ctx, metadataSafe := refreshGitMetadataValidation(ctx, absRepo)
 	if metadataSafe {
 		key = repoKey(ctx, absRepo)
 		if options.preparedReadTarget != nil {
@@ -15575,6 +15575,24 @@ type sameVolumePathResolver struct {
 	anchor       pathTraversalAnchor
 	root         *os.Root
 	mounts       pathMountGuard
+	// footprint, when set, records what this resolver looks at for a walk
+	// whose answer may be reused (gitMetadataFootprint).
+	footprint *gitMetadataFootprint
+}
+
+// recordInto makes the resolver record what it looks at into footprint,
+// starting with its anchor directory, read through the resolver's own handle.
+func (r *sameVolumePathResolver) recordInto(footprint *gitMetadataFootprint) {
+	if footprint == nil {
+		return
+	}
+	r.footprint = footprint
+	info, err := r.root.Lstat(".")
+	if err != nil {
+		footprint.recordUnrecordable()
+		return
+	}
+	footprint.recordInfo(r.anchor.root, info, true)
 }
 
 func newSameVolumePathResolver(base string) (*sameVolumePathResolver, error) {
@@ -15637,12 +15655,15 @@ func (r *sameVolumePathResolver) open(path string) (*os.File, string, error) {
 		candidateParts := append(append([]string(nil), resolved...), component)
 		candidate := filepath.Join(candidateParts...)
 		if err := r.mounts.beforeLookup(candidate); err != nil {
+			r.footprint.recordUnrecordable()
 			return nil, "", err
 		}
 		info, statErr := r.root.Lstat(candidate)
 		if statErr != nil {
+			r.footprint.recordLookupError(filepath.Join(r.anchor.root, candidate), statErr)
 			return nil, "", statErr
 		}
+		r.footprint.recordInfo(filepath.Join(r.anchor.root, candidate), info, info.IsDir())
 		if !r.anchor.allows(info) {
 			return nil, "", errSymlinkChainOffVolume
 		}
@@ -15656,6 +15677,7 @@ func (r *sameVolumePathResolver) open(path string) (*os.File, string, error) {
 		}
 		target, readErr := r.root.Readlink(candidate)
 		if readErr != nil {
+			r.footprint.recordUnrecordable()
 			return nil, "", fmt.Errorf("%w: %v", errPathRedirectUnreadable, readErr)
 		}
 		target = filepath.FromSlash(target)
@@ -15676,17 +15698,21 @@ func (r *sameVolumePathResolver) open(path string) (*os.File, string, error) {
 		rel = filepath.Join(resolved...)
 	}
 	if err := r.mounts.beforeLookup(rel); err != nil {
+		r.footprint.recordUnrecordable()
 		return nil, "", err
 	}
 	file, err := openRootBoundedRegularFile(r.root, rel)
 	if err != nil {
+		r.footprint.recordUnrecordable()
 		return nil, "", err
 	}
 	openedInfo, err := file.Stat()
 	if err != nil {
+		r.footprint.recordUnrecordable()
 		_ = file.Close()
 		return nil, "", err
 	}
+	r.footprint.recordInfo(filepath.Join(r.anchor.root, rel), openedInfo, false)
 	if !r.anchor.allows(openedInfo) {
 		_ = file.Close()
 		return nil, "", errSymlinkChainOffVolume
@@ -15897,12 +15923,15 @@ func (r *sameVolumePathResolver) lstat(path string) (os.FileInfo, error) {
 		rel = "."
 	}
 	if err := r.mounts.beforeLookup(rel); err != nil {
+		r.footprint.recordUnrecordable()
 		return nil, err
 	}
 	info, err := r.root.Lstat(rel)
 	if err != nil {
+		r.footprint.recordLookupError(filepath.Join(r.anchor.root, rel), err)
 		return nil, err
 	}
+	r.footprint.recordInfo(filepath.Join(r.anchor.root, rel), info, false)
 	if !r.anchor.allows(info) {
 		return nil, errSymlinkChainOffVolume
 	}
@@ -15934,17 +15963,21 @@ func (r *sameVolumePathResolver) readlink(path string) (string, error) {
 		rel = "."
 	}
 	if err := r.mounts.beforeLookup(rel); err != nil {
+		r.footprint.recordUnrecordable()
 		return "", err
 	}
 	info, err := r.root.Lstat(rel)
 	if err != nil {
+		r.footprint.recordLookupError(filepath.Join(r.anchor.root, rel), err)
 		return "", err
 	}
+	r.footprint.recordInfo(filepath.Join(r.anchor.root, rel), info, false)
 	if !r.anchor.allows(info) {
 		return "", errSymlinkChainOffVolume
 	}
 	target, err := r.root.Readlink(rel)
 	if err != nil {
+		r.footprint.recordUnrecordable()
 		return "", fmt.Errorf("%w: %v", errPathRedirectUnreadable, err)
 	}
 	return target, nil
@@ -17220,6 +17253,15 @@ func trackedDirSetFromFiles(files []string, maxDirectories, maxBytes int) (map[s
 // hop before asking the kernel to follow it. Configuration values are not
 // filesystem entries themselves and are outside this structural path validator.
 func gitMetadataSafeForSubprocess(repo string) bool {
+	return gitMetadataSafeForSubprocessRecording(repo, nil)
+}
+
+// gitMetadataSafeForSubprocessRecording is gitMetadataSafeForSubprocess,
+// recording what the walk looks at into footprint when it is not nil.
+func gitMetadataSafeForSubprocessRecording(repo string, footprint *gitMetadataFootprint) bool {
+	if gitMetadataWalkObserved != nil {
+		gitMetadataWalkObserved()
+	}
 	repoAbs, err := filepath.Abs(repo)
 	if err != nil {
 		return false
@@ -17229,6 +17271,7 @@ func gitMetadataSafeForSubprocess(repo string) bool {
 		return false
 	}
 	defer resolver.Close()
+	resolver.recordInto(footprint)
 	resolvedDiscoveryRoot := false
 	resolveDiscoveryRoot := func() (*sameVolumePathResolver, string, error) {
 		repoHandle, resolvedRepo, resolveErr := resolver.open(repoAbs)
@@ -17243,6 +17286,7 @@ func gitMetadataSafeForSubprocess(repo string) bool {
 		if physicalErr != nil {
 			return nil, "", physicalErr
 		}
+		physicalResolver.recordInto(footprint)
 		return physicalResolver, resolvedRepo, nil
 	}
 	for dir := repoAbs; ; {
@@ -18814,6 +18858,9 @@ type gitMetadataValidationContextKey struct{}
 type gitMetadataValidationReceipt struct {
 	repo string
 	safe bool
+	// footprint, when set, is the walk behind a safe answer, which a check
+	// takes only while it is intact (withReusableGitMetadataValidation).
+	footprint *gitMetadataFootprint
 }
 
 // WithGitMetadataValidationForSetup validates one repository and returns a
@@ -18845,7 +18892,12 @@ func gitMetadataSafeForSubprocessContext(ctx context.Context, repo string) bool 
 	}
 	absRepo = filepath.Clean(absRepo)
 	if receipt, ok := ctx.Value(gitMetadataValidationContextKey{}).(gitMetadataValidationReceipt); ok && receipt.repo == absRepo {
-		return receipt.safe
+		if receipt.footprint == nil {
+			return receipt.safe
+		}
+		if receipt.footprint.intact() {
+			return true
+		}
 	}
 	return gitMetadataSafeForSubprocess(absRepo)
 }

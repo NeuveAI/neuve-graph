@@ -96,6 +96,10 @@ func ReadPreparedProviderSnapshot(ctx context.Context, repo, providerVersion str
 	if err != nil {
 		return fail("policy-unavailable", err)
 	}
+	// One walk of the repository's Git metadata for this read; each later
+	// check before a Git command takes its answer only while what it looked
+	// at stands as it was, and walks again otherwise.
+	ctx = withReusableGitMetadataValidation(ctx, absRepo)
 	options, err = captureSearchCacheSource(ctx, absRepo, options)
 	if err != nil {
 		return fail("source-unavailable", err)

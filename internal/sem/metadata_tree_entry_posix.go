@@ -35,6 +35,25 @@ static int entire_graph_metadata_kind(const struct stat *info) {
 static uint64_t entire_graph_metadata_device(const struct stat *info) {
 	return (uint64_t)info->st_dev;
 }
+
+static uint64_t entire_graph_metadata_inode(const struct stat *info) { return (uint64_t)info->st_ino; }
+static uint32_t entire_graph_metadata_mode(const struct stat *info) { return (uint32_t)info->st_mode; }
+static uint32_t entire_graph_metadata_uid(const struct stat *info) { return (uint32_t)info->st_uid; }
+static uint32_t entire_graph_metadata_gid(const struct stat *info) { return (uint32_t)info->st_gid; }
+static int64_t entire_graph_metadata_size(const struct stat *info) { return (int64_t)info->st_size; }
+
+// The change time, where a walk's footprint can be trusted (darwin and
+// Linux, as statIdentity); zero elsewhere, where none ever is.
+#if defined(__APPLE__)
+static int64_t entire_graph_metadata_ctime_sec(const struct stat *info) { return (int64_t)info->st_ctimespec.tv_sec; }
+static int64_t entire_graph_metadata_ctime_nsec(const struct stat *info) { return (int64_t)info->st_ctimespec.tv_nsec; }
+#elif defined(__linux__)
+static int64_t entire_graph_metadata_ctime_sec(const struct stat *info) { return (int64_t)info->st_ctim.tv_sec; }
+static int64_t entire_graph_metadata_ctime_nsec(const struct stat *info) { return (int64_t)info->st_ctim.tv_nsec; }
+#else
+static int64_t entire_graph_metadata_ctime_sec(const struct stat *info) { (void)info; return 0; }
+static int64_t entire_graph_metadata_ctime_nsec(const struct stat *info) { (void)info; return 0; }
+#endif
 */
 import "C"
 
@@ -88,6 +107,16 @@ func readGitMetadataDirectory(
 		if uint64(C.entire_graph_metadata_device(&info)) != resolver.anchor.device {
 			return nil, errSymlinkChainOffVolume
 		}
+		resolver.footprint.recordIdentity(child, fileStatIdentity{
+			device:    uint64(C.entire_graph_metadata_device(&info)),
+			inode:     uint64(C.entire_graph_metadata_inode(&info)),
+			mode:      uint32(C.entire_graph_metadata_mode(&info)),
+			uid:       uint32(C.entire_graph_metadata_uid(&info)),
+			gid:       uint32(C.entire_graph_metadata_gid(&info)),
+			size:      int64(C.entire_graph_metadata_size(&info)),
+			ctimeSec:  int64(C.entire_graph_metadata_ctime_sec(&info)),
+			ctimeNsec: int64(C.entire_graph_metadata_ctime_nsec(&info)),
+		})
 		entries = append(entries, gitMetadataDirectoryEntry{
 			name: name,
 			kind: gitMetadataEntryKind(C.entire_graph_metadata_kind(&info)),

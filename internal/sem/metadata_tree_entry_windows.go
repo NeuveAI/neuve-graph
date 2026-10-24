@@ -15,10 +15,13 @@ import (
 func readGitMetadataDirectory(
 	directory *os.File,
 	resolved string,
-	_ *sameVolumePathResolver,
+	resolver *sameVolumePathResolver,
 	count int,
 	admit func(string) bool,
 ) ([]gitMetadataDirectoryEntry, error) {
+	// Its entries' stats are not recorded: a footprint that saw them is never
+	// reused.
+	resolver.footprint.recordUnrecordable()
 	dirEntries, readErr := directory.ReadDir(count)
 	entries := make([]gitMetadataDirectoryEntry, 0, len(dirEntries))
 	for _, entry := range dirEntries {
