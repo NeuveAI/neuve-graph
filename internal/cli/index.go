@@ -54,6 +54,10 @@ type indexResponse struct {
 	// Cache is the cache directory's size: measured by the prune an index that
 	// wrote runs, otherwise as last measured.
 	Cache *sem.CacheUsage `json:"cache,omitempty"`
+	// Service is, with the shared Graph service setting on, the preparation's
+	// account: added by the service for one it ran, or this process's own,
+	// with why the service did not run it.
+	Service *sem.ServiceStats `json:"service,omitempty"`
 }
 
 type indexPreparationPlanResponse struct {
@@ -68,6 +72,9 @@ type indexPreparationPlanResponse struct {
 	PreparationPlan struct {
 		Availability string `json:"availability"`
 	} `json:"preparation_plan"`
+	// Service is, with the shared Graph service setting on, the plan's
+	// account, as for an index.
+	Service *sem.ServiceStats `json:"service,omitempty"`
 }
 
 type incrementalPreparationResponse struct {
@@ -152,6 +159,9 @@ func runIndexCommand(ctx context.Context, opts Options, args []string, health bo
 		}
 		response := indexPreparationPlanResponse{FormatVersion: 1, Provider: sem.ProviderName, ProviderVersion: opts.Version, RepoRoot: plan.Repo, Commit: plan.Commit, Tree: plan.Tree, Profile: string(plan.Profile), PreparedRead: plan.Receipt}
 		response.PreparationPlan.Availability = plan.Availability
+		// No cache size: reading it may write the store's files, and a plan
+		// writes nothing (ADR 0009).
+		response.Service = preparationServiceStats(ctx, "")
 		if outputText {
 			_, err := fmt.Fprintf(opts.Stdout, "Syntax preparation %s\nCommit: %s\nTree: %s\nGeneration: %s\n", plan.Availability, plan.Commit, plan.Tree, plan.Receipt.GenerationID)
 			return err
@@ -245,6 +255,7 @@ func runIndexCommand(ctx context.Context, opts Options, args []string, health bo
 	if err == nil {
 		response.Cache = &usage
 	}
+	response.Service = preparationServiceStats(ctx, cacheDir)
 	if health {
 		return writeHealth(opts.Stdout, response, outputText, flags.Force)
 	}
@@ -443,4 +454,16 @@ func parseIndexFlags(args []string) (indexFlags, []string, error) {
 		}
 	}
 	return flags, rest, nil
+}
+
+// preparationServiceStats is a preparation's service block when it runs in
+// its own process with the setting on: the lane, and no snapshots, which a
+// preparation does not hold.
+func preparationServiceStats(ctx context.Context, cacheDir string) *sem.ServiceStats {
+	service := serviceStats(ctx, cacheDir)
+	if service != nil {
+		service.Lane = prepareLane
+		service.SnapshotsHeld, service.SnapshotsLimit = 0, 0
+	}
+	return service
 }

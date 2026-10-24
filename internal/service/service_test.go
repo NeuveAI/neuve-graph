@@ -544,3 +544,65 @@ func TestStartingCallersDoNotWaitForEachOther(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A lane's tasks never take a read's slot: with the one read slot free, a
+// read runs while a preparation runs; preparations wait for each other, one
+// at a time; and one finishing with no caller left is told.
+func TestLanesKeepTheirOwnSlots(t *testing.T) {
+	socket := shortSocket(t)
+	release := make(chan struct{})
+	var running atomic.Int32
+	var peak atomic.Int32
+	orphaned := make(chan string, 4)
+	serve(t, socket, ServeOptions{
+		Concurrency: 1,
+		Lane: func(request Request) (string, int) {
+			if strings.HasPrefix(request.Args[0], "prepare") {
+				return "prepare", 1
+			}
+			return "", 0
+		},
+		Keepable:         func(request Request) bool { return strings.HasPrefix(request.Args[0], "prepare") },
+		OnOrphanFinished: func(request Request) { orphaned <- request.Args[0] },
+	}, func(ctx context.Context, request Request) Response {
+		if strings.HasPrefix(request.Args[0], "prepare") {
+			now := running.Add(1)
+			for {
+				old := peak.Load()
+				if now <= old || peak.CompareAndSwap(old, now) {
+					break
+				}
+			}
+			<-release
+			running.Add(-1)
+		}
+		return Response{Stdout: []byte(request.Args[0])}
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 1500*time.Millisecond)
+	defer cancel()
+	go Call(ctx, socket, Request{Args: []string{"prepare-one"}})
+	go Call(ctx, socket, Request{Args: []string{"prepare-two"}})
+	for running.Load() == 0 { // the first preparation is running
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond) // and the second waits for it
+	read, err := Call(t.Context(), socket, Request{Args: []string{"read"}})
+	if err != nil || string(read.Stdout) != "read" {
+		t.Fatalf("a read waited behind preparations: %+v %v", read, err)
+	}
+	<-ctx.Done() // both preparations' callers leave
+	time.Sleep(500 * time.Millisecond)
+	close(release)
+	got := map[string]bool{}
+	for range 2 {
+		select {
+		case name := <-orphaned:
+			got[name] = true
+		case <-time.After(5 * time.Second):
+			t.Fatalf("preparations finished without callers: %v", got)
+		}
+	}
+	if peak.Load() != 1 {
+		t.Fatalf("%d preparations ran at once, want one", peak.Load())
+	}
+}

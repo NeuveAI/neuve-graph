@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -93,6 +94,9 @@ type Response struct {
 	// Mismatch reports that the service runs another build or protocol than
 	// the caller, so it did not run the command; the caller runs it itself.
 	Mismatch bool `json:"mismatch,omitempty"`
+	// ExitCode, with Failed, is the exit status of a command run as a child
+	// process, which printed its own error: the caller exits with it.
+	ExitCode int `json:"exit_code,omitempty"`
 	// StillValid, set by the service's handler for an answer it may keep,
 	// reports whether every input the answer came from is as it was; a kept
 	// answer is served only while it is. Never sent.
@@ -118,6 +122,7 @@ type wireResponse struct {
 	Error    []byte `json:"error,omitempty"`
 	Retry    bool   `json:"retry,omitempty"`
 	Mismatch bool   `json:"mismatch,omitempty"`
+	ExitCode int    `json:"exit_code,omitempty"`
 }
 
 func (r Request) wire() wireRequest {
@@ -148,11 +153,11 @@ func (w wireRequest) request() Request {
 }
 
 func (r Response) wire() wireResponse {
-	return wireResponse{Stdout: r.Stdout, Stderr: r.Stderr, Failed: r.Failed, Error: []byte(r.Error), Retry: r.Retry, Mismatch: r.Mismatch}
+	return wireResponse{Stdout: r.Stdout, Stderr: r.Stderr, Failed: r.Failed, Error: []byte(r.Error), Retry: r.Retry, Mismatch: r.Mismatch, ExitCode: r.ExitCode}
 }
 
 func (w wireResponse) response() Response {
-	return Response{Stdout: w.Stdout, Stderr: w.Stderr, Failed: w.Failed, Error: string(w.Error), Retry: w.Retry, Mismatch: w.Mismatch}
+	return Response{Stdout: w.Stdout, Stderr: w.Stderr, Failed: w.Failed, Error: string(w.Error), Retry: w.Retry, Mismatch: w.Mismatch, ExitCode: w.ExitCode}
 }
 
 // maxSocketPath is the longest unix socket path every supported platform
@@ -507,6 +512,13 @@ type ServeOptions struct {
 	// OnExit, when set, runs as the idle service exits, with the idle time
 	// that ended it.
 	OnExit func(idle time.Duration)
+	// Lane, when set, names the queue a request waits in and how many of
+	// that queue's tasks run at once ("" is the reads' queue, of Concurrency
+	// slots): a lane never takes another's slots.
+	Lane func(Request) (name string, slots int)
+	// OnOrphanFinished, when set, is told of each task that finished with no
+	// caller left.
+	OnOrphanFinished func(Request)
 	// OnIdle, when set, runs once each time the service has had no request
 	// for IdleWorkAfter (default 5 s, at most half of Idle) after serving
 	// some; the service does not exit while it runs.
@@ -576,7 +588,16 @@ func Serve(ctx context.Context, socket string, opts ServeOptions, handle func(co
 	}
 	// The idle timer counts from the end of the last task, queued or running,
 	// as well as from the last connection.
-	tasks := newQueue(ctx, opts.Concurrency, handle, opts.Keepable, func() { touch(0) })
+	var orphans atomic.Int32
+	finished := func(request Request, orphan bool) {
+		touch(0)
+		if orphan && opts.OnOrphanFinished != nil {
+			opts.OnOrphanFinished(request)
+		}
+	}
+	tasks := newLanes(func(slots int) *queue {
+		return newQueue(ctx, slots, handle, opts.Keepable, &orphans, finished)
+	}, opts.Concurrency, opts.Lane)
 	if opts.IdleWorkAfter <= 0 {
 		opts.IdleWorkAfter = min(5*time.Second, opts.Idle/2)
 	}

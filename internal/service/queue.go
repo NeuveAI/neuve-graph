@@ -103,18 +103,33 @@ type queue struct {
 	kept      map[string]*keptAnswer
 	keptOrder []string
 	keptTotal int64
-	orphans   int // tasks running on with no caller
+	orphans   *atomic.Int32 // tasks running on with no caller, in every lane
 	seq       uint64
 	handle    func(context.Context, Request) Response
 	keepable  func(Request) bool
-	finished  func() // a task ended
+	// finished is told each task's end, and whether no caller was left.
+	finished func(request Request, orphan bool)
 }
 
-func newQueue(ctx context.Context, slots int, handle func(context.Context, Request) Response, keepable func(Request) bool, finished func()) *queue {
+func newQueue(ctx context.Context, slots int, handle func(context.Context, Request) Response, keepable func(Request) bool, orphans *atomic.Int32, finished func(Request, bool)) *queue {
 	if keepable == nil {
 		keepable = func(Request) bool { return false }
 	}
-	return &queue{ctx: ctx, slots: slots, tasks: map[string]*task{}, kept: map[string]*keptAnswer{}, handle: handle, keepable: keepable, finished: finished}
+	return &queue{ctx: ctx, slots: slots, tasks: map[string]*task{}, kept: map[string]*keptAnswer{}, handle: handle, keepable: keepable, orphans: orphans, finished: finished}
+}
+
+// takeOrphan counts one more task running on with no caller, if the bound
+// across every lane allows it.
+func (q *queue) takeOrphan() bool {
+	for {
+		count := q.orphans.Load()
+		if count >= maxOrphanTasks {
+			return false
+		}
+		if q.orphans.CompareAndSwap(count, count+1) {
+			return true
+		}
+	}
 }
 
 // requestKey names identical requests: the same protocol, build and command
@@ -172,7 +187,7 @@ func (q *queue) ask(callerCtx context.Context, request Request, arrival time.Tim
 	}
 	if t.orphan {
 		t.orphan = false
-		q.orphans--
+		q.orphans.Add(-1)
 	}
 	t.waiters++
 	q.mu.Unlock()
@@ -191,9 +206,8 @@ func (q *queue) ask(callerCtx context.Context, request Request, arrival time.Tim
 		t.waiters--
 		ended := false
 		if t.waiters == 0 && q.tasks[t.key] == t {
-			if t.keep && q.orphans < maxOrphanTasks {
+			if t.keep && q.takeOrphan() {
 				t.orphan = true
-				q.orphans++
 			} else {
 				ended = q.abandon(t)
 			}
@@ -202,7 +216,7 @@ func (q *queue) ask(callerCtx context.Context, request Request, arrival time.Tim
 		// Outside q.mu: finished takes the service's lock, which is held
 		// while asking whether the queue is busy.
 		if ended && q.finished != nil {
-			q.finished()
+			q.finished(t.request, false)
 		}
 		return Response{}, Delivery{}, false
 	}
@@ -253,9 +267,10 @@ func (q *queue) execute(t *task) {
 	t.cancelled = t.ctx.Err() != nil
 	delete(q.tasks, t.key)
 	q.running--
+	orphan := t.orphan
 	if t.orphan {
 		t.orphan = false
-		q.orphans--
+		q.orphans.Add(-1)
 	}
 	if !t.cancelled && t.keep && response.StillValid != nil && !response.Failed && !response.Retry && !response.Mismatch {
 		q.keepAnswer(t.key, response, t.runClass)
@@ -265,7 +280,7 @@ func (q *queue) execute(t *task) {
 	t.cancel()
 	close(t.done)
 	if q.finished != nil {
-		q.finished()
+		q.finished(t.request, orphan)
 	}
 }
 
@@ -331,4 +346,54 @@ func (q *queue) dropKept(key string) {
 		}
 	}
 	keptBytes.Store(q.keptTotal)
+}
+
+// lanes are a service's queues: the reads' and any other a request names.
+type lanes struct {
+	mu     sync.Mutex
+	make   func(slots int) *queue
+	reads  *queue
+	others map[string]*queue
+	lane   func(Request) (string, int)
+}
+
+func newLanes(make func(int) *queue, readSlots int, lane func(Request) (string, int)) *lanes {
+	return &lanes{make: make, reads: make(readSlots), others: map[string]*queue{}, lane: lane}
+}
+
+func (l *lanes) queueFor(request Request) *queue {
+	if l.lane == nil {
+		return l.reads
+	}
+	name, slots := l.lane(request)
+	if name == "" {
+		return l.reads
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	q, ok := l.others[name]
+	if !ok {
+		q = l.make(max(1, slots))
+		l.others[name] = q
+	}
+	return q
+}
+
+func (l *lanes) ask(callerCtx context.Context, request Request, arrival time.Time) (Response, Delivery, bool) {
+	return l.queueFor(request).ask(callerCtx, request, arrival)
+}
+
+// busy reports whether any lane has a task queued or running.
+func (l *lanes) busy() bool {
+	if l.reads.busy() {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, q := range l.others {
+		if q.busy() {
+			return true
+		}
+	}
+	return false
 }

@@ -43,7 +43,9 @@ func main() {
 		// string, nothing at this sink can tell which of them git wrote. A
 		// one-line report that is honest about its breaks beats a multi-line
 		// one a repository can append to.
-		fmt.Fprintln(os.Stderr, termsafe.Line(err.Error()))
+		if message := err.Error(); message != "" {
+			fmt.Fprintln(os.Stderr, termsafe.Line(message))
+		}
 		os.Exit(cli.ExitCode(err))
 	}
 }

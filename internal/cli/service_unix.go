@@ -9,8 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -18,6 +21,7 @@ import (
 	"github.com/entireio/entire-graph/internal/gitutil"
 	"github.com/entireio/entire-graph/internal/sem"
 	"github.com/entireio/entire-graph/internal/service"
+	"github.com/entireio/entire-graph/internal/termsafe"
 )
 
 // Settings of the shared Graph service. They are part of the environment that
@@ -55,7 +59,7 @@ func callTiming() (class string, deadline time.Time, err error) {
 
 // serviceCommands are the read-only prepared reads a service answers: the
 // commands whose cost is mostly loading a prepared snapshot.
-var serviceCommands = map[string]bool{"query": true, "search": true, "neighbors": true}
+var serviceCommands = map[string]bool{"query": true, "search": true, "neighbors": true, "index": true}
 
 // serviceEligible reports whether a command line can be answered by the
 // service exactly as this process would answer it: opted in, a prepared read
@@ -84,6 +88,18 @@ func serviceEligible(args []string, env EntireEnv) bool {
 		}
 		prepared = flags.PreparedOnly
 		paths = append(append([]string{flags.Repo, flags.CacheDir}, flags.IgnoreFile...), flags.IncludeFile...)
+	case "index":
+		// A preparation runs in the service's lane, in a process of its own
+		// started there: what it writes depends only on its arguments.
+		flags, rest, err := parseIndexFlags(args[1:])
+		if err != nil || len(rest) != 0 {
+			return false
+		}
+		prepared = true
+		paths = append(append([]string{flags.Repo, flags.CacheDir}, flags.IgnoreFiles...), flags.IncludeFiles...)
+		if flags.Report != "" {
+			paths = append(paths, flags.Report)
+		}
 	}
 	if !prepared {
 		return false
@@ -194,6 +210,9 @@ func callService(ctx context.Context, executable, socket string, args []string, 
 		return true, "", err
 	}
 	if response.Failed {
+		if response.ExitCode > 0 {
+			return true, "", exitStatusError{code: response.ExitCode}
+		}
 		return true, "", errors.New(response.Error)
 	}
 	return true, "", nil
@@ -240,8 +259,21 @@ func runService(ctx context.Context, opts Options, args []string) error {
 		Idle:        time.Duration(positiveSetting(envServiceIdle, 60)) * time.Second,
 		Build:       build,
 		Deliver:     deliverServiceResponse,
-		Keepable:    keepableServiceRead,
-		OnIdle:      pruneIdle,
+		Keepable: func(request service.Request) bool {
+			// A preparation runs on when its callers leave: its result is
+			// the cache, which a later read uses.
+			return request.Args[0] == "index" || keepableServiceRead(request)
+		},
+		Lane: func(request service.Request) (string, int) {
+			if request.Args[0] == "index" {
+				return prepareLane, 1
+			}
+			return "", 0
+		},
+		OnOrphanFinished: func(request service.Request) {
+			appendServiceLog(socket, map[string]any{"time": time.Now().UTC().Format(time.RFC3339Nano), "event": "finished-without-caller", "command": request.Args[0], "class": request.Class})
+		},
+		OnIdle: pruneIdle,
 		OnExit: func(idle time.Duration) {
 			appendServiceLog(socket, map[string]any{"time": time.Now().UTC().Format(time.RFC3339Nano), "event": "exit", "idle_ms": idle.Milliseconds()})
 		},
@@ -257,8 +289,12 @@ func runService(ctx context.Context, opts Options, args []string) error {
 		}
 		report := newServiceReport(true, "")
 		requestCtx, report.children = gitutil.WithChildCPU(requestCtx)
-		beginServiceRead(report)
-		defer endServiceRead(report)
+		// A preparation's CPU is its child's, not this process's: it never
+		// shares a read's.
+		if request.Args[0] != "index" {
+			beginServiceRead(report)
+			defer endServiceRead(report)
+		}
 		started := time.Now()
 		panicked := false
 		// Deferred first so it runs last, after a panic became a Retry.
@@ -280,6 +316,10 @@ func runService(ctx context.Context, opts Options, args []string) error {
 			policy = identifyFiles(servingPolicyFiles(requestCtx, request.Args))
 			opened = sem.RecordCacheOpens()
 		}
+		if request.Args[0] == "index" {
+			response = runPreparation(requestCtx, request, report)
+			return response
+		}
 		var stdout, stderr bytes.Buffer
 		err := Run(withServiceReport(requestCtx, report), Options{Version: opts.Version, Env: EnvFromOS(), Stdout: &stdout, Stderr: &stderr, Stdin: bytes.NewReader(nil)}, request.Args)
 		response = service.Response{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
@@ -295,6 +335,92 @@ func runService(ctx context.Context, opts Options, args []string) error {
 		}
 		return response
 	})
+}
+
+// runPreparation runs a preparation (index) in a child process of the
+// service's own executable and environment, with forwarding off, so its
+// memory goes back to the system when it ends and its CPU and peak memory are
+// its own, measured exactly. Its output, error output and exit status are the
+// caller's; a JSON receipt gains the service block for the child.
+func runPreparation(ctx context.Context, request service.Request, report *serviceReport) service.Response {
+	executable, err := os.Executable()
+	if err != nil {
+		return service.Response{Retry: true}
+	}
+	cmd := exec.CommandContext(ctx, executable, request.Args...)
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, envService+"=") {
+			env = append(env, entry)
+		}
+	}
+	cmd.Env = append(env, envService+"=")
+	cmd.Dir = "/"
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	runErr := cmd.Run()
+	response := service.Response{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
+	state := cmd.ProcessState
+	if state == nil {
+		return service.Response{Retry: true} // it never ran: the caller runs it itself
+	}
+	if runErr != nil {
+		code := state.ExitCode()
+		if code < 0 {
+			// Killed from outside (the system's memory guard, say): it could
+			// not print why, so the service does.
+			code = 1
+			response.Stderr = append(response.Stderr, []byte(termsafe.Line(fmt.Sprintf("the preparation's process was stopped: %v", state))+"\n")...)
+		}
+		// The child printed its own error; the caller exits as it did.
+		response.Failed, response.ExitCode = true, code
+		return response
+	}
+	stats := sem.ServiceStats{
+		Answered:    true,
+		Lane:        prepareLane,
+		CPUUserMS:   state.UserTime().Milliseconds(),
+		CPUSystemMS: state.SystemTime().Milliseconds(),
+		QueueWaitMS: report.queueWait.Milliseconds(),
+	}
+	if usage, ok := state.SysUsage().(*syscall.Rusage); ok {
+		peak := uint64(usage.Maxrss)
+		if runtime.GOOS == "linux" {
+			peak *= 1024
+		}
+		stats.RSSBytes, stats.MaxRSSBytes = peak, peak
+	}
+	// A plan writes nothing (ADR 0009), and reading the cache's size may.
+	if flags, _, err := parseIndexFlags(request.Args[1:]); err == nil && flags.CacheDir != "" && !flags.Plan {
+		limits := sem.CacheLimitsFromEnv()
+		stats.CacheCapBytes = limits.MaxBytes
+		if usage, err := sem.LastCacheUsage(flags.CacheDir, limits); err == nil {
+			stats.CacheBytes = usage.Bytes
+		}
+	}
+	report.stats = &stats
+	response.Stdout = withServiceBlock(response.Stdout, stats)
+	return response
+}
+
+// withServiceBlock adds the service block to a one-object JSON receipt, as
+// its last field, and leaves any other output as it is.
+func withServiceBlock(stdout []byte, stats sem.ServiceStats) []byte {
+	trimmed := bytes.TrimRight(stdout, "\n")
+	if len(trimmed) < 2 || trimmed[0] != '{' || trimmed[len(trimmed)-1] != '}' || bytes.IndexByte(trimmed, '\n') >= 0 || !json.Valid(trimmed) {
+		return stdout
+	}
+	block, err := json.Marshal(stats)
+	if err != nil {
+		return stdout
+	}
+	out := make([]byte, 0, len(stdout)+len(block)+16)
+	out = append(out, trimmed[:len(trimmed)-1]...)
+	if len(trimmed) > 2 {
+		out = append(out, ',')
+	}
+	out = append(append(append(out, `"service":`...), block...), '}', '\n')
+	return out
 }
 
 // serviceCacheDir is the cache directory a read the service runs names.

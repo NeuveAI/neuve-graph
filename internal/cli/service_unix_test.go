@@ -548,3 +548,109 @@ func TestKeptAnswerFollowsItsInputs(t *testing.T) {
 		t.Fatal("a kept answer outlived an edit to .graphignore")
 	}
 }
+
+// indexServiceBlock is the service block at the top of an index receipt,
+// which has no stats of its own.
+func indexServiceBlock(t *testing.T, data []byte) map[string]any {
+	t.Helper()
+	var value struct {
+		Service map[string]any `json:"service"`
+	}
+	if err := json.Unmarshal(data, &value); err != nil {
+		t.Fatalf("decode %q: %v", data, err)
+	}
+	return value.Service
+}
+
+// A preparation through the service runs in its lane, in a child process,
+// and answers as its own process does, with the lane's block added; it
+// fails as its own process fails; and one the service does not take says so.
+func TestPreparationThroughTheService(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds the binary")
+	}
+	work := t.TempDir()
+	binary := filepath.Join(work, "entire-graph")
+	if out, err := exec.Command("go", "build", "-o", binary, "../../cmd/entire-graph").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v\n%s", err, out)
+	}
+	repo := t.TempDir()
+	git(t, repo, "init")
+	git(t, repo, "config", "user.name", "Entire Graph Test")
+	git(t, repo, "config", "user.email", "graph@example.com")
+	write(t, repo, "auth.go", "package auth\n\nfunc ValidateToken(token string) bool { return token != \"\" }\n")
+	git(t, repo, "add", ".")
+	git(t, repo, "commit", "-m", "initial")
+	dir, err := os.MkdirTemp("", "gp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	base := append(os.Environ(), service.EnvDirectory+"="+dir, envServiceIdle+"=10", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	var plainEnv []string
+	for _, entry := range base {
+		if !strings.HasPrefix(entry, envService+"=") {
+			plainEnv = append(plainEnv, entry)
+		}
+	}
+	serviceEnv := append(append([]string(nil), plainEnv...), envService+"=require")
+	run := func(env []string, args ...string) ([]byte, []byte, int) {
+		t.Helper()
+		cmd := exec.Command(binary, args...)
+		cmd.Env = env
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		code := 0
+		if exit, ok := err.(*exec.ExitError); ok {
+			code = exit.ExitCode()
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		return stdout.Bytes(), stderr.Bytes(), code
+	}
+	index := func(cache string) []string {
+		return []string{"index", "--repo", repo, "--head", "--profile", "full", "--cache-dir", cache, "--format", "json"}
+	}
+	withoutBlocks := func(data []byte) any {
+		value := withoutTimings(t, data).(map[string]any)
+		delete(value, "cache") // two caches, each its own size
+		return value
+	}
+	plainOut, _, code := run(plainEnv, index(t.TempDir())...)
+	if code != 0 {
+		t.Fatalf("plain index exited %d", code)
+	}
+	serviceOut, _, code := run(serviceEnv, index(t.TempDir())...)
+	if code != 0 {
+		t.Fatalf("index through the service exited %d", code)
+	}
+	if !reflect.DeepEqual(withoutBlocks(serviceOut), withoutBlocks(plainOut)) {
+		t.Fatalf("index through the service:\n got %s\nwant %s", serviceOut, plainOut)
+	}
+	block := indexServiceBlock(t, serviceOut)
+	if block["answered"] != true || block["lane"] != "prepare" || block["class"] != "background" ||
+		block["max_rss_bytes"].(float64) <= 0 || block["cache_bytes"].(float64) <= 0 ||
+		block["snapshots_held"] != nil || block["snapshots_limit"] != nil || block["cpu_shared"] != nil {
+		t.Fatalf("the preparation's block: %v", block)
+	}
+	// It fails as its own process fails: the same exit status and error.
+	bad := []string{"index", "--repo", repo, "--commit", "HEAD", "--cache-dir", t.TempDir(), "--format", "json"}
+	plainOut, plainErr, plainCode := run(plainEnv, bad...)
+	gotOut, gotErr, gotCode := run(serviceEnv, bad...)
+	if plainCode == 0 || gotCode != plainCode || !bytes.Equal(gotErr, plainErr) || !bytes.Equal(gotOut, plainOut) {
+		t.Fatalf("a failing preparation through the service: %d %q %q, want %d %q %q", gotCode, gotOut, gotErr, plainCode, plainOut, plainErr)
+	}
+	// One the service does not take (a relative cache directory) runs here
+	// and says so.
+	cmd := exec.Command(binary, "index", "--repo", repo, "--head", "--profile", "full", "--cache-dir", "relative-cache", "--format", "json")
+	cmd.Env = append(append([]string(nil), plainEnv...), envService+"=auto")
+	cmd.Dir = t.TempDir()
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if block := indexServiceBlock(t, out); block == nil || block["answered"] != false || block["reason"] != "off" || block["lane"] != "prepare" {
+		t.Fatalf("an index the service did not take: %v", block)
+	}
+}

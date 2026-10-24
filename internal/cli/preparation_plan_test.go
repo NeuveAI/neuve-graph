@@ -151,4 +151,13 @@ func TestReadyPreparationPlanWritesNothing(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(cache, "cache-store")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a ready plan wrote the cache store: %v", err)
 	}
+	// Nor with the service setting on, where its receipt carries a block.
+	t.Setenv(envService, "auto")
+	var planned bytes.Buffer
+	if err := Run(t.Context(), Options{Version: "test", Stdout: &planned}, []string{"index", "--repo", repo, "--cache-dir", cache, "--incremental", "--commit", commit, "--profile", "syntax-only", "--plan", "--format", "json"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(cache, "cache-store")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a ready plan with the service setting on wrote the cache store: %v", err)
+	}
 }

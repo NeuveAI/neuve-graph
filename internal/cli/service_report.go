@@ -10,6 +10,10 @@ import (
 	"github.com/entireio/entire-graph/internal/sem"
 )
 
+// prepareLane is the service's lane for preparations (index): one at a time,
+// never in a read's slot.
+const prepareLane = "prepare"
+
 // ExitServiceDeadline is the exit status of a call whose deadline
 // (ENTIRE_GRAPH_DEADLINE_MS) passed while it waited for the shared Graph
 // service, with nothing on stdout: EX_TEMPFAIL, "try again later". A search
@@ -25,8 +29,19 @@ func ExitCode(err error) int {
 	if errors.Is(err, ErrServiceDeadline) {
 		return ExitServiceDeadline
 	}
+	var exit exitStatusError
+	if errors.As(err, &exit) {
+		return exit.code
+	}
 	return 1
 }
+
+// exitStatusError is the exit status of a command the service ran in a child
+// process, which printed its own error: the caller exits with that status
+// and prints nothing more.
+type exitStatusError struct{ code int }
+
+func (e exitStatusError) Error() string { return "" }
 
 // serviceReport measures one prepared read for the `service` block of its
 // JSON, whenever the shared Graph service setting is on: in the service, the
@@ -144,9 +159,10 @@ func serviceStats(ctx context.Context, cacheDir string) *sem.ServiceStats {
 	if report.answered && report.running {
 		concurrency, shared = readConcurrency(report)
 	}
-	if shared {
-		// The process's own CPU is shared; the read's Git processes are its
-		// own, counted exactly.
+	if report.answered && report.running {
+		// The process's own CPU, shared among the reads running with it;
+		// the read's Git processes are its own, counted exactly. Not every
+		// child of the process: a preparation's child is not the read's.
 		selfUser, selfSys := processSelfCPU()
 		cpuUser = time.Duration(float64(selfUser-report.selfUser) / concurrency)
 		cpuSys = time.Duration(float64(selfSys-report.selfSys) / concurrency)

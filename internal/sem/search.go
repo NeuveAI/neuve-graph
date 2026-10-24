@@ -542,8 +542,8 @@ type ServiceStats struct {
 	Reason         string `json:"reason,omitempty"`
 	RSSBytes       uint64 `json:"rss_bytes"`
 	MaxRSSBytes    uint64 `json:"max_rss_bytes"`
-	SnapshotsHeld  int    `json:"snapshots_held"`
-	SnapshotsLimit int    `json:"snapshots_limit"`
+	SnapshotsHeld  int    `json:"snapshots_held,omitempty"`
+	SnapshotsLimit int    `json:"snapshots_limit,omitempty"`
 	// SnapshotHit is true when every prepared snapshot this read used was
 	// already decoded in the service's memory. Counted for the whole process
 	// over the read's run, so with CPUShared it is false when any read
@@ -567,6 +567,8 @@ type ServiceStats struct {
 	// or background); KeptAnswer, that the answer was kept from a task that
 	// ended before this read asked (its CPU went to the read that started
 	// it); MovedUp, that this read moved the queued task it joined up.
+	// Lane is "prepare" for a preparation's block, absent for a read's.
+	Lane       string `json:"lane,omitempty"`
 	Class      string `json:"class,omitempty"`
 	KeptAnswer bool   `json:"kept_answer,omitempty"`
 	MovedUp    bool   `json:"moved_up,omitempty"`
