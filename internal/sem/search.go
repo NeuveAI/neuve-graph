@@ -1070,6 +1070,46 @@ type searchQuery struct {
 	// identifier shape (mixed case, or containing `_` `.` `/` `:`). Such a token IS the
 	// caller naming a symbol, whatever else the query says around it.
 	identifierTokens map[string]bool
+	// signatureTerms finds, in one pass over a symbol's signature, which of
+	// these terms it contains; nil, or built for other terms, is a term at a
+	// time (symbolSearchScore).
+	signatureTerms *searchSignatureTerms
+}
+
+// searchSignatureTerms is a matcher of a query's terms, and the terms it was
+// built for.
+type searchSignatureTerms struct {
+	terms   []string
+	matcher searchTermMatcher
+	// direct marks the terms the matcher would not answer as
+	// strings.Contains does: an empty term, which every text contains, and
+	// one with an upper-case ASCII letter, which no lowered text does (the
+	// matcher folds case).
+	direct []bool
+}
+
+func newSearchSignatureTerms(terms []string) *searchSignatureTerms {
+	direct := make([]bool, len(terms))
+	for index, term := range terms {
+		direct[index] = term == "" || !asciiLower(term)
+	}
+	return &searchSignatureTerms{terms: terms, matcher: newSearchTermMatcher(terms), direct: direct}
+}
+
+// asciiLower reports whether value has no upper-case ASCII letter.
+func asciiLower(value string) bool {
+	for offset := 0; offset < len(value); offset++ {
+		if value[offset] >= 'A' && value[offset] <= 'Z' {
+			return false
+		}
+	}
+	return true
+}
+
+// of reports whether these are the terms the matcher was built for: the same
+// slice, not merely equal ones.
+func (s *searchSignatureTerms) of(terms []string) bool {
+	return s != nil && len(s.terms) == len(terms) && (len(terms) == 0 || &s.terms[0] == &terms[0])
 }
 
 type searchCandidate struct {
@@ -1598,6 +1638,7 @@ func searchRepository(ctx context.Context, repo, providerVersion, query string, 
 		}
 	}
 	q = q.withCorpusPresence(fileDF)
+	q.signatureTerms = newSearchSignatureTerms(q.terms)
 	statisticsPassFiles, statisticsPassBytes := queryReads.files, queryReads.bytes
 	for _, filePath := range indexableFiles {
 		if err := ctx.Err(); err != nil {
@@ -7587,7 +7628,6 @@ func searchQueryWordSequence(rawLower string) []string {
 
 func symbolSearchScore(q searchQuery, symbol SymbolRecord) (float64, []string) {
 	name := strings.ToLower(symbol.Name)
-	signature := strings.ToLower(symbol.Signature)
 	compactName := compactSearchIdentifier(name)
 	score := 0.0
 	switch symbol.Kind {
@@ -7605,7 +7645,8 @@ func symbolSearchScore(q searchQuery, symbol SymbolRecord) (float64, []string) {
 		score += exactSymbolBonus(q, symbol)
 		signals = append(signals, "exact-symbol")
 	}
-	for _, term := range q.terms {
+	signature := newSymbolSignatureMatches(q, symbol.Signature)
+	for index, term := range q.terms {
 		weight := q.weights[term]
 		switch {
 		case name == term:
@@ -7614,7 +7655,7 @@ func symbolSearchScore(q searchQuery, symbol SymbolRecord) (float64, []string) {
 		case searchSymbolNameScoreMatches(q, symbol, term):
 			score += 3 * weight
 			signals = append(signals, "symbol-name")
-		case searchQueryTermMatches(q, symbol.Signature, signature, term):
+		case signature.matches(index, term):
 			score += 1.5 * weight
 			signals = append(signals, "signature")
 		}
@@ -7635,6 +7676,41 @@ func symbolSearchScore(q searchQuery, symbol SymbolRecord) (float64, []string) {
 		signals = append(signals, "alias")
 	}
 	return score, appendUnique(nil, signals...)
+}
+
+// symbolSignatureMatches answers, for one symbol's signature, which query
+// terms searchQueryTermMatches finds in it. Each answer is the same as
+// searchQueryTermMatches(q, signature, strings.ToLower(signature), term);
+// the query's signature matcher finds every plain term in one pass, made at
+// the first term that asks.
+type symbolSignatureMatches struct {
+	q         searchQuery
+	signature string
+	lower     string
+	lowered   bool
+	scanned   bool
+	found     []bool
+}
+
+func newSymbolSignatureMatches(q searchQuery, signature string) symbolSignatureMatches {
+	return symbolSignatureMatches{q: q, signature: signature}
+}
+
+func (m *symbolSignatureMatches) matches(index int, term string) bool {
+	// Abbreviations need identifier boundaries, and the matcher's direct
+	// terms it would answer otherwise: these are asked a term at a time.
+	if !m.q.signatureTerms.of(m.q.terms) || m.q.signatureTerms.direct[index] || m.q.inferredAbbreviations[term] {
+		if !m.lowered {
+			m.lower, m.lowered = strings.ToLower(m.signature), true
+		}
+		return searchQueryTermMatches(m.q, m.signature, m.lower, term)
+	}
+	if !m.scanned {
+		m.found = make([]bool, len(m.q.terms))
+		m.q.signatureTerms.matcher.matchTerms(m.signature, m.found)
+		m.scanned = true
+	}
+	return m.found[index]
 }
 
 // exactSymbolBonus weights an exact name match by what the named thing is.

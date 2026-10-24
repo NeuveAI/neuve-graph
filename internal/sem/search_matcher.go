@@ -6,7 +6,11 @@ import "strings"
 // Issue and source identifiers are overwhelmingly ASCII; uncommon non-ASCII
 // terms use a separate Unicode-aware fallback.
 type searchTermMatcher struct {
-	nodes       []searchMatcherNode
+	nodes []searchMatcherNode
+	// table is the automaton with its failure links followed ahead of time:
+	// table[state<<7|c] is the state after ASCII byte c, either case, so a
+	// scan takes one lookup per byte.
+	table       []int32
 	fallback    []searchFallbackTerm
 	termCount   int
 	aliasTerms  map[int]string
@@ -70,7 +74,34 @@ func newSearchTermMatcher(terms []string) searchTermMatcher {
 		matcher.nodes[state].outputs = append(matcher.nodes[state].outputs, index)
 	}
 	matcher.buildFailures()
+	matcher.buildTable()
 	return matcher
+}
+
+// buildTable follows every state's failure links ahead of time. A state's
+// failure is shallower, so in breadth-first order its row is complete when
+// the state's is filled.
+func (matcher *searchTermMatcher) buildTable() {
+	matcher.table = make([]int32, len(matcher.nodes)<<7)
+	queue := []int{0}
+	for len(queue) > 0 {
+		state := queue[0]
+		queue = queue[1:]
+		row := matcher.table[state<<7 : (state+1)<<7]
+		for character := 0; character < 128; character++ {
+			lower := lowerASCII(byte(character))
+			if next, ok := matcher.nodes[state].next[lower]; ok {
+				row[character] = int32(next)
+			} else if state != 0 {
+				row[character] = matcher.table[matcher.nodes[state].failure<<7|character]
+			}
+		}
+		for character := 0; character < 128; character++ {
+			if next, ok := matcher.nodes[state].next[byte(character)]; ok {
+				queue = append(queue, next)
+			}
+		}
+	}
 }
 
 func (matcher *searchTermMatcher) buildFailures() {
@@ -104,28 +135,40 @@ func (matcher *searchTermMatcher) buildFailures() {
 
 func (matcher searchTermMatcher) match(text string) []bool {
 	found := make([]bool, matcher.termCount)
+	matcher.matchTerms(text, found)
+	if len(matcher.aliasTerms) > 0 {
+		for index := range matcher.aliasTerms {
+			found[index] = false
+		}
+		for _, raw := range searchSourceWords(text) {
+			for _, token := range searchTokenVariants(raw) {
+				for _, index := range matcher.aliasTokens[token] {
+					found[index] = true
+				}
+			}
+		}
+	}
+	return found
+}
+
+// matchTerms sets found[index] for each term, ASCII or not, that the
+// lowered text contains: strings.Contains(strings.ToLower(text), term) for a
+// non-empty term. found holds a slot per term and starts false.
+func (matcher searchTermMatcher) matchTerms(text string, found []bool) {
 	scanText := text
 	if !asciiString(text) {
 		scanText = strings.ToLower(text)
 	}
-	remaining := matcher.termCount
-	state := 0
+	remaining := matcher.termCount - len(matcher.fallback)
+	state := int32(0)
+	table := matcher.table
 	for offset := 0; offset < len(scanText) && remaining > 0; offset++ {
 		character := scanText[offset]
 		if character >= 128 {
 			state = 0
 			continue
 		}
-		character = lowerASCII(character)
-		for state != 0 {
-			if _, ok := matcher.nodes[state].next[character]; ok {
-				break
-			}
-			state = matcher.nodes[state].failure
-		}
-		if next, ok := matcher.nodes[state].next[character]; ok {
-			state = next
-		}
+		state = table[state<<7|int32(character)]
 		for _, index := range matcher.nodes[state].outputs {
 			if !found[index] {
 				found[index] = true
@@ -141,19 +184,6 @@ func (matcher searchTermMatcher) match(text string) []bool {
 			}
 		}
 	}
-	if len(matcher.aliasTerms) > 0 {
-		for index := range matcher.aliasTerms {
-			found[index] = false
-		}
-		for _, raw := range searchSourceWords(text) {
-			for _, token := range searchTokenVariants(raw) {
-				for _, index := range matcher.aliasTokens[token] {
-					found[index] = true
-				}
-			}
-		}
-	}
-	return found
 }
 
 func asciiString(value string) bool {
