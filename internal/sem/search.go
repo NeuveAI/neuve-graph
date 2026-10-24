@@ -1070,14 +1070,16 @@ type searchQuery struct {
 }
 
 type searchCandidate struct {
-	result            SearchResult
-	aliases           []string
-	termCounts        map[string]int
-	docLength         int
-	baseScore         float64
-	score             float64
-	constraintSurface *searchConstraintSurface
-	prosePassagePlan  []SearchPassage
+	result     SearchResult
+	aliases    []string
+	termCounts map[string]int
+	docLength  int
+	baseScore  float64
+	score      float64
+	// agreement is the candidate's constraint agreement, computed once per
+	// search's constraints (searchCandidateAgreementCached).
+	agreement        *searchCandidateAgreementResult
+	prosePassagePlan []SearchPassage
 	// proseSection identifies the headed section of a prose document this region falls in. Set by
 	// attachProseSectionUnits; it is what makes the prose unit of retrieval the SECTION rather than
 	// the file. Empty for code, and for prose whose file has no indexed symbols.
@@ -2708,7 +2710,13 @@ func preselectSearchFiles(
 				})
 			}
 		} else {
-			matches, grepErr = gitutil.GrepTreePaths(ctx, source.absRepo, source.commit, grepPatterns)
+			// The same files git grep -I -i -F -l names, each blob read once for
+			// every pattern and its answers remembered across searches.
+			scanOptions := gitutil.TreeScanOptions{}
+			if !options.DisableCache {
+				scanOptions.Answers = gitutil.OpenTreeScanAnswers(options.CacheDir)
+			}
+			matches, scan, grepErr = gitutil.ScanTreePaths(ctx, source.absRepo, source.commit, grepPatterns, scanOptions)
 		}
 		if errors.Is(grepErr, gitutil.ErrGrepDeadline) {
 			// The scan was stopped, not answered: disclose that this query's file

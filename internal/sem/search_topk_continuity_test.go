@@ -178,7 +178,7 @@ func RetryDelivery%02d(attempt int) int { return attempt * %d }
 		return response
 	}
 	baseline := committed(defaultSearchTopK)
-	if baseline.Stats.PreselectionBackend != "git-tree-grep" {
+	if !committedTreeFileRoute(baseline.Stats.PreselectionBackend) {
 		t.Fatalf("baseline did not take the committed fast path: %#v", baseline.Stats)
 	}
 	for _, topK := range []int{defaultSearchTopK + 1, defaultSearchTopK + 5, 20} {

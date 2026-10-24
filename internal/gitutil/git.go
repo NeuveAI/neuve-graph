@@ -1083,7 +1083,7 @@ func GrepTreePaths(ctx context.Context, repo, treeish string, patterns []string)
 	if treeish == "" {
 		return nil, errors.New("git grep treeish cannot be empty")
 	}
-	return grepTreePaths(ctx, repo, treeish, patterns, true, false)
+	return grepTreePaths(ctx, repo, treeish, patterns, true, false, nil)
 }
 
 // GrepTreePathsIncludingBinary behaves exactly like GrepTreePaths except it
@@ -1098,7 +1098,7 @@ func GrepTreePathsIncludingBinary(ctx context.Context, repo, treeish string, pat
 	if treeish == "" {
 		return nil, errors.New("git grep treeish cannot be empty")
 	}
-	return grepTreePaths(ctx, repo, treeish, patterns, false, false)
+	return grepTreePaths(ctx, repo, treeish, patterns, false, false, nil)
 }
 
 // GrepTreePathsCaseSensitiveIncludingBinary behaves like
@@ -1113,7 +1113,7 @@ func GrepTreePathsCaseSensitiveIncludingBinary(ctx context.Context, repo, treeis
 	if treeish == "" {
 		return nil, errors.New("git grep treeish cannot be empty")
 	}
-	return grepTreePaths(ctx, repo, treeish, patterns, false, true)
+	return grepTreePaths(ctx, repo, treeish, patterns, false, true, nil)
 }
 
 // GrepFixedStringPaths returns every file containing one exact, case-sensitive string. An empty
@@ -1127,10 +1127,47 @@ func GrepFixedStringPaths(ctx context.Context, repo, treeish, pattern string) ([
 	if pattern == "" {
 		return []string{}, nil
 	}
-	return grepTreePaths(ctx, repo, treeish, []string{pattern}, false, true)
+	return grepTreePaths(ctx, repo, treeish, []string{pattern}, false, true, nil)
 }
 
-func grepTreePaths(ctx context.Context, repo, treeish string, patterns []string, textOnly, caseSensitive bool) ([]string, error) {
+// ScanTreePaths answers exactly what GrepTreePaths answers, reading each blob
+// once for all patterns and remembering each blob's answer per pattern
+// (options.Answers); see scanTreePaths. Where that cannot be exact, git
+// answers, as GrepTreePaths does.
+func ScanTreePaths(ctx context.Context, repo, treeish string, patterns []string, options TreeScanOptions) ([]string, TreeScanStats, error) {
+	if treeish == "" || strings.HasPrefix(treeish, "-") || strings.ContainsRune(treeish, '\x00') {
+		return nil, TreeScanStats{}, fmt.Errorf("invalid git grep treeish %q", treeish)
+	}
+	return treePaths(ctx, repo, treeish, patterns, options)
+}
+
+// grepTreePaths runs git grep -l over the tree, or, with paths, over just
+// those paths of it (literal pathspecs, a batch per invocation).
+func grepTreePaths(ctx context.Context, repo, treeish string, patterns []string, textOnly, caseSensitive bool, paths []string) ([]string, error) {
+	if paths != nil {
+		// Batches of at most 512 paths and 256 KiB of them, well under the
+		// argument limit beside the patterns.
+		const batchPaths, batchBytes = 512, 256 << 10
+		var all []string
+		for start := 0; start < len(paths); {
+			end, size := start, 0
+			for end < len(paths) && end-start < batchPaths && (end == start || size+len(paths[end]) <= batchBytes) {
+				size += len(paths[end]) + len(":(literal)") + 1
+				end++
+			}
+			found, err := grepTreePathsIn(ctx, repo, treeish, patterns, textOnly, caseSensitive, paths[start:end])
+			if err != nil {
+				return nil, err
+			}
+			all = append(all, found...)
+			start = end
+		}
+		return all, nil
+	}
+	return grepTreePathsIn(ctx, repo, treeish, patterns, textOnly, caseSensitive, nil)
+}
+
+func grepTreePathsIn(ctx context.Context, repo, treeish string, patterns []string, textOnly, caseSensitive bool, pathspecs []string) ([]string, error) {
 	if strings.HasPrefix(treeish, "-") || strings.ContainsRune(treeish, '\x00') {
 		return nil, fmt.Errorf("invalid git grep treeish %q", treeish)
 	}
@@ -1171,6 +1208,9 @@ func grepTreePaths(ctx context.Context, repo, treeish string, patterns []string,
 		args = append(args, treeish)
 	}
 	args = append(args, "--")
+	for _, path := range pathspecs {
+		args = append(args, ":(literal)"+path)
+	}
 	cmd := newGitCmdWithCallerLocale(ctx, repo, args...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

@@ -1,6 +1,8 @@
 package sem
 
 import (
+	"reflect"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -382,18 +384,30 @@ func searchCandidateConstraintMayMatch(candidate searchCandidate, constraints se
 	return false
 }
 
+// searchCandidateAgreementResult is one candidate's agreement with one set of
+// constraints. Keeping the result, not the surface it was computed from,
+// keeps a search's memory flat: a surface holds every word of the
+// candidate's text, and a broad search ranks thousands of candidates, some
+// of them whole files (measured: 4.7 of a 5 GB heap).
+type searchCandidateAgreementResult struct {
+	constraints searchConstraints
+	bonus       float64
+	signals     []string
+}
+
 func searchCandidateAgreementCached(candidate *searchCandidate, constraints searchConstraints) (float64, []string) {
 	if !searchConstraintsRequireAgreement(constraints) {
 		return 0, nil
 	}
-	if candidate.constraintSurface == nil {
-		if !searchCandidateConstraintMayMatch(*candidate, constraints) {
-			return 0, nil
-		}
-		surface := buildSearchCandidateConstraintSurface(*candidate)
-		candidate.constraintSurface = &surface
+	if cached := candidate.agreement; cached != nil && reflect.DeepEqual(cached.constraints, constraints) {
+		return cached.bonus, slices.Clone(cached.signals)
 	}
-	return searchCandidateAgreementSurface(*candidate.constraintSurface, constraints)
+	if !searchCandidateConstraintMayMatch(*candidate, constraints) {
+		return 0, nil
+	}
+	bonus, signals := searchCandidateAgreementSurface(buildSearchCandidateConstraintSurface(*candidate), constraints)
+	candidate.agreement = &searchCandidateAgreementResult{constraints: constraints, bonus: bonus, signals: slices.Clone(signals)}
+	return bonus, signals
 }
 
 func searchCandidateAgreement(candidate searchCandidate, constraints searchConstraints) (float64, []string) {

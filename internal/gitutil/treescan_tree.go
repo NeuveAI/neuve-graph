@@ -23,6 +23,11 @@ const TreeScanRouteTextIndex = "text-index"
 // platforms without the system regex engine.
 const TreeScanRouteGitGrep = "git-tree-grep"
 
+// TreeScanRoutePaths names ScanTreePaths's one-pass route: git grep -l's
+// files, read once for every pattern, git asked only for the files holding
+// non-ASCII bytes that no ASCII pattern matched.
+const TreeScanRoutePaths = "tree-scan-paths"
+
 // TreeScanStats reports what one first-line tree scan did.
 type TreeScanStats struct {
 	Route         string
@@ -43,6 +48,9 @@ type TreeScanStats struct {
 	TextIndexCandidates int
 	TextIndexExcluded   int
 	FallbackReason      string
+	// Deferred counts the files a path scan left to git: holding non-ASCII
+	// bytes, and matched by no ASCII pattern (scanTreePaths).
+	Deferred int
 }
 
 // TreeScanCandidates narrows a scan through a text index: for blobs and

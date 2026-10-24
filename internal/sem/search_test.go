@@ -1177,7 +1177,7 @@ func TestCommittedPreselectionRequiresExactFullPreindexForUnboundedCandidates(t 
 	if warm.Stats.FilesIndexed != eligibleFiles {
 		t.Fatalf("warm committed preselection indexed %d files, want every one of %d eligible files", warm.Stats.FilesIndexed, eligibleFiles)
 	}
-	if warm.Stats.PreselectionBackend != "git-tree-grep" || warm.Stats.PreselectionPasses != 1 ||
+	if !committedTreeFileRoute(warm.Stats.PreselectionBackend) || warm.Stats.PreselectionPasses != 1 ||
 		warm.Stats.PreselectionFilesExamined != warm.Stats.FilesScanned {
 		t.Fatalf("warm Git scan was not represented honestly: %#v", warm.Stats)
 	}
@@ -3234,4 +3234,11 @@ func TestSearchPreindexedAliasAboveLoweredParseLimit(t *testing.T) {
 	if len(response.Results) == 0 || response.Results[0].FilePath != "value.go" {
 		t.Fatalf("lost lexical result above lowered parse limit: %#v", response.Results)
 	}
+}
+
+// committedTreeFileRoute reports whether a committed search's files came from
+// the whole-tree file route: git grep's own, or the one-pass scan that answers
+// what it answers (where git has PCRE2).
+func committedTreeFileRoute(backend string) bool {
+	return backend == "git-tree-grep" || backend == gitutil.TreeScanRoutePaths
 }

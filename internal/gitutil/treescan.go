@@ -47,6 +47,11 @@ func scanTreeFirstPatternLines(ctx context.Context, repo, treeish string, patter
 	if len(patterns) == 0 {
 		return TreeScanStats{Route: TreeScanRouteOnePass}, nil // git grep is never started
 	}
+	for _, pattern := range patterns {
+		if strings.IndexByte(pattern, 0) >= 0 {
+			return TreeScanStats{}, fmt.Errorf("git grep pattern contains a NUL byte")
+		}
+	}
 	plan, err := newTreeScanPlan(gitPatternFileLines(patterns))
 	if err != nil {
 		return TreeScanStats{}, err
@@ -86,7 +91,7 @@ func scanTreeFirstPatternLines(ctx context.Context, repo, treeish string, patter
 		needed[entry.oid] = true
 		blobs = append(blobs, entry.oid)
 	}
-	answers, err := answerBlobs(ctx, repo, blobs, plan, options, &stats)
+	answers, err := answerBlobs(ctx, repo, blobs, plan, options, &stats, true)
 	if err != nil {
 		return stats, err
 	}
@@ -115,7 +120,7 @@ func scanTreeFirstPatternLines(ctx context.Context, repo, treeish string, patter
 // pattern it lacks answers for; a pattern another process holds is waited
 // for, and the blobs that need only such patterns are scanned afterwards only
 // if that process left them unanswered.
-func answerBlobs(ctx context.Context, repo string, blobs []string, plan *treeScanPlan, options TreeScanOptions, stats *TreeScanStats) (map[string]blobAnswer, error) {
+func answerBlobs(ctx context.Context, repo string, blobs []string, plan *treeScanPlan, options TreeScanOptions, stats *TreeScanStats, lineTexts bool) (map[string]blobAnswer, error) {
 	store := options.Answers
 	// The empty tail git can report (phantomLine) belongs to a whole pattern
 	// list, not to one pattern, so such lists are never remembered.
@@ -268,6 +273,9 @@ func answerBlobs(ctx context.Context, repo string, blobs []string, plan *treeSca
 		}
 		answers[oid] = answer
 		stats.AnswerHits += len(sources) - ruledOut[oid]
+	}
+	if !lineTexts {
+		return answers, nil // only whether each pattern matched is needed
 	}
 	if err := resolveLineTexts(ctx, repo, answers, plan, stats); err != nil {
 		return nil, err
@@ -428,7 +436,22 @@ type treeScanPattern struct {
 	source  string
 	fixed   []byte // non-nil for a git-fixed pattern, matched as bytes
 	require []string
+	// icase: fixed is matched ignoring ASCII case (an icaseFixedSource).
+	icase bool
+	// highByte: a line holding any byte at or above 0x80 (highByteSource).
+	highByte bool
 }
+
+// Two kinds of pattern the scan answers besides git's own, named so no git
+// pattern can be one (git refuses a NUL byte in a pattern): a fixed string
+// matched ignoring ASCII case, and a line holding a byte at or above 0x80.
+// Like any pattern, their answers are remembered per blob.
+const (
+	icaseFixedPrefix = "\x00icase-fixed\x00"
+	highByteSource   = "\x00high-byte\x00"
+)
+
+func icaseFixedSource(pattern string) string { return icaseFixedPrefix + pattern }
 
 type treeScanPlan struct {
 	patterns []treeScanPattern
@@ -474,10 +497,24 @@ func newTreeScanPlan(patterns []string) (*treeScanPlan, error) {
 			continue
 		}
 		seen[source] = true
-		if strings.IndexByte(source, 0) >= 0 {
+		p := treeScanPattern{source: source}
+		switch {
+		case source == highByteSource:
+			p.highByte = true
+			plan.patterns = append(plan.patterns, p)
+			continue
+		case strings.HasPrefix(source, icaseFixedPrefix):
+			pattern := strings.TrimPrefix(source, icaseFixedPrefix)
+			if pattern == "" || !isASCII(pattern) || strings.IndexByte(pattern, 0) >= 0 || strings.IndexByte(pattern, '\n') >= 0 {
+				return nil, fmt.Errorf("an ASCII case-insensitive pattern must be ASCII, without NUL or LF")
+			}
+			p.icase, p.fixed = true, []byte(asciiOnlyLower(pattern))
+			p.require = []string{asciiOnlyLower(pattern)}
+			plan.patterns = append(plan.patterns, p)
+			continue
+		case strings.IndexByte(source, 0) >= 0:
 			return nil, fmt.Errorf("git grep pattern contains a NUL byte")
 		}
-		p := treeScanPattern{source: source}
 		if isGitFixedPattern(source) {
 			plan.hasFixed = true
 			p.fixed = []byte(source)
@@ -503,7 +540,7 @@ func newTreeScanPlan(patterns []string) (*treeScanPlan, error) {
 	release := scanThread()
 	defer release()
 	for _, p := range plan.patterns {
-		if p.fixed != nil {
+		if p.fixed != nil || p.highByte {
 			continue
 		}
 		re, err := compilePOSIXRegex(p.source)
@@ -521,6 +558,35 @@ func newTreeScanPlan(patterns []string) (*treeScanPlan, error) {
 // isGitFixedPattern is grep.c's is_fixed: no byte of `$()*+.?[\^{|`.
 func isGitFixedPattern(pattern string) bool {
 	return !strings.ContainsAny(pattern, "$()*+.?[\\^{|")
+}
+
+// containsFoldASCII reports whether line holds lower, a lowercase ASCII
+// string, ignoring ASCII case.
+func containsFoldASCII(line, lower []byte) bool {
+	if len(lower) == 0 {
+		return true
+	}
+	first := lower[0]
+	upper := first
+	if first >= 'a' && first <= 'z' {
+		upper = first - ('a' - 'A')
+	}
+	for i := 0; i+len(lower) <= len(line); i++ {
+		if c := line[i]; c != first && c != upper {
+			continue
+		}
+		match := true
+		for k := 1; k < len(lower); k++ {
+			if foldASCII(line[i+k]) != lower[k] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }
 
 func isASCII(s string) bool {
@@ -552,7 +618,7 @@ type blobScanner struct {
 func newBlobScanner(plan *treeScanPlan) (*blobScanner, error) {
 	s := &blobScanner{plan: plan, regexes: make([]*posixRegex, len(plan.patterns)), marked: make([]int, len(plan.patterns))}
 	for i, p := range plan.patterns {
-		if p.fixed != nil {
+		if p.fixed != nil || p.highByte {
 			continue
 		}
 		re, err := compilePOSIXRegex(p.source)
@@ -574,7 +640,19 @@ func (s *blobScanner) free() {
 }
 
 func (s *blobScanner) matches(pattern int, line []byte) bool {
-	if fixed := s.plan.patterns[pattern].fixed; fixed != nil {
+	p := &s.plan.patterns[pattern]
+	switch {
+	case p.highByte:
+		for _, c := range line {
+			if c >= 0x80 {
+				return true
+			}
+		}
+		return false
+	case p.icase:
+		return containsFoldASCII(line, p.fixed)
+	}
+	if fixed := p.fixed; fixed != nil {
 		return bytes.Contains(line, fixed)
 	}
 	return s.regexes[pattern].match(line)

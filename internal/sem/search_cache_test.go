@@ -925,7 +925,7 @@ func TestWarmNoHitSearchPreservesCachedGraphHealth(t *testing.T) {
 	if response.Stats.QueryFilesRead != 0 || response.Stats.QueryBytesRead != 0 {
 		t.Fatalf("no-hit search read repository content: %#v", response.Stats)
 	}
-	if response.Stats.PreselectionBackend != "git-tree-grep" || response.Stats.PreselectionPasses != 1 ||
+	if !committedTreeFileRoute(response.Stats.PreselectionBackend) || response.Stats.PreselectionPasses != 1 ||
 		response.Stats.PreselectionFilesExamined != response.Stats.FilesScanned {
 		t.Fatalf("no-hit Git full-tree work was hidden by zero blob hydration: %#v", response.Stats)
 	}

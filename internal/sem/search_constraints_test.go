@@ -121,7 +121,10 @@ func TestSearchCandidateAgreementSurfacePreservesConstraintSemantics(t *testing.
 	}
 }
 
-func TestScoreSearchCandidatesUsesPrebuiltConstraintSurfaceWithoutChangingResults(t *testing.T) {
+// A candidate's agreement is computed once per constraints and kept as its
+// result: scoring again from it gives what scoring afresh gives, and other
+// constraints are computed afresh.
+func TestCandidateAgreementIsKeptAsItsResult(t *testing.T) {
 	q := buildSearchQuery(`What book did Avery recommend?`)
 	base := searchCandidate{
 		result: SearchResult{
@@ -136,21 +139,23 @@ func TestScoreSearchCandidatesUsesPrebuiltConstraintSurfaceWithoutChangingResult
 		termCounts: map[string]int{"avery": 1, "book": 1, "recommend": 1},
 		docLength:  4,
 	}
-	legacy := []searchCandidate{base}
-	optimized := []searchCandidate{base}
-	surface := buildSearchConstraintSurface(
-		base.result.SymbolName,
-		base.result.QualifiedName,
-		base.result.Signature,
-		base.result.Snippet,
-		strings.Join(base.aliases, "\n"),
-	)
-	optimized[0].constraintSurface = &surface
-
-	scoreSearchCandidates(legacy, q, map[string]int{"avery": 1, "book": 1, "recommend": 1}, 1)
-	scoreSearchCandidates(optimized, q, map[string]int{"avery": 1, "book": 1, "recommend": 1}, 1)
-	if !reflect.DeepEqual(optimized, legacy) {
-		t.Fatalf("prebuilt surface changed scored candidate:\noptimized = %#v\nlegacy = %#v", optimized, legacy)
+	fileDF := map[string]int{"avery": 1, "book": 1, "recommend": 1}
+	fresh := []searchCandidate{base}
+	scoreSearchCandidates(fresh, q, fileDF, 1)
+	if fresh[0].agreement == nil || fresh[0].agreement.bonus == 0 {
+		t.Fatalf("the fixture's agreement was not computed and kept: %#v", fresh[0].agreement)
+	}
+	again := []searchCandidate{base}
+	again[0].agreement = fresh[0].agreement
+	scoreSearchCandidates(again, q, fileDF, 1)
+	if !reflect.DeepEqual(again, fresh) {
+		t.Fatalf("scoring from the kept agreement changed the candidate:\n kept = %#v\nfresh = %#v", again, fresh)
+	}
+	other := buildSearchQuery(`Which title did Morgan suggest?`).constraints
+	bonus, signals := searchCandidateAgreementCached(&again[0], other)
+	wantBonus, wantSignals := searchCandidateAgreementSurface(buildSearchCandidateConstraintSurface(base), other)
+	if bonus != wantBonus || !reflect.DeepEqual(signals, wantSignals) {
+		t.Fatalf("other constraints answered %v %v from the kept result, want %v %v", bonus, signals, wantBonus, wantSignals)
 	}
 }
 
@@ -223,8 +228,8 @@ func TestSearchCandidateAgreementSkipsSurfaceForProvenMiss(t *testing.T) {
 	if bonus != 0 || len(signals) != 0 {
 		t.Fatalf("agreement = %f %v, want zero", bonus, signals)
 	}
-	if candidate.constraintSurface != nil {
-		t.Fatal("proven miss allocated a constraint surface")
+	if candidate.agreement != nil {
+		t.Fatal("a proven miss kept an agreement: it is recomputed, as the text may change")
 	}
 }
 
@@ -267,7 +272,7 @@ func BenchmarkSearchCandidateAgreement(b *testing.B) {
 			b.ResetTimer()
 			for iteration := 0; iteration < b.N; iteration++ {
 				for index := range candidates {
-					candidates[index].constraintSurface = nil
+					candidates[index].agreement = nil
 					searchCandidateAgreementCached(&candidates[index], constraints)
 				}
 			}
