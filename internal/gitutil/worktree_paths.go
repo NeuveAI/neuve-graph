@@ -643,6 +643,7 @@ func stopPathOutputCommand(cmd *exec.Cmd, stdout io.Closer, job pathOutputJob) {
 	done := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
+		abandonedCmds.Delete(cmd) // its state is written: readable again
 		close(done)
 	}()
 
@@ -676,6 +677,8 @@ func stopPathOutputCommand(cmd *exec.Cmd, stdout io.Closer, job pathOutputJob) {
 		select {
 		case <-done:
 		case <-finalTimer.C:
+			// Still being waited for when this returns: its CPU is never read.
+			abandonChildCPU(cmd)
 		}
 	}
 }

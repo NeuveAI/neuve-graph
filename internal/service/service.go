@@ -381,8 +381,12 @@ func CallStarting(ctx context.Context, socket string, start func() (*os.Process,
 	// A service that exits at once with success found another still holding
 	// the socket (one exiting idle); a couple of attempts outlast it.
 	for attempt := 0; attempt < 3; attempt++ {
-		if response, err := Call(ctx, socket, request); !errors.Is(err, ErrUnreachable) {
-			return response, err
+		// A service another caller started meanwhile: let the next caller in
+		// before waiting for this answer.
+		if conn, err := net.Dial("unix", socket); err == nil {
+			conn.Close()
+			lock.Close()
+			return Call(ctx, socket, request)
 		}
 		if startFailedRecently(socket) {
 			break
@@ -403,6 +407,9 @@ func CallStarting(ctx context.Context, socket string, start func() (*os.Process,
 		}()
 		switch waitForService(ctx, socket, exited) {
 		case serviceListening:
+			// Let the next caller in before waiting for this answer: the start
+			// lock covers starting the service, not the search.
+			lock.Close()
 			return Call(ctx, socket, request)
 		case serviceStepAside:
 			time.Sleep(50 * time.Millisecond)

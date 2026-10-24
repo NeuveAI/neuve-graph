@@ -25,7 +25,7 @@ import (
 const (
 	envService            = "ENTIRE_GRAPH_SERVICE"             // "auto" forwards eligible commands; "require" never falls back
 	envServiceIdle        = "ENTIRE_GRAPH_SERVICE_IDLE"        // seconds before an idle service exits (60)
-	envServiceConcurrency = "ENTIRE_GRAPH_SERVICE_CONCURRENCY" // commands run at once (1)
+	envServiceConcurrency = "ENTIRE_GRAPH_SERVICE_CONCURRENCY" // reads run at once (2)
 	envServiceSnapshots   = "ENTIRE_GRAPH_SERVICE_SNAPSHOTS"   // decoded snapshots kept (2)
 
 	// A call's class and deadline, set per call; they order the service's
@@ -233,7 +233,10 @@ func runService(ctx context.Context, opts Options, args []string) error {
 		}
 	}
 	serveOptions := service.ServeOptions{
-		Concurrency: positiveSetting(envServiceConcurrency, 1),
+		// Two reads at once: measured on the Neuve repository, 1.55 times
+		// the throughput of one for about 3.7 cores in all, where four gave
+		// 1.9 times for 5 cores and doubled the slowest search.
+		Concurrency: positiveSetting(envServiceConcurrency, 2),
 		Idle:        time.Duration(positiveSetting(envServiceIdle, 60)) * time.Second,
 		Build:       build,
 		Deliver:     deliverServiceResponse,
@@ -253,6 +256,9 @@ func runService(ctx context.Context, opts Options, args []string) error {
 			cacheDirsMu.Unlock()
 		}
 		report := newServiceReport(true, "")
+		requestCtx, report.children = gitutil.WithChildCPU(requestCtx)
+		beginServiceRead(report)
+		defer endServiceRead(report)
 		started := time.Now()
 		panicked := false
 		// Deferred first so it runs last, after a panic became a Retry.
@@ -332,10 +338,14 @@ func logServiceRead(socket string, request service.Request, report *serviceRepor
 		TotalMS   int64  `json:"total_ms"`
 		// IdleBeforeMS is how long the service had been idle when this
 		// read's first caller arrived: the gaps the idle exit is set from.
-		IdleBeforeMS int64             `json:"idle_before_ms"`
-		KeptBytes    int64             `json:"kept_bytes"`
-		Service      *sem.ServiceStats `json:"service"`
-	}{time.Now().UTC().Format(time.RFC3339Nano), request.Args[0], request.Class, response.Failed, panicked, cancelled, time.Since(started).Milliseconds(), request.IdleBefore.Milliseconds(), service.KeptBytes(), stats})
+		IdleBeforeMS int64 `json:"idle_before_ms"`
+		KeptBytes    int64 `json:"kept_bytes"`
+		// The process's own CPU over this read's window, which a shared
+		// read's CPU fields are its share of.
+		ProcessCPUUserMS   int64             `json:"process_cpu_user_ms"`
+		ProcessCPUSystemMS int64             `json:"process_cpu_system_ms"`
+		Service            *sem.ServiceStats `json:"service"`
+	}{time.Now().UTC().Format(time.RFC3339Nano), request.Args[0], request.Class, response.Failed, panicked, cancelled, time.Since(started).Milliseconds(), request.IdleBefore.Milliseconds(), service.KeptBytes(), report.processUser.Milliseconds(), report.processSys.Milliseconds(), stats})
 }
 
 // appendServiceLog appends one JSON line to <socket>.log.
@@ -447,7 +457,7 @@ func isExactOID(oid string) bool {
 func deliverServiceResponse(response service.Response, delivery service.Delivery) service.Response {
 	return rewriteServiceBlock(response, func(stats *sem.ServiceStats) {
 		if delivery.Joined || delivery.Kept {
-			stats.CPUUserMS, stats.CPUSystemMS = 0, 0
+			stats.CPUUserMS, stats.CPUSystemMS, stats.CPUShared = 0, 0, false
 		}
 		stats.Class = delivery.Class
 		stats.KeptAnswer = delivery.Kept
@@ -502,6 +512,14 @@ func runningBuild() (service.BuildStamp, error) {
 		return service.BuildStamp{}, errors.New("this process does not hold its executable")
 	}
 	return service.StampOf(held)
+}
+
+// processSelfCPU is the CPU this process itself has used, its children's
+// apart.
+func processSelfCPU() (user, system time.Duration) {
+	var self syscall.Rusage
+	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &self)
+	return time.Duration(self.Utime.Nano()), time.Duration(self.Stime.Nano())
 }
 
 // processCPU is the CPU this process and the children it has waited for (the

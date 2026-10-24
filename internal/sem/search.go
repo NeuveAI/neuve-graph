@@ -545,13 +545,20 @@ type ServiceStats struct {
 	SnapshotsHeld  int    `json:"snapshots_held"`
 	SnapshotsLimit int    `json:"snapshots_limit"`
 	// SnapshotHit is true when every prepared snapshot this read used was
-	// already decoded in the service's memory.
+	// already decoded in the service's memory. Counted for the whole process
+	// over the read's run, so with CPUShared it is false when any read
+	// running alongside decoded one.
 	SnapshotHit bool  `json:"snapshot_hit"`
 	CPUUserMS   int64 `json:"cpu_user_ms"`
 	CPUSystemMS int64 `json:"cpu_system_ms"`
 	// QueueWaitMS is how long this read waited in the service's queue for its
 	// task to start.
 	QueueWaitMS int64 `json:"queue_wait_ms"`
+	// CPUShared reports that other reads ran in the service while this one
+	// did, so the CPU fields are its estimated share of the process's CPU
+	// over its run (the process's CPU divided by the average number of reads
+	// running), not a measure of it alone. Absent: they are exact.
+	CPUShared bool `json:"cpu_shared,omitempty"`
 	// CacheBytes is the read's cache directory's size as last measured (by a
 	// prune or `cache usage`), and CacheCapBytes its cap.
 	CacheBytes    int64 `json:"cache_bytes"`

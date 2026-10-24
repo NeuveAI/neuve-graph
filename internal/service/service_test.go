@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -495,5 +496,51 @@ func TestStartFailuresAreQuickAndRemembered(t *testing.T) {
 	long := filepath.Join(os.TempDir(), strings.Repeat("d", 120), "s.sock")
 	if _, err := CallStarting(t.Context(), long, failing, Request{}); !errors.Is(err, ErrUnreachable) || starts != 1 {
 		t.Fatalf("an unbindable socket path was tried: %v", err)
+	}
+}
+
+// Callers that find no service and start one together do not wait for each
+// other's searches: the start lock covers the start, not the answer.
+func TestStartingCallersDoNotWaitForEachOther(t *testing.T) {
+	socket := shortSocket(t)
+	release := make(chan struct{})
+	var started sync.Once
+	serving := make(chan struct{})
+	startService := func() (*os.Process, error) {
+		started.Do(func() {
+			go func() {
+				// Up only once the second caller waits on the start lock.
+				time.Sleep(400 * time.Millisecond)
+				_ = Serve(t.Context(), socket, ServeOptions{Concurrency: 2}, func(ctx context.Context, request Request) Response {
+					if request.Args[0] == "slow" {
+						<-release
+					}
+					return Response{Stdout: []byte(request.Args[0])}
+				})
+			}()
+			close(serving)
+		})
+		// A process that stays up, standing in for the service's own.
+		standIn := exec.Command("sleep", "30")
+		if err := standIn.Start(); err != nil {
+			return nil, err
+		}
+		t.Cleanup(func() { standIn.Process.Kill() })
+		return standIn.Process, nil
+	}
+	slow := make(chan error, 1)
+	go func() {
+		_, err := CallStarting(t.Context(), socket, startService, Request{Args: []string{"slow"}})
+		slow <- err
+	}()
+	<-serving
+	time.Sleep(100 * time.Millisecond)
+	quick, err := CallStarting(t.Context(), socket, startService, Request{Args: []string{"quick"}})
+	if err != nil || string(quick.Stdout) != "quick" {
+		t.Fatalf("the second caller: %+v %v", quick, err)
+	}
+	close(release)
+	if err := <-slow; err != nil {
+		t.Fatal(err)
 	}
 }

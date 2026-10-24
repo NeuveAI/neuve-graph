@@ -13,6 +13,8 @@ func forwardToService(context.Context, []string) (bool, string, error) { return 
 
 func processCPU() (user, system time.Duration) { return 0, 0 }
 
+func processSelfCPU() (user, system time.Duration) { return 0, 0 }
+
 func runService(context.Context, Options, []string) error {
 	return errors.New("the Graph service is not available on Windows")
 }

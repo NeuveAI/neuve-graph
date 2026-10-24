@@ -3,8 +3,10 @@ package cli
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
+	"github.com/entireio/entire-graph/internal/gitutil"
 	"github.com/entireio/entire-graph/internal/sem"
 )
 
@@ -37,8 +39,78 @@ type serviceReport struct {
 	reads     int
 	hits      int
 	queueWait time.Duration
-	// stats is the block last handed out, for the service's log.
-	stats *sem.ServiceStats
+	// stats is the block last handed out, for the service's log, with the
+	// process's own CPU over the read's window, which its share comes from.
+	stats                   *sem.ServiceStats
+	processUser, processSys time.Duration
+	// For a read the service answers: the process's running reads, as
+	// read-seconds, when it began, when it began, and whether another read
+	// overlapped it.
+	activeAtStart float64
+	startedAt     time.Time
+	overlapped    bool
+	running       bool
+	// The process's own CPU, its children's apart, when the read began, and
+	// the read's own Git processes, accounted exactly.
+	selfUser, selfSys time.Duration
+	children          *gitutil.ChildCPU
+}
+
+// serviceReads accounts the reads a service process runs at once, so a
+// read's CPU, measured for the whole process, can be given as its share.
+var serviceReads = struct {
+	sync.Mutex
+	active   map[*serviceReport]bool
+	integral float64 // running reads integrated over time, in read-seconds
+	last     time.Time
+}{active: map[*serviceReport]bool{}}
+
+// advanceServiceReads brings the integral up to now. serviceReads is held.
+func advanceServiceReads(now time.Time) {
+	if !serviceReads.last.IsZero() {
+		serviceReads.integral += float64(len(serviceReads.active)) * now.Sub(serviceReads.last).Seconds()
+	}
+	serviceReads.last = now
+}
+
+// beginServiceRead counts a read the service starts running.
+func beginServiceRead(report *serviceReport) {
+	serviceReads.Lock()
+	defer serviceReads.Unlock()
+	now := time.Now()
+	advanceServiceReads(now)
+	report.selfUser, report.selfSys = processSelfCPU()
+	if len(serviceReads.active) > 0 {
+		report.overlapped = true
+		for other := range serviceReads.active {
+			other.overlapped = true
+		}
+	}
+	serviceReads.active[report] = true
+	report.activeAtStart, report.startedAt, report.running = serviceReads.integral, now, true
+}
+
+// endServiceRead stops counting a read.
+func endServiceRead(report *serviceReport) {
+	serviceReads.Lock()
+	defer serviceReads.Unlock()
+	advanceServiceReads(time.Now())
+	delete(serviceReads.active, report)
+	report.running = false
+}
+
+// readConcurrency is the average number of reads running over a read's
+// window so far, and whether another read overlapped it.
+func readConcurrency(report *serviceReport) (float64, bool) {
+	serviceReads.Lock()
+	defer serviceReads.Unlock()
+	now := time.Now()
+	advanceServiceReads(now)
+	wall := now.Sub(report.startedAt).Seconds()
+	if !report.running || wall <= 0 {
+		return 1, report.overlapped
+	}
+	return max(1, (serviceReads.integral-report.activeAtStart)/wall), report.overlapped
 }
 
 type serviceReportKey struct{}
@@ -63,6 +135,26 @@ func serviceStats(ctx context.Context, cacheDir string) *sem.ServiceStats {
 		return nil
 	}
 	user, system := processCPU()
+	report.processUser, report.processSys = user-report.cpuUser, system-report.cpuSystem
+	cpuUser, cpuSys := report.processUser, report.processSys
+	// While other reads overlap it, a read's CPU is its share of the
+	// process's: the process's CPU over its window divided by the average
+	// number of reads running then. An estimate, and flagged as one.
+	concurrency, shared := 1.0, false
+	if report.answered && report.running {
+		concurrency, shared = readConcurrency(report)
+	}
+	if shared {
+		// The process's own CPU is shared; the read's Git processes are its
+		// own, counted exactly.
+		selfUser, selfSys := processSelfCPU()
+		cpuUser = time.Duration(float64(selfUser-report.selfUser) / concurrency)
+		cpuSys = time.Duration(float64(selfSys-report.selfSys) / concurrency)
+		if report.children != nil {
+			childUser, childSys := report.children.Total()
+			cpuUser, cpuSys = cpuUser+childUser, cpuSys+childSys
+		}
+	}
 	held, limit, reads, hits := sem.SnapshotMemoryState()
 	rss, maxRSS := sem.ResidentMemory()
 	stats := &sem.ServiceStats{
@@ -73,8 +165,9 @@ func serviceStats(ctx context.Context, cacheDir string) *sem.ServiceStats {
 		SnapshotsHeld:  held,
 		SnapshotsLimit: limit,
 		SnapshotHit:    reads > report.reads && hits-report.hits == reads-report.reads,
-		CPUUserMS:      (user - report.cpuUser).Milliseconds(),
-		CPUSystemMS:    (system - report.cpuSystem).Milliseconds(),
+		CPUUserMS:      cpuUser.Milliseconds(),
+		CPUSystemMS:    cpuSys.Milliseconds(),
+		CPUShared:      shared,
 		QueueWaitMS:    report.queueWait.Milliseconds(),
 	}
 	if cacheDir != "" {

@@ -2840,6 +2840,7 @@ const (
 // constructor because the Git 2.36 compatibility floor predates that guard.
 func newGitCmdWithCallerLocale(ctx context.Context, dir string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", args...)
+	trackChildCPU(ctx, cmd)
 	cmd.Dir = dir
 	// Bound Wait when Git exits but a child process inherited one of the pipes.
 	// This matters especially on Windows, where killing Git does not necessarily
@@ -3025,6 +3026,7 @@ func gitSafeDirectoryValues(dir string) []string {
 // environment guards remain defense in depth (see noTransportProtocolEnv).
 func newCmd(ctx context.Context, dir, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
+	trackChildCPU(ctx, cmd)
 	cmd.Dir = dir
 	// Bound Wait after cancellation or process exit when a descendant retains a
 	// subprocess pipe. All production Git commands are constructed here or by
