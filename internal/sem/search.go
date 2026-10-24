@@ -560,9 +560,10 @@ type ServiceStats struct {
 	// running), not a measure of it alone. Absent: they are exact.
 	CPUShared bool `json:"cpu_shared,omitempty"`
 	// CacheBytes is the read's cache directory's size as last measured (by a
-	// prune or `cache usage`), and CacheCapBytes its cap.
-	CacheBytes    int64 `json:"cache_bytes"`
-	CacheCapBytes int64 `json:"cache_cap_bytes"`
+	// prune or `cache usage`), and CacheCapBytes its cap; both absent where
+	// not measured, as on a plan, which writes nothing.
+	CacheBytes    int64 `json:"cache_bytes,omitempty"`
+	CacheCapBytes int64 `json:"cache_cap_bytes,omitempty"`
 	// Class is the class the read's task ran at in the service (interactive
 	// or background); KeptAnswer, that the answer was kept from a task that
 	// ended before this read asked (its CPU went to the read that started
@@ -2290,7 +2291,7 @@ func openSearchContentReader(
 		// reads.
 		batch.SetMaxBytes(int64(maxBytes))
 		limited := gitutil.NewLimitedFileReader(ctx, repo, commit, int64(maxBytes))
-		read := func(path string) (string, bool) {
+		read := func(path string) (string, bool, error) {
 			if !batch.IsPathSafe(path) {
 				// Same ceiling as the batch reader above. The shared exact-object
 				// fallback exists because the batch protocol cannot carry a
@@ -2300,15 +2301,22 @@ func openSearchContentReader(
 				// bound. One reader also shares the component traversal allowance
 				// and prefix cache across all requested files.
 				result, err := limited.ReadFile(treePathPrefix + path)
-				return result.Content, err == nil && result.Status == gitutil.LimitedFileContent
+				switch {
+				case err != nil:
+					return "", false, err
+				case result.Status == gitutil.LimitedFileUnreadable || result.Status == gitutil.LimitedFileUnaddressable:
+					// This reader's own allowance or a recoverable failure, not
+					// a fact about the file: not to be kept.
+					return "", false, errors.New("limited file read did not finish")
+				}
+				return result.Content, result.Status == gitutil.LimitedFileContent, nil
 			}
-			content, ok, err := batch.ReadFile(path)
-			return content, ok && err == nil
+			return batch.ReadFile(path)
 		}
 		closeReaders := func() error {
 			return errors.Join(batch.Close(), limited.Close())
 		}
-		return read, closeReaders, nil
+		return sharedContentReader(read, commit, treePathPrefix, maxBytes), closeReaders, nil
 	}
 	opened, err := openSource(ctx, repo, "", sourceOptions{
 		ignoreFiles:  ignoreFiles,

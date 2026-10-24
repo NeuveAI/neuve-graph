@@ -634,6 +634,16 @@ func TestPreparationThroughTheService(t *testing.T) {
 		block["snapshots_held"] != nil || block["snapshots_limit"] != nil || block["cpu_shared"] != nil {
 		t.Fatalf("the preparation's block: %v", block)
 	}
+	// A plan through the service carries no cache size, which it does not
+	// measure: absent, not zero.
+	commit := revParse(t, repo, "HEAD")
+	planOut, planErr, code := run(serviceEnv, "index", "--repo", repo, "--incremental", "--commit", commit, "--profile", "syntax-only", "--plan", "--cache-dir", t.TempDir(), "--format", "json")
+	if code != 0 {
+		t.Fatalf("plan through the service exited %d: %s", code, planErr)
+	}
+	if plan := indexServiceBlock(t, planOut); plan == nil || plan["answered"] != true || plan["lane"] != "prepare" || plan["cache_bytes"] != nil || plan["cache_cap_bytes"] != nil {
+		t.Fatalf("a plan's block: %v", plan)
+	}
 	// It fails as its own process fails: the same exit status and error.
 	bad := []string{"index", "--repo", repo, "--commit", "HEAD", "--cache-dir", t.TempDir(), "--format", "json"}
 	plainOut, plainErr, plainCode := run(plainEnv, bad...)

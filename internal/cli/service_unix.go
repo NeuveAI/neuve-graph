@@ -238,6 +238,7 @@ func runService(ctx context.Context, opts Options, args []string) error {
 		return fmt.Errorf("the Graph service cannot name its own build: %w", err)
 	}
 	sem.EnableSnapshotMemory(positiveSetting(envServiceSnapshots, 2))
+	sem.EnableSharedCaches(true)
 	// The cache directories the service read from since it was last idle; it
 	// keeps each within its bounds when idle.
 	var cacheDirsMu sync.Mutex
@@ -466,12 +467,15 @@ func logServiceRead(socket string, request service.Request, report *serviceRepor
 		// read's first caller arrived: the gaps the idle exit is set from.
 		IdleBeforeMS int64 `json:"idle_before_ms"`
 		KeptBytes    int64 `json:"kept_bytes"`
+		// The caches searches at one base share: each one's bytes, hits
+		// and misses since the service started.
+		SharedCaches map[string]sem.SharedCacheStats `json:"shared_caches,omitempty"`
 		// The process's own CPU over this read's window, which a shared
 		// read's CPU fields are its share of.
 		ProcessCPUUserMS   int64             `json:"process_cpu_user_ms"`
 		ProcessCPUSystemMS int64             `json:"process_cpu_system_ms"`
 		Service            *sem.ServiceStats `json:"service"`
-	}{time.Now().UTC().Format(time.RFC3339Nano), request.Args[0], request.Class, response.Failed, panicked, cancelled, time.Since(started).Milliseconds(), request.IdleBefore.Milliseconds(), service.KeptBytes(), report.processUser.Milliseconds(), report.processSys.Milliseconds(), stats})
+	}{time.Now().UTC().Format(time.RFC3339Nano), request.Args[0], request.Class, response.Failed, panicked, cancelled, time.Since(started).Milliseconds(), request.IdleBefore.Milliseconds(), service.KeptBytes(), sem.SharedCachesState(), report.processUser.Milliseconds(), report.processSys.Milliseconds(), stats})
 }
 
 // appendServiceLog appends one JSON line to <socket>.log.

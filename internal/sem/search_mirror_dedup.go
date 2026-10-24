@@ -76,7 +76,7 @@ func searchMirrorFingerprint(result SearchResult, symbolsByID map[string]SymbolR
 	// The signature only ever groups candidates by equality, and some are
 	// whole regions: the fingerprint holds its normalized form's SHA-256,
 	// streamed, not that form.
-	signature := normalizedDigest(result.Signature)
+	signature := sharedNormalizedDigest(result.Signature)
 	if symbol, ok := symbolsByID[result.SymbolID]; ok {
 		if language == "" {
 			language = strings.ToLower(strings.TrimSpace(symbol.Language))
@@ -91,7 +91,7 @@ func searchMirrorFingerprint(result SearchResult, symbolsByID map[string]SymbolR
 			}
 		}
 		if signature == "" {
-			signature = normalizedDigest(symbol.Signature)
+			signature = sharedNormalizedDigest(symbol.Signature)
 		}
 		// BodyHash is the parser's exact normalized implementation identity. A
 		// few declaration kinds do not expose a useful signature, but language,
