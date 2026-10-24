@@ -611,19 +611,17 @@ func searchCandidateAgreementFromLines(candidate *searchCandidate, constraints s
 	if !searchConstraintMayMatchWith(contains, constraints) {
 		return 0, nil, false, true
 	}
-	var words, raw []string
+	var words []string
 	for _, piece := range pieces {
 		words = append(words, piece.words...)
-		raw = append(raw, piece.raw...)
 	}
+	// An entity is found when some piece's words or tokens hold it; each
+	// piece's entities are found once (entityHits), not again for every
+	// candidate holding the piece.
 	found := make([]bool, len(constraints.Entities))
-	wanted := map[string][]int{}
-	for index, entity := range constraints.Entities {
-		wanted[entity.Normalized] = append(wanted[entity.Normalized], index)
-	}
-	for _, tokens := range [][]string{words, raw} {
-		for _, token := range tokens {
-			for _, index := range wanted[token] {
+	if len(constraints.Entities) > 0 {
+		for _, piece := range pieces {
+			for _, index := range cache.entityHits(piece, constraints.Entities) {
 				found[index] = true
 			}
 		}

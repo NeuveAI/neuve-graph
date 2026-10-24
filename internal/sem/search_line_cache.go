@@ -1,6 +1,7 @@
 package sem
 
 import (
+	"slices"
 	"strings"
 	"unsafe"
 )
@@ -34,6 +35,51 @@ type searchLineCache struct {
 	weights []float64
 	matches []bool
 	done    []uint8
+	// entityWanted maps each normalized entity of entityKey's constraints to
+	// its indexes (entityHits).
+	entityKey    searchEntityKey
+	entityWanted map[string][]int
+}
+
+// searchEntityKey names a constraints' entity slice: the same slice, not
+// merely an equal one.
+type searchEntityKey struct {
+	first *searchEntityConstraint
+	count int
+}
+
+func searchEntityKeyOf(entities []searchEntityConstraint) searchEntityKey {
+	if len(entities) == 0 {
+		return searchEntityKey{}
+	}
+	return searchEntityKey{first: &entities[0], count: len(entities)}
+}
+
+// entityHits is the indexes of entities whose normalized form is one of
+// piece's words or tokens, found once per piece and entity slice.
+func (c *searchLineCache) entityHits(piece *searchLineTokens, entities []searchEntityConstraint) []int {
+	key := searchEntityKeyOf(entities)
+	if piece.entitiesDone && piece.entityKey == key {
+		return piece.entityHits
+	}
+	if c.entityWanted == nil || c.entityKey != key {
+		c.entityKey, c.entityWanted = key, make(map[string][]int, len(entities))
+		for index, entity := range entities {
+			c.entityWanted[entity.Normalized] = append(c.entityWanted[entity.Normalized], index)
+		}
+	}
+	var hits []int
+	for _, tokens := range [][]string{piece.words, piece.raw} {
+		for _, token := range tokens {
+			for _, index := range c.entityWanted[token] {
+				if !slices.Contains(hits, index) {
+					hits = append(hits, index)
+				}
+			}
+		}
+	}
+	piece.entityKey, piece.entityHits, piece.entitiesDone = key, hits, true
+	return hits
 }
 
 const (
@@ -147,6 +193,10 @@ type searchLineTokens struct {
 	words []string
 	raw   []string
 	lower string
+	// The entities of entityKey's constraints this piece holds (entityHits).
+	entityKey    searchEntityKey
+	entityHits   []int
+	entitiesDone bool
 }
 
 // constraintTokens is a line's searchLineTokens, split once per file however

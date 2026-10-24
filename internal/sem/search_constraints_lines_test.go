@@ -44,7 +44,7 @@ func TestAgreementFromLinesIsTheSurfaces(t *testing.T) {
 		`Größe of the café file`,
 	}
 	rng := rand.New(rand.NewSource(5))
-	checked, matched := 0, 0
+	checked, matched, reusedEntities := 0, 0, 0
 	for _, lines := range files {
 		var vocabulary []string
 		for _, line := range lines {
@@ -80,6 +80,7 @@ func TestAgreementFromLinesIsTheSurfaces(t *testing.T) {
 			constraintSets = append(constraintSets, c)
 		}
 		cache := newSearchLineCache(buildSearchQuery("book"), lines)
+		var candidates []searchCandidate
 		for range 80 {
 			start := 1 + rng.Intn(len(lines))
 			end := min(len(lines), start+rng.Intn(60))
@@ -95,6 +96,7 @@ func TestAgreementFromLinesIsTheSurfaces(t *testing.T) {
 				aliases:   [][]string{nil, {"avery", "Book"}, {"café"}}[rng.Intn(3)],
 				lineCache: cache,
 			}
+			candidates = append(candidates, candidate)
 			for _, constraints := range constraintSets {
 				if !searchConstraintsRequireAgreement(constraints) {
 					continue
@@ -113,9 +115,28 @@ func TestAgreementFromLinesIsTheSurfaces(t *testing.T) {
 				}
 			}
 		}
+		// As a search runs it: one set of constraints over every candidate of
+		// the file, so the lines' and parts' entities found for one candidate
+		// are reused for the next.
+		for _, constraints := range constraintSets {
+			if !searchConstraintsRequireAgreement(constraints) {
+				continue
+			}
+			for index := range candidates {
+				candidate := candidates[index]
+				bonus, signals, mayMatch, _ := searchCandidateAgreementFromLines(&candidate, constraints)
+				wantBonus, wantSignals, wantMay := oldAgreement(candidate, constraints)
+				if bonus != wantBonus || !reflect.DeepEqual(signals, wantSignals) || mayMatch != wantMay {
+					t.Fatalf("one search over the file, constraints %+v:\n got %v %v %v\nwant %v %v %v", constraints, bonus, signals, mayMatch, wantBonus, wantSignals, wantMay)
+				}
+				if bonus > 0 && len(constraints.Entities) > 0 {
+					reusedEntities++
+				}
+			}
+		}
 	}
-	if checked == 0 || matched == 0 {
-		t.Fatalf("compared %d agreements, %d of them nonzero", checked, matched)
+	if checked == 0 || matched == 0 || reusedEntities == 0 {
+		t.Fatalf("compared %d agreements, %d of them nonzero, %d with entities in one search's order", checked, matched, reusedEntities)
 	}
 	// A snippet that is not its lines joined is left to the old path.
 	candidate := searchCandidate{result: SearchResult{Snippet: "edited", SnippetStartLine: 1, SnippetEndLine: 1}, lineCache: newSearchLineCache(buildSearchQuery("x"), []string{"original"})}
