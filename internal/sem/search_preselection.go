@@ -286,17 +286,86 @@ func searchFileConstraintEvidence(content string, q searchConstraints) float64 {
 		return 0
 	}
 	words := searchQueryWordSequence(strings.ToLower(content))
-	whole := searchConstraintWholeTokens(content, words)
 	score := 0.0
-	for _, entity := range q.Entities {
-		if whole[entity.Normalized] {
+	for _, found := range searchEntitiesAsWholeTokens(content, words, q.Entities) {
+		if found {
 			score++
 		}
 	}
+	// The words already split above: orderedSearchPhraseMatch would split
+	// the same lowered content again for every phrase.
 	for _, phrase := range q.Phrases {
-		if orderedSearchPhraseMatch(content, phrase) {
+		if searchOrderedPhraseMatch(words, phrase.Words, 0, false) {
 			score += 2
 		}
 	}
 	return score
+}
+
+// searchEntitiesAsWholeTokens reports, per entity, what
+// searchConstraintWholeTokens(content, words)[entity.Normalized] answers,
+// without building that map of every token of the file: whether the entity
+// is one of the words, or one of searchWordPattern's tokens lowered.
+func searchEntitiesAsWholeTokens(content string, words []string, entities []searchEntityConstraint) []bool {
+	found := make([]bool, len(entities))
+	if len(entities) == 0 {
+		return found
+	}
+	wanted := make(map[string][]int, len(entities))
+	longest := 0
+	for index, entity := range entities {
+		wanted[entity.Normalized] = append(wanted[entity.Normalized], index)
+		longest = max(longest, len(entity.Normalized))
+	}
+	left := len(entities)
+	mark := func(token string) {
+		for _, index := range wanted[token] {
+			if !found[index] {
+				found[index] = true
+				left--
+			}
+		}
+	}
+	for _, word := range words {
+		if left == 0 {
+			return found
+		}
+		mark(word)
+	}
+	// searchWordPattern's class is ASCII bytes only, so its matches are the
+	// maximal runs of those bytes: any other byte, a non-ASCII rune's or an
+	// invalid one, ends a run.
+	var lowered []byte
+	for start := 0; start < len(content) && left > 0; {
+		if !searchWordByte(content[start]) {
+			start++
+			continue
+		}
+		end := start + 1
+		for end < len(content) && searchWordByte(content[end]) {
+			end++
+		}
+		if end-start <= longest {
+			lowered = lowered[:0]
+			for index := start; index < end; index++ {
+				lowered = append(lowered, lowerASCII(content[index]))
+			}
+			if indexes, ok := wanted[string(lowered)]; ok { // no copy: a map index
+				for _, index := range indexes {
+					if !found[index] {
+						found[index] = true
+						left--
+					}
+				}
+			}
+		}
+		start = end
+	}
+	return found
+}
+
+// searchWordByte is the byte class of searchWordPattern, [[:alnum:]_./:+#-].
+func searchWordByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+		c == '_' || c == '.' || c == '/' || c == ':' || c == '+' || c == '#' || c == '-'
 }
