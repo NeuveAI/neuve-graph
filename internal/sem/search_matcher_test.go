@@ -8,14 +8,15 @@ import (
 
 // The matcher's table answers as strings.Contains on the lowered text does,
 // for every lower-case term: overlapping terms, terms inside one another,
-// upper-case and non-ASCII text (the Kelvin sign lowers to an ASCII k),
-// invalid UTF-8, and non-ASCII terms.
+// upper-case and non-ASCII text (the Kelvin sign lowers to an ASCII k, the
+// dotted capital I to an ASCII i), invalid and cut-short UTF-8, and non-ASCII
+// terms.
 func TestSearchTermMatcherIsContainsOnTheLoweredText(t *testing.T) {
-	terms := []string{"he", "she", "his", "hers", "k", "kelvin", "ab", "abab", "b", "bab", "é", "straße", "x_y", "a.b", "hers", "zzz"}
-	alphabet := []string{"a", "b", "h", "e", "s", "r", "i", "K", "H", "E", "K", "é", "É", "ß", "x", "_", "y", ".", " ", "\xff", "elvin", "STRASSE"}
+	terms := []string{"he", "she", "his", "hers", "k", "kelvin", "ish", "iis", "ab", "abab", "b", "bab", "é", "straße", "x_y", "a.b", "hers", "zzz"}
+	alphabet := []string{"a", "b", "h", "e", "s", "r", "i", "K", "H", "E", "K", "é", "É", "ß", "\u0130", "x", "_", "y", ".", " ", "\xff", "\xe2\x82", "elvin", "STRASSE"}
 	random := rand.New(rand.NewSource(7))
 	matcher := newSearchTermMatcher(terms)
-	for round := 0; round < 4000; round++ {
+	for round := 0; round < 20000; round++ {
 		var text strings.Builder
 		for length := random.Intn(24); length > 0; length-- {
 			text.WriteString(alphabet[random.Intn(len(alphabet))])

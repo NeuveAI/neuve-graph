@@ -1,6 +1,10 @@
 package sem
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+	"unicode/utf8"
+)
 
 // searchTermMatcher is a compact ASCII case-insensitive Aho-Corasick matcher.
 // Issue and source identifiers are overwhelmingly ASCII; uncommon non-ASCII
@@ -155,25 +159,35 @@ func (matcher searchTermMatcher) match(text string) []bool {
 // lowered text contains: strings.Contains(strings.ToLower(text), term) for a
 // non-empty term. found holds a slot per term and starts false.
 func (matcher searchTermMatcher) matchTerms(text string, found []bool) {
-	scanText := text
-	if !asciiString(text) {
-		scanText = strings.ToLower(text)
-	}
 	remaining := matcher.termCount - len(matcher.fallback)
 	state := int32(0)
 	table := matcher.table
-	for offset := 0; offset < len(scanText) && remaining > 0; offset++ {
-		character := scanText[offset]
-		if character >= 128 {
-			state = 0
-			continue
-		}
+	step := func(character byte) {
 		state = table[state<<7|int32(character)]
 		for _, index := range matcher.nodes[state].outputs {
 			if !found[index] {
 				found[index] = true
 				remaining--
 			}
+		}
+	}
+	// The lowered text, a rune at a time without building it: strings.ToLower
+	// maps each rune by unicode.ToLower and an invalid byte to U+FFFD. A
+	// non-ASCII rune that lowers to ASCII (the Kelvin sign to k) is that byte;
+	// any other lowers to bytes of 128 or above, which no term in the table
+	// holds, so the scan starts over after it.
+	for offset := 0; offset < len(text) && remaining > 0; {
+		if character := text[offset]; character < utf8.RuneSelf {
+			step(character)
+			offset++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(text[offset:])
+		offset += size
+		if lower := unicode.ToLower(r); lower < utf8.RuneSelf {
+			step(byte(lower))
+		} else {
+			state = 0
 		}
 	}
 	if len(matcher.fallback) > 0 {
