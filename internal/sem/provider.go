@@ -3923,7 +3923,7 @@ func resolvePythonAliasImportTargets(local string, from SymbolRecord, contexts [
 // in `import { exported as local }` and cannot find candidates under that name;
 // the module path remains authoritative when the workspace contains another
 // declaration with the exported member's name.
-func resolveJavaScriptAliasImportTargets(local string, from SymbolRecord, bindings []jsImportBinding, symbolsByShortName map[string][]SymbolRecord, importingPath string, manifestImports manifestImportResolver, knownFiles map[string]bool, readContent contentReader) (targets []resolvedCallTarget, external []RelationRecord, handled bool) {
+func resolveJavaScriptAliasImportTargets(local string, from SymbolRecord, bindings []jsImportBinding, symbolsByShortName map[string][]SymbolRecord, importingPath string, manifestImports manifestImportResolver, knownFiles map[string]bool, readContent contentReader, modules *jsModuleFacts) (targets []resolvedCallTarget, external []RelationRecord, handled bool) {
 	seen := map[string]bool{}
 	for _, binding := range bindings {
 		if binding.Namespace || binding.Imported == "" || binding.Imported == "default" || binding.Imported == local {
@@ -3932,7 +3932,7 @@ func resolveJavaScriptAliasImportTargets(local string, from SymbolRecord, bindin
 		handled = true
 		imports := resolvedImportedNameModules(importingPath, map[string][]string{
 			binding.Imported: {binding.Module},
-		}, manifestImports, knownFiles, readContent)
+		}, manifestImports, knownFiles, readContent, modules)
 		resolved := resolveImportedCallTargets(binding.Imported, from, sharedTypeCandidates(from, symbolsByShortName[binding.Imported]), imports, false)
 		if len(resolved) == 0 {
 			resolved, _ = resolveUniqueRawImportedCallTarget(binding.Imported, from, symbolsByShortName[binding.Imported], [][]string{imports[binding.Imported]}, false)
@@ -5138,6 +5138,9 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 	// Shared by the route pass below and the per-file loop further down, which
 	// both resolve routes spelled as constants out of the same files.
 	constantsByFile := newFileStringConstants()
+	// What resolving imports through re-exports reads of each module, found
+	// once for the phase (jsModuleFacts).
+	jsModules := newJSModuleFacts(readContent)
 	knownFiles := map[string]bool{}
 	for _, file := range files {
 		if shouldStop != nil && shouldStop() {
@@ -5393,7 +5396,7 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 			})
 		}
 		importsByName := importedNamesFor(file.Path, content)
-		importsByName = resolvedImportedNameModules(file.Path, importsByName, manifestImports, knownFiles, readContent)
+		importsByName = resolvedImportedNameModules(file.Path, importsByName, manifestImports, knownFiles, readContent, jsModules)
 		if needsSignatureTypeImports && len(importsByName) > 0 {
 			result.resolvedImports = importsByName
 		}
@@ -5842,7 +5845,7 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 						}
 					}
 					if file.Language == "JavaScript" || file.Language == "TypeScript" {
-						jsAliasTargets, jsAliasExternal, jsAliasHandled = resolveJavaScriptAliasImportTargets(name, from, jsImportBindings[name], symbolsByShortName, file.Path, manifestImports, knownFiles, readContent)
+						jsAliasTargets, jsAliasExternal, jsAliasHandled = resolveJavaScriptAliasImportTargets(name, from, jsImportBindings[name], symbolsByShortName, file.Path, manifestImports, knownFiles, readContent, jsModules)
 						if jsAliasHandled && jsScan.parsed && !jsScan.depthTruncated {
 							// The legacy text scanner supplies candidate names, but a
 							// complete AST scan is authoritative about whether the name is
@@ -6454,7 +6457,7 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 						}
 					}
 					if file.Language == "JavaScript" || file.Language == "TypeScript" {
-						jsAliasTargets, _, jsAliasHandled = resolveJavaScriptAliasImportTargets(name, fileSource, jsImportBindings[name], symbolsByShortName, file.Path, manifestImports, knownFiles, readContent)
+						jsAliasTargets, _, jsAliasHandled = resolveJavaScriptAliasImportTargets(name, fileSource, jsImportBindings[name], symbolsByShortName, file.Path, manifestImports, knownFiles, readContent, jsModules)
 						if jsAliasHandled && jsScan.parsed && !jsScan.depthTruncated {
 							// Match the per-symbol rule above: a complete AST owns the
 							// answer, while failed or truncated scans retain the established
@@ -23484,44 +23487,32 @@ func importedKotlinNames(content string) map[string][]string {
 // resolved `src/config/mod.rs` also matched `src/cli/config/mod.rs`.
 const resolvedImportPathPrefix = "\x00resolved\x00"
 
-func resolvedImportedNameModules(importingPath string, imports map[string][]string, manifestImports manifestImportResolver, knownFiles map[string]bool, readContent contentReader) map[string][]string {
+// jsModules is the relation phase's module facts; nil finds them for this
+// call alone.
+func resolvedImportedNameModules(importingPath string, imports map[string][]string, manifestImports manifestImportResolver, knownFiles map[string]bool, readContent contentReader, jsModules *jsModuleFacts) map[string][]string {
 	if len(imports) == 0 {
 		return imports
 	}
-	readCached := cachingContentReader(readContent)
+	if jsModules == nil {
+		jsModules = newJSModuleFacts(readContent)
+	}
 	reexportCache := map[string][]string{}
 	resolved := make(map[string][]string, len(imports))
 	for name, modules := range imports {
 		resolved[name] = append(resolved[name], modules...)
 		for _, module := range modules {
-			targetPath, _ := resolveImportSpecPath(importingPath, module, manifestImports, knownFiles, readCached)
+			targetPath, _ := resolveImportSpecPath(importingPath, module, manifestImports, knownFiles, jsModules.exists)
 			if targetPath == "" {
 				continue
 			}
 			resolved[name] = append(resolved[name], resolvedImportPathPrefix+targetPath)
-			for _, reexport := range resolvedJavaScriptReexportTargets(targetPath, name, manifestImports, knownFiles, readCached, map[string]bool{}, reexportCache, 0) {
+			for _, reexport := range resolvedJavaScriptReexportTargets(targetPath, name, manifestImports, knownFiles, jsModules, map[string]bool{}, reexportCache, 0) {
 				resolved[name] = append(resolved[name], resolvedImportPathPrefix+reexport)
 			}
 		}
 		resolved[name] = uniqueStrings(resolved[name])
 	}
 	return resolved
-}
-
-func cachingContentReader(readContent contentReader) contentReader {
-	type cached struct {
-		content string
-		ok      bool
-	}
-	cache := map[string]cached{}
-	return func(path string) (string, bool) {
-		if hit, ok := cache[path]; ok {
-			return hit.content, hit.ok
-		}
-		content, ok := readContent(path)
-		cache[path] = cached{content: content, ok: ok}
-		return content, ok
-	}
 }
 
 func resolveImportSpecPath(importingPath, module string, manifestImports manifestImportResolver, knownFiles map[string]bool, readContent contentReader) (string, bool) {
@@ -23551,7 +23542,7 @@ func javaScriptReexportCandidate(path string) bool {
 	}
 }
 
-func resolvedJavaScriptReexportTargets(path, name string, manifestImports manifestImportResolver, knownFiles map[string]bool, readContent contentReader, seen map[string]bool, cache map[string][]string, depth int) []string {
+func resolvedJavaScriptReexportTargets(path, name string, manifestImports manifestImportResolver, knownFiles map[string]bool, modules *jsModuleFacts, seen map[string]bool, cache map[string][]string, depth int) []string {
 	if path == "" || depth > 8 || seen[path] {
 		return nil
 	}
@@ -23569,26 +23560,26 @@ func resolvedJavaScriptReexportTargets(path, name string, manifestImports manife
 		return cached
 	}
 	seen[path] = true
-	content, ok := readContent(path)
-	if !ok {
+	facts := modules.get(path)
+	if !facts.ok {
 		return nil
 	}
 	var out []string
-	for _, reexport := range javascriptNamedReexportModulesForName(content, name) {
-		targetPath, ok := resolveImportSpecPath(path, reexport, manifestImports, knownFiles, readContent)
+	for _, reexport := range facts.namedFor(name) {
+		targetPath, ok := resolveImportSpecPath(path, reexport, manifestImports, knownFiles, modules.exists)
 		if !ok || targetPath == "" {
 			continue
 		}
 		out = append(out, targetPath)
-		out = append(out, resolvedJavaScriptReexportTargets(targetPath, name, manifestImports, knownFiles, readContent, seen, cache, depth+1)...)
+		out = append(out, resolvedJavaScriptReexportTargets(targetPath, name, manifestImports, knownFiles, modules, seen, cache, depth+1)...)
 	}
-	out = append(out, resolvedJavaScriptStarReexportClosure(path, manifestImports, knownFiles, readContent, map[string]bool{}, cache, 0)...)
+	out = append(out, resolvedJavaScriptStarReexportClosure(path, manifestImports, knownFiles, modules, map[string]bool{}, cache, 0)...)
 	out = uniqueStrings(out)
 	cache[cacheKey] = out
 	return out
 }
 
-func resolvedJavaScriptStarReexportClosure(path string, manifestImports manifestImportResolver, knownFiles map[string]bool, readContent contentReader, seen map[string]bool, cache map[string][]string, depth int) []string {
+func resolvedJavaScriptStarReexportClosure(path string, manifestImports manifestImportResolver, knownFiles map[string]bool, modules *jsModuleFacts, seen map[string]bool, cache map[string][]string, depth int) []string {
 	if path == "" || depth > 8 || seen[path] {
 		return nil
 	}
@@ -23603,18 +23594,18 @@ func resolvedJavaScriptStarReexportClosure(path string, manifestImports manifest
 		return cached
 	}
 	seen[path] = true
-	content, ok := readContent(path)
-	if !ok {
+	facts := modules.get(path)
+	if !facts.ok {
 		return nil
 	}
 	var out []string
-	for _, reexport := range javascriptStarReexportModules(content) {
-		targetPath, ok := resolveImportSpecPath(path, reexport, manifestImports, knownFiles, readContent)
+	for _, reexport := range facts.star {
+		targetPath, ok := resolveImportSpecPath(path, reexport, manifestImports, knownFiles, modules.exists)
 		if !ok || targetPath == "" {
 			continue
 		}
 		out = append(out, targetPath)
-		out = append(out, resolvedJavaScriptStarReexportClosure(targetPath, manifestImports, knownFiles, readContent, seen, cache, depth+1)...)
+		out = append(out, resolvedJavaScriptStarReexportClosure(targetPath, manifestImports, knownFiles, modules, seen, cache, depth+1)...)
 	}
 	out = uniqueStrings(out)
 	cache[cacheKey] = out
