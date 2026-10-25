@@ -1070,21 +1070,30 @@ func returnFlowCalls(body symbolBody, params map[string]bool) []returnFlowCall {
 	for _, flow := range expressionAssignedReturnFlows(stripped) {
 		flows[flow.Name+"\x00"+flow.EvidenceKind+"\x00"+flow.Detail] = flow
 	}
+	// Calls assigned to locals are read only to follow a returned local, so
+	// a body that returns none is not scanned for them.
+	var returnedVars, returnedProperties [][]int
+	if strings.Contains(stripped, "return") {
+		returnedVars = returnVarRe.FindAllStringSubmatchIndex(stripped, -1)
+		returnedProperties = returnPropertyRe.FindAllStringSubmatchIndex(stripped, -1)
+	}
 	assigned := map[string]string{}
-	for _, match := range assignCallRe.FindAllStringSubmatchIndex(stripped, -1) {
-		if len(match) != 6 {
-			continue
-		}
-		if isExpressionAssignmentLine(stripped, match[0]) {
-			continue
-		}
-		varName := strings.TrimPrefix(stripped[match[2]:match[3]], "$")
-		callee := strings.TrimPrefix(stripped[match[4]:match[5]], "$")
-		if varName != "" && callee != "" {
-			assigned[varName] = callee
+	if len(returnedVars) > 0 || len(returnedProperties) > 0 {
+		for _, match := range assignCallRe.FindAllStringSubmatchIndex(stripped, -1) {
+			if len(match) != 6 {
+				continue
+			}
+			if isExpressionAssignmentLine(stripped, match[0]) {
+				continue
+			}
+			varName := strings.TrimPrefix(stripped[match[2]:match[3]], "$")
+			callee := strings.TrimPrefix(stripped[match[4]:match[5]], "$")
+			if varName != "" && callee != "" {
+				assigned[varName] = callee
+			}
 		}
 	}
-	for _, match := range returnVarRe.FindAllStringSubmatchIndex(stripped, -1) {
+	for _, match := range returnedVars {
 		if len(match) != 4 {
 			continue
 		}
@@ -1104,7 +1113,7 @@ func returnFlowCalls(body symbolBody, params map[string]bool) []returnFlowCall {
 			Direction:    "callee_to_caller",
 		}
 	}
-	for _, match := range returnPropertyRe.FindAllStringSubmatchIndex(stripped, -1) {
+	for _, match := range returnedProperties {
 		if len(match) != 6 {
 			continue
 		}
@@ -1270,13 +1279,22 @@ type assignmentFlowEvent struct {
 }
 
 func expressionAssignedReturnFlows(block string) []returnFlowCall {
+	// Only a returned local carries an assigned expression's calls, so the
+	// assignments are scanned only in a body that returns one.
+	if !strings.Contains(block, "return") {
+		return nil
+	}
+	returns := returnVarRe.FindAllStringSubmatchIndex(block, -1)
+	if len(returns) == 0 {
+		return nil
+	}
 	events := assignmentFlowEvents(block)
 	if len(events) == 0 {
 		return nil
 	}
 	seen := map[string]bool{}
 	var flows []returnFlowCall
-	for _, match := range returnVarRe.FindAllStringSubmatchIndex(block, -1) {
+	for _, match := range returns {
 		if len(match) != 4 {
 			continue
 		}

@@ -5205,7 +5205,7 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 			routeHandlers[r.Route] = append(routeHandlers[r.Route], r.Handler)
 			handledRoutes[r.Route] = struct{}{}
 		}
-		for _, r := range jsDirectRouteRelations(files, recordsByFile, readContent) {
+		for _, r := range jsDirectRouteRelations(files, recordsByFile, readContent, constantsByFile) {
 			if shouldStop != nil && shouldStop() {
 				return
 			}
@@ -5316,10 +5316,11 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 			return result
 		}
 		imports, havePrecomputedImports := precomputedImports[file.Path]
-		content := ""
+		content, contentRead := "", false
 		if !havePrecomputedImports || !skipFastProfilePerSymbolScan(spec, file.Language) {
 			var ok bool
 			content, ok = readContent(file.Path)
+			contentRead = true
 			if !ok {
 				return result
 			}
@@ -5429,7 +5430,11 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 		fileNeedsChannelScan := channelScanLanguage(file.Language)
 		var fileStringConstants map[string]string
 		if fileNeedsRouteScan || fileNeedsHTTPScan {
-			fileStringConstants = constantsByFile.forFile(file.Path, content)
+			if contentRead {
+				fileStringConstants = constantsByFile.forFile(file.Path, content)
+			} else {
+				fileStringConstants = constantsByFile.forUnreadFile(file.Path, content)
+			}
 		}
 		var routeSymbolsByID map[string]SymbolRecord
 		if fileNeedsRouteScan {
@@ -5509,7 +5514,7 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 		var jsImportBindings map[string][]jsImportBinding
 		var jsScan *jsScanState
 		if fileNeedsCallScan && (file.Language == "JavaScript" || file.Language == "TypeScript") {
-			jsImportBindings = importedJavaScriptBindings(content)
+			jsImportBindings = constantsByFile.importBindings(file.Path, content)
 			// One tree-sitter pass yields namespaces, binding scopes, and dotted
 			// call sites for the whole file; every JS/TS scope decision below
 			// shares this state instead of re-deriving it per symbol.
@@ -6590,7 +6595,7 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 		}
 	}
 	if spec.emits("HANDLES_ROUTE") {
-		for _, r := range crossFileExpressRouterRelations(files, recordsByFile, readContent, knownFiles) {
+		for _, r := range crossFileExpressRouterRelations(files, recordsByFile, readContent, knownFiles, constantsByFile) {
 			if shouldStop != nil && shouldStop() {
 				return
 			}
@@ -23261,25 +23266,7 @@ func isASCIIIdentifierByte(ch byte) bool {
 }
 
 func staticJSStringConstants(content string) map[string]string {
-	constants := map[string]string{}
-	for i := 0; i < 5; i++ {
-		changed := false
-		for _, match := range staticStringAssignRe.FindAllStringSubmatch(content, -1) {
-			if len(match) != 3 {
-				continue
-			}
-			value, ok := staticStringExpressionValue(match[2], constants)
-			if !ok || constants[match[1]] == value {
-				continue
-			}
-			constants[match[1]] = value
-			changed = true
-		}
-		if !changed {
-			break
-		}
-	}
-	return constants
+	return staticStringConstants(content)
 }
 
 var (
@@ -23688,6 +23675,12 @@ func uniqueStrings(values []string) []string {
 }
 
 func importedJavaScriptBindings(content string) map[string][]jsImportBinding {
+	return importedJavaScriptBindingsWithConstants(content, staticJSStringConstants(content))
+}
+
+// importedJavaScriptBindingsWithConstants is importedJavaScriptBindings given
+// content's static string constants.
+func importedJavaScriptBindingsWithConstants(content string, constants map[string]string) map[string][]jsImportBinding {
 	bindings := map[string][]jsImportBinding{}
 	add := func(local string, binding jsImportBinding) {
 		local = strings.TrimSpace(local)
@@ -23696,7 +23689,6 @@ func importedJavaScriptBindings(content string) map[string][]jsImportBinding {
 		}
 		bindings[local] = append(bindings[local], binding)
 	}
-	constants := staticJSStringConstants(content)
 	for _, match := range importedJavaScriptNamesNamedImport.FindAllStringSubmatch(content, -1) {
 		for _, item := range strings.Split(match[1], ",") {
 			imported, local := javascriptImportNames(item)
@@ -26087,11 +26079,15 @@ func routeLiteralPartOfConcat(line string, start, end int) bool {
 	return strings.HasSuffix(before, "+") || strings.HasPrefix(after, "+")
 }
 
+// staticStringConstants is the string constants content assigns, resolved
+// through each other for up to five rounds. The assignments are found once:
+// a round changes only the constants, never the content they are found in.
 func staticStringConstants(content string) map[string]string {
 	constants := map[string]string{}
+	matches := staticStringAssignRe.FindAllStringSubmatch(content, -1)
 	for i := 0; i < 5; i++ {
 		changed := false
-		for _, match := range staticStringAssignRe.FindAllStringSubmatch(content, -1) {
+		for _, match := range matches {
 			if len(match) != 3 {
 				continue
 			}
@@ -26238,6 +26234,11 @@ var (
 
 func jsRouterMounts(block string, constants map[string]string) []jsRouterMount {
 	var mounts []jsRouterMount
+	// Every mount pattern is a member call on `.use` or `.route`, matched
+	// case-sensitively.
+	if !strings.Contains(block, ".use") && !strings.Contains(block, ".route") {
+		return mounts
+	}
 	for _, match := range jsRouterMountsRe.FindAllStringSubmatch(block, -1) {
 		if len(match) != 4 {
 			continue
@@ -26305,12 +26306,16 @@ func jsFastifyPluginRoutes(content string, constants map[string]string, symbols 
 	return routes
 }
 
+var jsRouterRoutesRe = regexp.MustCompile(`(?i)\b([A-Za-z_$][\w$]*)\.(get|post|put|patch|delete|head|options)\s*\(\s*([^,\n)]+)(?:\s*,\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?))?`)
+
 func jsRouterRoutes(block string, constants map[string]string) []jsRouterRoute {
-	jsHandlerExpr := `[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?`
-	re := regexp.MustCompile(`(?i)\b([A-Za-z_$][\w$]*)\.(get|post|put|patch|delete|head|options)\s*\(\s*([^,\n)]+)(?:\s*,\s*(` + jsHandlerExpr + `))?`)
-	prefixes := jsRouterConstructorPrefixes(block, constants)
 	var routes []jsRouterRoute
-	for _, match := range re.FindAllStringSubmatch(block, -1) {
+	// A route is a member call on an HTTP method, matched without case.
+	if found, ascii := asciiFoldContainsAny(block, ".get", ".post", ".put", ".patch", ".delete", ".head", ".options"); ascii && !found {
+		return routes
+	}
+	prefixes := jsRouterConstructorPrefixes(block, constants)
+	for _, match := range jsRouterRoutesRe.FindAllStringSubmatch(block, -1) {
 		if len(match) != 5 {
 			continue
 		}
@@ -26332,6 +26337,10 @@ var (
 
 func jsRouterConstructorPrefixes(block string, constants map[string]string) map[string]string {
 	prefixes := map[string]string{}
+	// The constructor is `new` a Router or KoaRouter, matched without case.
+	if found, ascii := asciiFoldContainsAll(block, "new", "router"); ascii && !found {
+		return prefixes
+	}
 	for _, match := range jsRouterConstructorPrefixesRe.FindAllStringSubmatch(block, -1) {
 		if len(match) != 3 {
 			continue
@@ -26354,7 +26363,7 @@ func jsRouterConstructorPrefixes(block string, constants map[string]string) map[
 	return prefixes
 }
 
-func jsDirectRouteRelations(files []FileRecord, recordsByFile map[string][]SymbolRecord, readContent contentReader) []expressRouteRelation {
+func jsDirectRouteRelations(files []FileRecord, recordsByFile map[string][]SymbolRecord, readContent contentReader, constantsByFile *fileStringConstants) []expressRouteRelation {
 	var relations []expressRouteRelation
 	seen := map[string]bool{}
 	for _, file := range files {
@@ -26379,7 +26388,7 @@ func jsDirectRouteRelations(files []FileRecord, recordsByFile map[string][]Symbo
 				}
 			}
 		}
-		for _, route := range jsRouterRoutes(content, staticStringConstants(content)) {
+		for _, route := range jsRouterRoutes(content, constantsByFile.forFile(file.Path, content)) {
 			if !jsDirectRouteReceiver(route.Receiver) || route.Handler == "" {
 				continue
 			}
@@ -26915,7 +26924,7 @@ func splitJavaScriptMember(value string) (string, string) {
 	return strings.TrimSpace(before), strings.TrimSpace(after)
 }
 
-func crossFileExpressRouterRelations(files []FileRecord, recordsByFile map[string][]SymbolRecord, readContent contentReader, knownFiles map[string]bool) []expressRouteRelation {
+func crossFileExpressRouterRelations(files []FileRecord, recordsByFile map[string][]SymbolRecord, readContent contentReader, knownFiles map[string]bool, constantsByFile *fileStringConstants) []expressRouteRelation {
 	routesByFile := map[string][]jsRouterRoute{}
 	pluginRoutesByFile := map[string]map[string][]jsRouterRoute{}
 	mountsByFile := map[string][]jsRouterMount{}
@@ -26947,12 +26956,12 @@ func crossFileExpressRouterRelations(files []FileRecord, recordsByFile map[strin
 		if !ok {
 			continue
 		}
-		constants := staticStringConstants(content)
+		constants := constantsByFile.forFile(file.Path, content)
 		routesByFile[file.Path] = jsRouterRoutes(content, constants)
 		pluginRoutesByFile[file.Path] = jsFastifyPluginRoutes(content, constants, recordsByFile[file.Path])
 		mountsByFile[file.Path] = jsRouterMounts(content, constants)
 		pluginMountsByFile[file.Path] = jsFastifyPluginMounts(content, constants)
-		importBindingsByFile[file.Path] = importedJavaScriptBindings(content)
+		importBindingsByFile[file.Path] = constantsByFile.importBindings(file.Path, content)
 		defaultExportsByFile[file.Path] = javascriptDefaultExportName(content)
 	}
 	var relations []expressRouteRelation
@@ -27751,9 +27760,10 @@ var csharpMinimalAPIGroupPrefixesGroupRe = regexp.MustCompile(`\b(?:var|[A-Za-z_
 
 func csharpMinimalAPIGroupPrefixes(content string, constants map[string]string) map[string]string {
 	groups := map[string]string{}
+	matches := csharpMinimalAPIGroupPrefixesGroupRe.FindAllStringSubmatch(content, -1)
 	for i := 0; i < 5; i++ {
 		changed := false
-		for _, match := range csharpMinimalAPIGroupPrefixesGroupRe.FindAllStringSubmatch(content, -1) {
+		for _, match := range matches {
 			if len(match) != 4 {
 				continue
 			}
