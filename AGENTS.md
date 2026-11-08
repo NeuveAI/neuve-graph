@@ -92,8 +92,15 @@ entire graph impact --repo . --symbol NAME [--file path] [--depth 1|2] [--format
 Full stream of symbol records (stable `compound-v1` ID, kind, qualified name, source range, signature, language, container). This is a **bulk NDJSON stream of the whole repo**, filtered to the symbol record type — there is **no positional name argument** and no server-side name filter; grep the stream client-side, or prefer `query`/`neighbors` for a targeted single-symbol lookup.
 
 ```sh
-entire graph symbols --repo . --format ndjson [--worktree]
+entire graph symbols --repo . --format ndjson [--worktree] [--outline]
 ```
+
+`--outline` adds one `file_outline` record per successfully tree-sitter-parsed
+file, with root named-child ranges and grammar types in `top_level`, import
+classification from Graph's import scanners, and distinct identifier names per
+line in `identifiers`. Comments and strings are excluded from identifiers.
+Inventory-only and failed parses have no outline. All profiles support the flag;
+committed reads bypass caches so outlines always describe the selected source.
 
 **When:** you need the complete definition inventory (e.g. ingesting into a store), not a single lookup.
 

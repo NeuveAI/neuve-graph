@@ -11,6 +11,7 @@ import (
 // and the single snapshot reducer. More parse products are added by the
 // provider without changing the scheduling contract.
 type providerFileResult struct {
+	outline               *FileOutlineRecord
 	err                   error
 	index                 int
 	path                  string
@@ -42,7 +43,7 @@ func boundedProviderWorkerCount(maxProcs int) int {
 // emission; a later content-reuse layer can replace the read at this boundary
 // without changing the deterministic reducer.
 func processProviderFile(ctx context.Context, sc sourceContext, spec profileSpec, maxParseBytes, index int, path string) providerFileResult {
-	if sc.extractionReuse != nil {
+	if sc.extractionReuse != nil && !spec.outline {
 		return sc.extractionReuse.process(ctx, sc, spec, maxParseBytes, index, path)
 	}
 	return processProviderFileUncached(ctx, sc, spec, maxParseBytes, index, path)
@@ -223,7 +224,8 @@ func processProviderFileUncached(
 		return result
 	}
 
-	entities, parsedLanguage, parseStatus := parseWithProfile(TreeSitterParser{}, spec, langSpec, path, content)
+	entities, parsedLanguage, parseStatus, outline := parseWithOutline(spec, langSpec, path, content)
+	result.outline = outline
 	if parsedLanguage == "" {
 		result.failures = append(result.failures, PartialFailure{
 			Code:                 "E_UNSUPPORTED_LANGUAGE",

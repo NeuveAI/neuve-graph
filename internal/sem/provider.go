@@ -444,6 +444,8 @@ type ProviderSnapshot struct {
 }
 
 type ProviderSnapshotOptions struct {
+	// Outline emits uncached file outlines from the extraction tree.
+	Outline bool
 	// PreparedCommit is an exact commit selector for retained reads only.
 	// Ordinary builders cannot use it to prepare or silently rebuild a source.
 	PreparedCommit     string
@@ -541,6 +543,7 @@ const (
 
 // profileSpec describes what a profile emits and how deeply it resolves.
 type profileSpec struct {
+	outline         bool
 	name            Profile
 	relations       map[string]bool
 	includeEvidence bool
@@ -693,6 +696,7 @@ func Capabilities() CapabilityReport {
 			"stable_symbol_ids":              true,
 			"semantic_diff":                  true,
 			"ndjson_snapshot":                true,
+			"symbols_outline":                true,
 			"compact_snapshot_ndjson_v1":     true,
 			"scip_snapshot_experimental":     true,
 			"hybrid_source_search":           true,
@@ -1355,6 +1359,8 @@ func streamSnapshotWithWorkerCount(ctx context.Context, repo, providerVersion st
 		return err
 	}
 
+	spec.outline = options.Outline
+
 	// Phase 1: workers independently read, classify, and parse files. Only this
 	// reducer mutates graph indexes or calls emit, and it consumes the original
 	// path order, so worker timing cannot change snapshot bytes.
@@ -1377,6 +1383,11 @@ func streamSnapshotWithWorkerCount(ctx context.Context, repo, providerVersion st
 			languageSet[result.language] = struct{}{}
 			if err := emit(*result.file); err != nil {
 				return err
+			}
+			if result.outline != nil {
+				if err := emit(*result.outline); err != nil {
+					return err
+				}
 			}
 			files = append(files, *result.file)
 			lc := completenessLangs[result.language]
