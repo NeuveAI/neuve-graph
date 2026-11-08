@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -21,17 +22,49 @@ var interruptSignals = []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP
 const interruptGrace = 2 * time.Second
 
 // interruptibleContext returns a context cancelled by the first interrupt
-// signal. Git children stay in this process's group, so a caller that kills the
-// whole group still reaches them even when this process is SIGKILLed; this
+// signal or lifeline EOF. Git children stay in this process's group, so a
+// caller that kills the whole group still reaches them even when this process
+// is SIGKILLed; this
 // handler covers callers that signal only this process. A second signal takes
 // the default action. stop releases the handler.
-func interruptibleContext(parent context.Context, exit func(int)) (context.Context, func()) {
+func interruptibleContext(parent context.Context, exit func(int)) (context.Context, func(), error) {
+	lifeline, err := openLifeline()
+	if err != nil {
+		return nil, nil, err
+	}
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, interruptSignals...)
 	ctx, stop := watchInterrupts(parent, signals, func() { signal.Stop(signals) }, interruptGrace, exit)
+	stopLifeline := func() {}
+	if lifeline != nil {
+		stopLifeline = watchLifeline(ctx, lifeline, signals)
+	}
 	return ctx, func() {
+		stopLifeline()
 		signal.Stop(signals)
 		stop()
+	}, nil
+}
+
+func watchLifeline(ctx context.Context, lifeline io.ReadCloser, signals chan<- os.Signal) func() {
+	stopping := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, lifeline)
+		// Check before selecting a ready send: normal Close is not a lost caller.
+		select {
+		case <-stopping:
+			return
+		default:
+		}
+		select {
+		case signals <- syscall.SIGTERM:
+		case <-stopping:
+		case <-ctx.Done():
+		}
+	}()
+	return func() {
+		close(stopping)
+		_ = lifeline.Close()
 	}
 }
 
