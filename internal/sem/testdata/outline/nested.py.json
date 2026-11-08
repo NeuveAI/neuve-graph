@@ -105,7 +105,6 @@
     "start_line": 8,
     "end_line": 8,
     "type": "expression_statement",
-    "imports": false,
-    "label": "case"
+    "imports": false
   }
 ]

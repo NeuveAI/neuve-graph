@@ -33,8 +33,7 @@
             "start_line": 3,
             "end_line": 3,
             "type": "short_var_declaration",
-            "imports": false,
-            "label": "first"
+            "imports": false
           },
           {
             "start_line": 4,
@@ -59,13 +58,40 @@
                     "end_line": 8,
                     "type": "expression_statement",
                     "imports": false,
-                    "label": "case"
+                    "children": [
+                      {
+                        "start_line": 5,
+                        "end_line": 5,
+                        "type": "selector_expression",
+                        "imports": false
+                      },
+                      {
+                        "start_line": 5,
+                        "end_line": 8,
+                        "type": "argument_list",
+                        "imports": false
+                      }
+                    ]
                   },
                   {
                     "start_line": 9,
                     "end_line": 12,
                     "type": "expression_statement",
-                    "imports": false
+                    "imports": false,
+                    "children": [
+                      {
+                        "start_line": 9,
+                        "end_line": 9,
+                        "type": "selector_expression",
+                        "imports": false
+                      },
+                      {
+                        "start_line": 9,
+                        "end_line": 12,
+                        "type": "argument_list",
+                        "imports": false
+                      }
+                    ]
                   }
                 ]
               }

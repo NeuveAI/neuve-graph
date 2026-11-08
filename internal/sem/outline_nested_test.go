@@ -12,7 +12,7 @@ import (
 // Exact trees pin the grammar-neutral byte-span selection rather than assuming
 // that named children are always statements. The large TS class exercises the
 // chunker's >4 KiB case; suite callbacks, Python methods, Go table callbacks and
-// Rust module functions cover the downstream responsibility-section inputs.
+// Rust module functions protect the retained child lists.
 func TestFileOutlineNestedRecords(t *testing.T) {
 	for _, name := range []string{"nested.ts", "nested.py", "nested.go", "nested.rs"} {
 		source, err := os.ReadFile(filepath.Join("testdata", "outline", name+".txt"))
@@ -57,60 +57,105 @@ func nestedOutline(t *testing.T, path, source string, profile Profile) *FileOutl
 	return outline
 }
 
-// Label extraction must not expose interpolation source, select a later string
-// after a rejected template, include a later line, or split a Unicode character.
-func TestFileOutlineLabels(t *testing.T) {
+// Pass-through wrappers must reach the statement list of an oversized Effect
+// generator. Pin every emitted level so wrapper selection cannot change quietly.
+func TestFileOutlineEffectGenerator(t *testing.T) {
 	for _, tc := range []struct {
-		path, source string
-		want         []string
+		name, tail string
+		levels     [][]string
 	}{
-		{"a.ts", "it(`secret ${hidden}`, run);\nit(`secret ${hidden}` + 'later', run);\nit(` plain `, run);\nit(' first ', 'second');\nit(\n 'later line', run);\n", []string{"", "", "plain", "first", ""}},
-		{"a.py", "run(f'secret {hidden}')\nrun(r' plain ')\nrun(''' triple ''')\n", []string{"", "plain", "triple"}},
-		{"a.lua", "run([=[ plain ]=])", []string{"plain"}},
-		{"a.ml", "let label = {tag| plain |tag}\n", []string{"plain"}},
-		{"a.rb", "run(\"secret #{hidden}\")\nrun(\" plain \")\n", []string{"", "plain"}},
-		{"a.sh", "echo \"secret $hidden\"\necho \" plain \"\n", []string{"", "plain"}},
-		{"a.go", "package sample\nvar text = ` plain `\nvar other = \" quoted \"\n", []string{"", "plain", "quoted"}},
-		{"a.rs", "run(r##\" raw \"##);\nrun(\" quoted \");\n", []string{"raw", "quoted"}},
-		{"a.ts", "run('  " + strings.Repeat("界", 81) + "  ');\n", []string{strings.Repeat("界", 80)}},
+		{"plain", ");\n", [][]string{
+			{"export_statement"},
+			{"identifier", "call_expression"},
+			{"member_expression", "arguments"},
+			{"formal_parameters", "statement_block"},
+		}},
+		{"pipe", ").pipe(Effect.withSpan(\"x\"));\n", [][]string{
+			{"export_statement"},
+			{"identifier", "call_expression"},
+			{"member_expression", "arguments"},
+			{"call_expression", "property_identifier"},
+			{"member_expression", "arguments"},
+			{"formal_parameters", "statement_block"},
+		}},
 	} {
-		t.Run(tc.path+tc.source[:3], func(t *testing.T) {
-			got := nestedOutline(t, tc.path, tc.source, ProfileSyntaxOnly)
-			labels := []string{}
-			for _, n := range got.TopLevel {
-				labels = append(labels, n.Label)
-			}
-			if !reflect.DeepEqual(labels, tc.want) {
-				t.Fatalf("labels = %#v, want %#v", labels, tc.want)
-			}
-		})
+		source := "export const x = Effect.gen(function* () {\n" + strings.Repeat("  yield* Effect.succeed(value);\n", 160) + "}" + tc.tail
+		if len(source) <= 4096 {
+			t.Fatal("generator fixture must exceed 4 KiB")
+		}
+		for _, profile := range []Profile{ProfileSyntaxOnly, ProfileFast, ProfileFull} {
+			t.Run(tc.name+"/"+string(profile), func(t *testing.T) {
+				got := nestedOutline(t, "a.ts", source, profile)
+				nodes := got.TopLevel
+				for depth, types := range tc.levels {
+					actual := []string{}
+					var dominant OutlineNode
+					for _, n := range nodes {
+						actual = append(actual, n.Type)
+						if n.EndLine-n.StartLine > dominant.EndLine-dominant.StartLine {
+							dominant = n
+						}
+					}
+					if !reflect.DeepEqual(actual, types) {
+						t.Fatalf("depth %d types = %v, want %v", depth, actual, types)
+					}
+					nodes = dominant.Children
+				}
+				if len(nodes) != 160 {
+					t.Fatalf("depth %d statement count = %d, want 160", len(tc.levels), len(nodes))
+				}
+				for i, node := range nodes {
+					if node.Type != "expression_statement" || node.StartLine != i+2 || node.EndLine != i+2 || len(node.Children) != 0 {
+						t.Fatalf("depth %d statement %d = %#v", len(tc.levels), i, node)
+					}
+				}
+			})
+		}
 	}
 }
 
-// Deep callbacks must stop at four emitted child edges even when source has
-// further splittable descendants. A one-line node never emits children.
+// Large single-child wrapper chains must stop at sixteen emitted edges. A
+// branching expression must still stop after four non-pass-through levels.
 func TestFileOutlineNestedDepth(t *testing.T) {
-	source := "prepare();\nverify();\n"
-	for range 18 {
-		source = "describe('suite', () => {\n" + source + "\n});\n"
-	}
-	got := nestedOutline(t, "a.ts", source, ProfileSyntaxOnly)
-	maxDepth := 0
-	var visit func([]OutlineNode, int)
-	visit = func(nodes []OutlineNode, depth int) {
-		for _, n := range nodes {
-			if depth > maxDepth {
-				maxDepth = depth
+	for _, tc := range []struct {
+		name, source string
+		want         int
+	}{
+		{"pass-through", func() string {
+			source := strings.Repeat("prepare();\nverify();\n", 300)
+			for range 18 {
+				source = "describe('suite', () => {\n" + source + "\n});\n"
 			}
-			if len(n.Children) > 0 && n.StartLine == n.EndLine {
-				t.Fatalf("one-line children: %#v", n)
+			return source
+		}(), 16},
+		{"branching", func() string {
+			source := strings.Repeat("a", 256)
+			for range 6 {
+				source = "(\n" + source + " +\n" + source + "\n)"
 			}
-			visit(n.Children, depth+1)
-		}
-	}
-	visit(got.TopLevel, 0)
-	if maxDepth != 4 {
-		t.Fatalf("child depth = %d, want exactly 4", maxDepth)
+			return source + ";\n"
+		}(), 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := nestedOutline(t, "a.ts", tc.source, ProfileSyntaxOnly)
+			maxDepth := 0
+			var visit func([]OutlineNode, int)
+			visit = func(nodes []OutlineNode, depth int) {
+				for _, n := range nodes {
+					if depth > maxDepth {
+						maxDepth = depth
+					}
+					if len(n.Children) > 0 && n.StartLine == n.EndLine {
+						t.Fatalf("one-line children: %#v", n)
+					}
+					visit(n.Children, depth+1)
+				}
+			}
+			visit(got.TopLevel, 0)
+			if maxDepth != tc.want {
+				t.Fatalf("child depth = %d, want exactly %d", maxDepth, tc.want)
+			}
+		})
 	}
 }
 
@@ -136,27 +181,5 @@ func TestFileOutlineSelectionBounds(t *testing.T) {
 	got := nestedOutline(t, "a.ts", "{\n/*"+strings.Repeat("padding", 80)+"*/\na();\nb();\n}\n", ProfileSyntaxOnly)
 	if len(got.TopLevel[0].Children) != 0 {
 		t.Fatalf("insufficient coverage accepted: %#v", got.TopLevel[0])
-	}
-}
-
-// A selected body's enclosing literal must belong to this node, not be an
-// ancestor outside it. Named declarations and standalone body nodes are not
-// callbacks. A no-parameter Python lambda provides a provable positive case.
-func TestFileOutlineCallback(t *testing.T) {
-	got := nestedOutline(t, "a.ts", "const run = () => {\n a();\n b();\n};\nfunction named() {\n a();\n b();\n}\n", ProfileSyntaxOnly)
-	var visit func([]OutlineNode)
-	visit = func(nodes []OutlineNode) {
-		for _, n := range nodes {
-			if n.Callback {
-				t.Fatalf("enclosing literal is outside node: %#v", n)
-			}
-			visit(n.Children)
-		}
-	}
-	visit(got.TopLevel)
-	// Use a multiline lambda so children can be emitted.
-	got = nestedOutline(t, "a.py", "(\nlambda: first_long_identifier +\n second_long_identifier\n)\n", ProfileSyntaxOnly)
-	if len(got.TopLevel) != 1 || !got.TopLevel[0].Callback {
-		t.Fatalf("lambda callback missing: %#v", got.TopLevel)
 	}
 }

@@ -99,19 +99,16 @@ entire graph symbols --repo . --format ndjson [--worktree] [--outline]
 file, with root named-child ranges and grammar types in `top_level`, import
 classification from Graph's import scanners, and distinct identifier names per
 line in `identifiers`. Comments and strings are excluded from identifiers.
-Nodes spanning at least two lines may have recursive `children`, to four levels
-below `top_level`. Each list comes from the descendant within twelve tree edges
-with at least two named, non-comment children and the greatest summed byte span,
-provided that sum covers at least half the original node. Ties follow source
-preorder. This can select expression operands or signature parts, not just
-statements. A `label` holds the first string literal starting on the node's first
-line before its selected children, or anywhere on that line without children.
-It contains authored inner text, trimmed and limited to 80 Unicode characters;
-strings with substitutions are omitted. Labels are the only source text beyond
-identifier names carried by outlines, and pass through the terminal-safe JSON
-writer. `callback: true` means Graph recognizes the selected children's parent
-as a function literal's body, with that literal inside the outlined node.
-Unsupported function-literal grammars omit it.
+Nodes spanning at least two lines may have recursive `children`, while fewer
+than four non-pass-through levels are above the node, with a hard cap of sixteen
+child edges below `top_level`. A chosen list is a pass-through when exactly one
+child spans at least 256 bytes and all others span fewer than 256 bytes, matching
+the harness's small-unit threshold. Each list comes from the descendant within
+twelve tree edges with at least two named, non-comment children and the greatest
+summed byte span, provided that sum covers at least half the original node. Ties
+follow source preorder. This can select expression operands or signature parts,
+not just statements. Identifiers are the only source text beyond the existing
+range, grammar type, import classification, path and language fields.
 Inventory-only and failed parses have no outline. All profiles support the flag;
 committed reads bypass caches so outlines always describe the selected source.
 

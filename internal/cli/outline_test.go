@@ -57,8 +57,6 @@ func TestSymbolsOutlineRecords(t *testing.T) {
 					}
 					for i := range outline.TopLevel {
 						outline.TopLevel[i].Children = nil
-						outline.TopLevel[i].Label = ""
-						outline.TopLevel[i].Callback = false
 					}
 					legacyOutline, err := json.Marshal(outline)
 					if err != nil {
@@ -196,7 +194,7 @@ func TestSymbolsOutlineUsesTerminalSafeJSON(t *testing.T) {
 			t.Fatal(err)
 		}
 		if record.RecordType == "file_outline" {
-			if record.FilePath != path || record.TopLevel[0].Label != "unsafe\u009b" || !reflect.DeepEqual(record.Identifiers, [][]any{{float64(1), "café"}}) {
+			if record.FilePath != path || !reflect.DeepEqual(record.Identifiers, [][]any{{float64(1), "café"}}) {
 				t.Fatalf("escaping changed outline data: %#v", record)
 			}
 			return

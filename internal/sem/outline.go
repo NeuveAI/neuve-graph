@@ -25,8 +25,6 @@ type OutlineNode struct {
 	Type      string        `json:"type"`
 	Imports   bool          `json:"imports"`
 	Children  []OutlineNode `json:"children,omitempty"`
-	Label     string        `json:"label,omitempty"`
-	Callback  bool          `json:"callback,omitempty"`
 }
 
 func parseWithOutline(spec profileSpec, langSpec languageSpec, path, content string) ([]Entity, string, ParseStatus, *FileOutlineRecord) {
@@ -76,7 +74,6 @@ func extractFileOutline(path, language string, root *sitter.Node, src, parsed []
 	// Retain only named-node metadata until the extraction tree closes. Candidate
 	// lists update their ancestors on exit, so selection needs one cursor walk.
 	nodes := []outlineSyntaxNode{}
-	literals := []int{}
 	stack := []int{}
 	cursor := sitter.NewTreeCursor(root)
 	defer cursor.Close()
@@ -91,17 +88,11 @@ func extractFileOutline(path, language string, root *sitter.Node, src, parsed []
 		index := -1
 		if node.IsNamed() && !comment {
 			index = len(nodes)
-			nodes = append(nodes, outlineSyntaxNode{node: node, best: -1,
-				interpolated: strings.Contains(typ, "interpolation") || strings.Contains(typ, "substitution") ||
-					strings.Contains(typ, "expansion") || typ == "interpolated_expression" || typ == "interpolated_identifier" ||
-					opaqueDepth >= 0 && depth > opaqueDepth && outlineIdentifierNode(typ)})
+			nodes = append(nodes, outlineSyntaxNode{node: node, best: -1})
 			if depth > 0 && stack[depth-1] >= 0 {
 				parent := &nodes[stack[depth-1]]
 				parent.children = append(parent.children, index)
 				parent.childBytes += uint64(node.EndByte() - node.StartByte())
-			}
-			if opaqueDepth < 0 && outlineStringNode(typ) {
-				literals = append(literals, index)
 			}
 		}
 		stack = append(stack, index)
@@ -140,9 +131,6 @@ func extractFileOutline(path, language string, root *sitter.Node, src, parsed []
 						}
 					}
 				}
-				if depth > 0 && stack[depth-1] >= 0 && current.interpolated {
-					nodes[stack[depth-1]].interpolated = true
-				}
 			}
 			stack = stack[:depth]
 			if opaqueDepth == depth {
@@ -155,7 +143,7 @@ func extractFileOutline(path, language string, root *sitter.Node, src, parsed []
 				for _, child := range nodes[0].children {
 					n := nodes[child].node
 					if outlineSourceLine(lineStarts, int(n.StartByte())) > lineOffset && (sameLines || outlineAuthoredNode(n, src, parsed)) {
-						outline.TopLevel = append(outline.TopLevel, outlineNode(nodes, literals, child, 0, language, src, parsed, lineStarts, lines, lineOffset))
+						outline.TopLevel = append(outline.TopLevel, outlineNode(nodes, child, 0, 0, lineStarts, lines, lineOffset))
 					}
 				}
 				return outline
@@ -168,139 +156,38 @@ func extractFileOutline(path, language string, root *sitter.Node, src, parsed []
 // best identifies the descendant owning the largest sibling list within twelve
 // tree edges. Ties use source preorder, including the node itself first.
 type outlineSyntaxNode struct {
-	node         *sitter.Node
-	children     []int
-	best         int
-	childBytes   uint64
-	interpolated bool
+	node       *sitter.Node
+	children   []int
+	best       int
+	childBytes uint64
 }
 
-func outlineNode(nodes []outlineSyntaxNode, literals []int, index, depth int, language string, src, parsed []byte, starts, imports []int, lineOffset int) OutlineNode {
+func outlineNode(nodes []outlineSyntaxNode, index, splitDepth, edgeDepth int, starts, imports []int, lineOffset int) OutlineNode {
 	entry := nodes[index]
 	n := entry.node
 	start := outlineSourceLine(starts, int(n.StartByte())) - lineOffset
 	end := outlineSourceLine(starts, int(n.EndByte())-1) - lineOffset
 	out := OutlineNode{StartLine: start, EndLine: end, Type: n.Type(), Imports: outlineHasImport(imports, start, end)}
-	cutoff := n.EndByte()
-	if depth < 4 && start < end && entry.best >= 0 && nodes[entry.best].childBytes*2 >= uint64(n.EndByte()-n.StartByte()) {
+	if splitDepth < 4 && edgeDepth < 16 && start < end && entry.best >= 0 && nodes[entry.best].childBytes*2 >= uint64(n.EndByte()-n.StartByte()) {
 		chosen := nodes[entry.best]
-		cutoff = nodes[chosen.children[0]].node.StartByte()
+		// Match the harness's 256-byte small-unit threshold: exactly one child
+		// at least 256 bytes and all others smaller makes a pass-through list.
+		// Only real splits consume the four-level budget; all edges count to 16.
+		substantial := 0
 		for _, child := range chosen.children {
-			out.Children = append(out.Children, outlineNode(nodes, literals, child, depth+1, language, src, parsed, starts, imports, lineOffset))
+			c := nodes[child].node
+			if c.EndByte()-c.StartByte() >= 256 {
+				substantial++
+			}
 		}
-		out.Callback = outlineCallback(n, chosen.node, language)
-	}
-	first := sort.Search(len(literals), func(i int) bool { return nodes[literals[i]].node.StartByte() >= n.StartByte() })
-	for _, literal := range literals[first:] {
-		if nodes[literal].node.StartByte() >= cutoff || outlineSourceLine(starts, int(nodes[literal].node.StartByte()))-lineOffset != start {
-			break
+		if substantial != 1 {
+			splitDepth++
 		}
-		entry := nodes[literal]
-		if entry.node.EndByte() <= n.EndByte() && !entry.interpolated && outlineAuthoredNode(entry.node, src, parsed) {
-			out.Label = outlineLabel(entry.node.Content(src), entry.node.Type())
+		for _, child := range chosen.children {
+			out.Children = append(out.Children, outlineNode(nodes, child, splitDepth, edgeDepth+1, starts, imports, lineOffset))
 		}
-		break
 	}
 	return out
-}
-
-func outlineCallback(node, body *sitter.Node, language string) bool {
-	fn := body.Parent()
-	if !functionLikeValue(fn) || fn.StartByte() < node.StartByte() || fn.EndByte() > node.EndByte() {
-		return false
-	}
-	// function_definition is also a named declaration in several grammars;
-	// Graph knows it as an anonymous function value specifically in R.
-	if fn.Type() == "function_definition" && language != "R" {
-		return false
-	}
-	return validNode(fn.ChildByFieldName("body")) && fn.ChildByFieldName("body").Equal(body)
-}
-
-func outlineStringNode(typ string) bool {
-	if !outlineLiteralNode(typ) {
-		return false
-	}
-	switch typ {
-	case "char_literal", "character_literal", "character", "char", "rune_literal",
-		"regex", "regex_literal", "sigil", "charlist", "quoted_atom", "quoted_keyword", "string_array":
-		return false
-	}
-	return true
-}
-
-// Strip delimiters, not escapes: labels are authored inner text, not evaluated
-// values. Prefixes cover raw/byte/unicode strings and C#/Python quote prefixes.
-func outlineLabel(text, typ string) string {
-	inner, ok := outlineStringInner(text, typ)
-	if !ok {
-		return ""
-	}
-	label := strings.TrimSpace(inner)
-	count := 0
-	for offset := range label {
-		if count == 80 {
-			label = label[:offset]
-			break
-		}
-		count++
-	}
-	return strings.Clone(label)
-}
-
-func outlineStringInner(text, typ string) (string, bool) {
-	// Lua long strings, OCaml quoted strings, SQL dollar strings, and C-family
-	// include literals use balanced delimiters rather than quote characters.
-	if strings.HasPrefix(text, "[") {
-		if end := strings.Index(text[1:], "["); end >= 0 && strings.Trim(text[1:1+end], "=") == "" {
-			open := text[:end+2]
-			close := "]" + open[1:len(open)-1] + "]"
-			if len(text) >= len(open)+len(close) && strings.HasSuffix(text, close) {
-				return text[len(open) : len(text)-len(close)], true
-			}
-		}
-	}
-	if strings.HasPrefix(text, "{") {
-		if end := strings.IndexByte(text, '|'); end >= 1 {
-			close := "|" + text[1:end] + "}"
-			if len(text) >= end+1+len(close) && strings.HasSuffix(text, close) {
-				return text[end+1 : len(text)-len(close)], true
-			}
-		}
-	}
-	if strings.HasPrefix(text, "$") {
-		if end := strings.IndexByte(text[1:], '$'); end >= 0 {
-			delim := text[:end+2]
-			if len(text) >= 2*len(delim) && strings.HasSuffix(text, delim) {
-				return text[len(delim) : len(text)-len(delim)], true
-			}
-		}
-	}
-	if typ == "system_lib_string" && strings.HasPrefix(text, "<") && strings.HasSuffix(text, ">") {
-		return text[1 : len(text)-1], true
-	}
-	if typ == "bare_string" || typ == "string_scalar" || typ == "heredoc_body" {
-		if !strings.HasPrefix(text, "\"") && !strings.HasPrefix(text, "'") {
-			return text, true
-		}
-	}
-	quote := strings.IndexAny(text, "\"'`")
-	if quote < 0 {
-		return "", false
-	}
-	prefix := text[:quote]
-	if strings.Trim(prefix, "rRuUbBfFcCsS@$#") != "" {
-		return "", false
-	}
-	delim := text[quote : quote+1]
-	if strings.HasPrefix(text[quote:], strings.Repeat(delim, 3)) {
-		delim = strings.Repeat(delim, 3)
-	}
-	closing := delim + strings.Repeat("#", strings.Count(prefix, "#"))
-	if len(text) < quote+len(delim)+len(closing) || !strings.HasSuffix(text, closing) {
-		return "", false
-	}
-	return text[quote+len(delim) : len(text)-len(closing)], true
 }
 
 func outlineSourceLine(starts []int, offset int) int {

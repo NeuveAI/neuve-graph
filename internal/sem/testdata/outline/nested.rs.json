@@ -77,7 +77,6 @@
     "start_line": 11,
     "end_line": 11,
     "type": "expression_statement",
-    "imports": false,
-    "label": "case"
+    "imports": false
   }
 ]

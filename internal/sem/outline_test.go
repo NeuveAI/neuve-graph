@@ -104,7 +104,7 @@ func TestFileOutlineImportsKeepFileContext(t *testing.T) {
 			if profile == ProfileFull && !foundImport {
 				t.Fatal("control: full-profile IMPORTS evidence missing")
 			}
-			want := []OutlineNode{{StartLine: 1, EndLine: 1, Type: "lexical_declaration", Label: "./target"}, {StartLine: 2, EndLine: 2, Type: "lexical_declaration", Imports: true}, {StartLine: 3, EndLine: 3, Type: "lexical_declaration"}}
+			want := []OutlineNode{{StartLine: 1, EndLine: 1, Type: "lexical_declaration"}, {StartLine: 2, EndLine: 2, Type: "lexical_declaration", Imports: true}, {StartLine: 3, EndLine: 3, Type: "lexical_declaration"}}
 			if got == nil || !reflect.DeepEqual(got.TopLevel, want) {
 				t.Fatalf("outline = %#v, want nodes %#v", got, want)
 			}

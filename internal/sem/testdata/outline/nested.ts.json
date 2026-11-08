@@ -21,8 +21,7 @@
             "start_line": 1,
             "end_line": 1,
             "type": "string",
-            "imports": false,
-            "label": "suite"
+            "imports": false
           },
           {
             "start_line": 1,
@@ -46,15 +45,13 @@
                     "start_line": 2,
                     "end_line": 5,
                     "type": "expression_statement",
-                    "imports": false,
-                    "label": "first"
+                    "imports": false
                   },
                   {
                     "start_line": 6,
                     "end_line": 15,
                     "type": "expression_statement",
-                    "imports": false,
-                    "label": "inner"
+                    "imports": false
                   }
                 ]
               }
@@ -618,7 +615,6 @@
     "start_line": 99,
     "end_line": 99,
     "type": "expression_statement",
-    "imports": false,
-    "label": "single"
+    "imports": false
   }
 ]

@@ -349,7 +349,7 @@ var commandDocs = []commandDoc{
 		group:    groupInspect,
 		summary:  "Stream every symbol definition (bulk NDJSON)",
 		usage:    []string{"entire graph symbols --repo . --format ndjson [--worktree] [--outline]"},
-		long:     "A bulk NDJSON stream of every symbol record (stable compound-v1 ID, kind, qualified name, source range, signature, language, container). There is no name argument — grep the stream client-side, or prefer query/neighbors for a single lookup. The trailing summary record carries aggregate stats and completeness. --outline adds file_outline records with top-level syntax ranges, bounded nested children, first-line string labels, recognized callback bodies, and identifiers per line, using the existing parse tree. Outline reads bypass committed caches.",
+		long:     "A bulk NDJSON stream of every symbol record (stable compound-v1 ID, kind, qualified name, source range, signature, language, container). There is no name argument — grep the stream client-side, or prefer query/neighbors for a single lookup. The trailing summary record carries aggregate stats and completeness. --outline adds file_outline records with top-level syntax ranges, bounded nested children and identifiers per line, using the existing parse tree. Outline reads bypass committed caches.",
 		flags:    append(append([]flagDoc{}, providerFlagDocs...), flagDoc{name: "--outline", desc: "Add parsed-file syntax outlines and identifiers; bypass committed caches"}),
 		examples: []string{"entire graph symbols --repo . --format ndjson"},
 	},
