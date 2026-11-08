@@ -171,22 +171,95 @@ func TestSharedContentReaderAbandonment(t *testing.T) {
 	}
 }
 
-// The shared digest path must produce the same normalized value concurrently
-// and preserve the small-input bypass and the existing cache statistics.
+type digestSubscriberContext struct {
+	context.Context
+	ready chan<- struct{}
+	once  sync.Once
+}
+
+func (c *digestSubscriberContext) Done() <-chan struct{} {
+	c.once.Do(func() { c.ready <- struct{}{} })
+	return c.Context.Done()
+}
+
+// Equal cold texts normalize once while all callers are subscribed. A different
+// text finishes independently, and completed values avoid further normalization.
 func TestSharedDigestConcurrentMisses(t *testing.T) {
 	EnableSharedCaches(true)
 	t.Cleanup(func() { EnableSharedCaches(false) })
+	previousNormalizer, previousContext := normalizeSharedDigest, sharedDigestContext
+	t.Cleanup(func() {
+		normalizeSharedDigest, sharedDigestContext = previousNormalizer, previousContext
+	})
+	const callers = 32
 	text := strings.Repeat("func  Big( x int )\n", 400)
+	other := strings.Repeat("func  Other( x string )\n", 400)
 	want := normalizedDigest(text)
-	var wg sync.WaitGroup
-	for range 32 {
-		wg.Go(func() {
-			if got := sharedNormalizedDigest(strings.Clone(text)); got != want {
-				t.Errorf("digest %q want %q", got, want)
+	otherWant := normalizedDigest(other)
+	var calls, otherCalls atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	duplicate := make(chan struct{}, callers)
+	subscribed := make(chan struct{}, callers+1)
+	normalizeSharedDigest = func(value string) string {
+		if value == text {
+			if calls.Add(1) == 1 {
+				close(started)
+			} else {
+				duplicate <- struct{}{}
 			}
-		})
+			<-release
+		} else {
+			otherCalls.Add(1)
+		}
+		return normalizedDigest(value)
 	}
+	sharedDigestContext = func() context.Context {
+		return &digestSubscriberContext{Context: context.Background(), ready: subscribed}
+	}
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	defer unblock()
+	request := func() {
+		if got := sharedNormalizedDigest(strings.Clone(text)); got != want {
+			t.Errorf("digest %q want %q", got, want)
+		}
+	}
+	wg.Go(request)
+	<-started
+	for range callers - 1 {
+		wg.Go(request)
+	}
+	// As in the content cancellation test, Done signals after subscription.
+	// A duplicate normalization also wakes this wait so the old path fails by
+	// execution count rather than hanging without subscription signals.
+	for range callers {
+		select {
+		case <-subscribed:
+		case <-duplicate:
+			t.Fatalf("normalizations=%d while the first run is blocked, want 1", calls.Load())
+		}
+	}
+	if got := sharedNormalizedDigest(other); got != otherWant {
+		t.Errorf("different text digest %q want %q", got, otherWant)
+	}
+	if got := otherCalls.Load(); got != 1 {
+		t.Errorf("different text normalizations=%d, want 1", got)
+	}
+	unblock()
 	wg.Wait()
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("equal text normalizations=%d, want 1", got)
+	}
+	for _, value := range []string{text, other} {
+		if got := sharedNormalizedDigest(strings.Clone(value)); got != normalizedDigest(value) {
+			t.Errorf("cached digest %q want %q", got, normalizedDigest(value))
+		}
+	}
+	if calls.Load() != 1 || otherCalls.Load() != 1 {
+		t.Fatalf("cached texts normalized again: equal=%d different=%d", calls.Load(), otherCalls.Load())
+	}
 	if stats := SharedCachesState()["digests"]; stats.Bytes == 0 {
 		t.Fatal(stats)
 	}

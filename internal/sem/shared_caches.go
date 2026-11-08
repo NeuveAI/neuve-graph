@@ -47,8 +47,10 @@ const (
 )
 
 var (
-	sharedCachesMu     sync.Mutex
-	activeSharedCaches *sharedCaches
+	sharedCachesMu        sync.Mutex
+	activeSharedCaches    *sharedCaches
+	normalizeSharedDigest = normalizedDigest
+	sharedDigestContext   = context.Background
 )
 
 // EnableSharedCaches turns on, for the rest of this process, the caches
@@ -152,11 +154,11 @@ func sharedNormalizedDigest(value string) string {
 	if digest, ok := caches.digests.get(value); ok {
 		return digest
 	}
-	digest, _ := caches.digestWork.Do(context.Background(), value, func(context.Context) (string, error) {
+	digest, _ := caches.digestWork.Do(sharedDigestContext(), value, func(context.Context) (string, error) {
 		if digest, ok := caches.digests.peek(value); ok {
 			return digest, nil
 		}
-		digest := normalizedDigest(value)
+		digest := normalizeSharedDigest(value)
 		// A copy keeps a slice's larger backing text out of the cache.
 		caches.digests.put(strings.Clone(value), digest, int64(len(value)+len(digest)+64))
 		return digest, nil
