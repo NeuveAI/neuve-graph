@@ -382,7 +382,7 @@ func (parserOptions TreeSitterParser) ParseWithStatus(path, content string) ([]E
 		return nil, spec.language, ParseStatus{ParseError: true, Code: code, Detail: detail}
 	}
 	if parserOptions.outline != nil && !root.HasError() {
-		*parserOptions.outline = extractFileOutline(path, spec.language, root, entitySrc, entityLineOffset)
+		*parserOptions.outline = extractFileOutline(path, spec.language, root, entitySrc, parseSrc, entityLineOffset)
 	}
 	if spec.language == "YAML" {
 		status := ParseStatus{}

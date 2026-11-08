@@ -23033,6 +23033,9 @@ func normalizeRustCrateName(name string) string {
 	return strings.ReplaceAll(name, "-", "_")
 }
 
+// importObserver receives each accepted import occurrence, including repeats.
+type importObserver func(module string, line int)
+
 var (
 	shellSourceRe     = regexp.MustCompile(`(?m)^\s*(?:source|\.)\s+["']?([^"'\s]+)`)
 	cIncludeRe        = regexp.MustCompile(`(?m)^\s*#\s*include\s+[<"]([^>"]+)[>"]`)
@@ -23048,11 +23051,13 @@ var (
 	rubyRequireRe     = regexp.MustCompile(`(?m)^\s*require(?:_relative)?\s+['"]([^'"]+)['"]`)
 	rustUseRe         = regexp.MustCompile(`(?m)^\s*use\s+([^;]+);`)
 	swiftImportRe     = regexp.MustCompile(`(?m)^\s*import\s+([A-Za-z0-9_]+)`)
-	pythonImportFn    = scanPythonImports
-	jsImportFn        = scanJSImports
-	goImportFn        = scanGoImports
-	regexImportScan   = func(re *regexp.Regexp) func(string) []string {
-		return func(content string) []string { return scanImports(content, re) }
+	pythonImportFn    = scanPythonImportsLocated
+	jsImportFn        = scanJSImportsLocated
+	goImportFn        = scanGoImportsLocated
+	regexImportScan   = func(re *regexp.Regexp) func(string, importObserver) []string {
+		return func(content string, onImport importObserver) []string {
+			return scanImportsLocated(content, onImport, re)
+		}
 	}
 )
 
@@ -23067,7 +23072,7 @@ var (
 // An extension that is recognized but genuinely carries no imports (.hcl, .sql)
 // is deliberately absent rather than mapped to a nil-returning scanner, so that
 // membership and capability stay the same question.
-var importScanners = map[string]func(content string) []string{
+var importScanners = map[string]func(content string, onImport importObserver) []string{
 	".bash":   regexImportScan(shellSourceRe),
 	".sh":     regexImportScan(shellSourceRe),
 	".zsh":    regexImportScan(shellSourceRe),
@@ -23113,7 +23118,7 @@ func importsFor(path, content string) []string {
 	if !ok {
 		return nil
 	}
-	return scan(content)
+	return scan(content, nil)
 }
 
 var (
@@ -23122,24 +23127,39 @@ var (
 )
 
 func scanPythonImports(content string) []string {
+	return scanPythonImportsLocated(content, nil)
+}
+
+func scanPythonImportsLocated(content string, onImport importObserver) []string {
 	seen := map[string]struct{}{}
-	add := func(module string) {
+	add := func(module string, line int) {
 		module = strings.TrimSpace(module)
 		if module != "" {
 			seen[module] = struct{}{}
+			if onImport != nil {
+				onImport(module, line)
+			}
 		}
 	}
-	for _, module := range scanImports(content, scanPythonImportsRe) {
+	observeDirect := onImport
+	if onImport != nil {
+		observeDirect = func(module string, line int) {
+			if !strings.HasPrefix(module, ".") || strings.Trim(module, ".") != "" {
+				onImport(module, line)
+			}
+		}
+	}
+	for _, module := range scanImportsLocated(content, observeDirect, scanPythonImportsRe) {
 		if strings.HasPrefix(module, ".") && strings.Trim(module, ".") == "" {
 			continue
 		}
-		add(module)
+		seen[module] = struct{}{}
 	}
 	for _, statement := range pythonFromImportStatements(content) {
 		if strings.HasPrefix(statement.module, ".") && strings.Trim(statement.module, ".") == "" {
 			continue
 		}
-		add(statement.module)
+		add(statement.module, statement.line+1)
 	}
 	runtimeImportCalls := []string{`importlib\s*\.\s*import_module`, `__import__`}
 	for _, match := range scanPythonImportsRe2.FindAllStringSubmatch(content, -1) {
@@ -23168,18 +23188,20 @@ func scanPythonImports(content string) []string {
 		}
 	}
 	runtimeImportCallRe := strings.Join(runtimeImportCalls, "|")
-	for _, match := range regexp.MustCompile(`\b(?:`+runtimeImportCallRe+`)\s*\(\s*["']([^"']+)["']`).FindAllStringSubmatch(content, -1) {
+	for _, loc := range regexp.MustCompile(`\b(?:`+runtimeImportCallRe+`)\s*\(\s*["']([^"']+)["']`).FindAllStringSubmatchIndex(content, -1) {
+		match := importMatchText(content, loc)
 		if len(match) == 2 {
-			add(match[1])
+			add(match[1], importSourceLine(content, loc[0]))
 		}
 	}
 	constants := staticStringConstants(content)
-	for _, match := range regexp.MustCompile(`\b(?:`+runtimeImportCallRe+`)\s*\(\s*([^,\n)]+)`).FindAllStringSubmatch(content, -1) {
+	for _, loc := range regexp.MustCompile(`\b(?:`+runtimeImportCallRe+`)\s*\(\s*([^,\n)]+)`).FindAllStringSubmatchIndex(content, -1) {
+		match := importMatchText(content, loc)
 		if len(match) != 2 {
 			continue
 		}
 		if module, ok := staticStringExpressionValue(match[1], constants); ok {
-			add(module)
+			add(module, importSourceLine(content, loc[0]))
 		}
 	}
 	for _, statement := range pythonFromImportStatements(content) {
@@ -23194,9 +23216,9 @@ func scanPythonImports(content string) []string {
 			}
 			switch {
 			case strings.HasPrefix(module, ".") && strings.Trim(module, ".") == "":
-				add(pythonFromImportModuleSpec(module, name))
+				add(pythonFromImportModuleSpec(module, name), statement.line+1)
 			case !strings.HasPrefix(module, ".") && !strings.Contains(module, "."):
-				add(strings.TrimRight(module, ".") + "." + name)
+				add(strings.TrimRight(module, ".")+"."+name, statement.line+1)
 			}
 		}
 	}
@@ -23224,6 +23246,10 @@ func isSimpleIdentifier(value string) bool {
 var scanJSImportsRe = regexp.MustCompile(`(?m)^\s*import\s+.*?\s+from\s+['"]([^'"]+)['"]|^\s*import\s+['"]([^'"]+)['"]|require\s*\(\s*['"]([^'"]+)['"]\s*\)|import\s*\(\s*['"]([^'"]+)['"]\s*\)`)
 
 func scanJSImports(content string) []string {
+	return scanJSImportsLocated(content, nil)
+}
+
+func scanJSImportsLocated(content string, onImport importObserver) []string {
 	seen := map[string]struct{}{}
 	add := func(module string) {
 		module = strings.TrimSpace(module)
@@ -23231,13 +23257,24 @@ func scanJSImports(content string) []string {
 			seen[module] = struct{}{}
 		}
 	}
-	for _, module := range scanImports(content, scanJSImportsRe) {
+	observeLiteral := onImport
+	if onImport != nil {
+		observeLiteral = func(module string, line int) {
+			if module != "" {
+				onImport(module, line)
+			}
+		}
+	}
+	for _, module := range scanImportsLocated(content, observeLiteral, scanJSImportsRe) {
 		add(module)
 	}
 	constants := staticJSStringConstants(content)
-	for _, expr := range scanJSDynamicImportExpressions(content) {
-		if module, ok := staticStringExpressionValue(expr, constants); ok {
+	for _, expr := range scanJSDynamicImportExpressionsLocated(content) {
+		if module, ok := staticStringExpressionValue(expr.text, constants); ok {
 			add(module)
+			if onImport != nil && strings.TrimSpace(module) != "" {
+				onImport(module, importSourceLine(content, expr.offset))
+			}
 		}
 	}
 	return sortedKeys(seen)
@@ -23247,6 +23284,19 @@ var scanJSDynamicImportExpressionsCallRe = regexp.MustCompile(`\b(?:require|impo
 
 func scanJSDynamicImportExpressions(content string) []string {
 	var expressions []string
+	for _, expression := range scanJSDynamicImportExpressionsLocated(content) {
+		expressions = append(expressions, expression.text)
+	}
+	return expressions
+}
+
+type importExpression struct {
+	text   string
+	offset int
+}
+
+func scanJSDynamicImportExpressionsLocated(content string) []importExpression {
+	var expressions []importExpression
 	for _, loc := range scanJSDynamicImportExpressionsCallRe.FindAllStringIndex(content, -1) {
 		if len(loc) != 2 {
 			continue
@@ -23270,7 +23320,7 @@ func scanJSDynamicImportExpressions(content string) []string {
 		if len(args) != 1 {
 			continue
 		}
-		expressions = append(expressions, args[0])
+		expressions = append(expressions, importExpression{args[0], loc[0]})
 	}
 	return expressions
 }
@@ -23289,10 +23339,16 @@ var (
 )
 
 func scanGoImports(content string) []string {
+	return scanGoImportsLocated(content, nil)
+}
+
+func scanGoImportsLocated(content string, onImport importObserver) []string {
 	seen := map[string]struct{}{}
 	inBlock := false
 	scanner := bufio.NewScanner(strings.NewReader(content))
+	lineNumber := 0
 	for scanner.Scan() {
+		lineNumber++
 		line := strings.TrimSpace(scanner.Text())
 		if !inBlock {
 			if strings.HasPrefix(line, "import (") {
@@ -23301,6 +23357,9 @@ func scanGoImports(content string) []string {
 			}
 			if matches := scanGoImportsSingleImport.FindStringSubmatch(line); len(matches) > 1 {
 				seen[matches[1]] = struct{}{}
+				if onImport != nil {
+					onImport(matches[1], lineNumber)
+				}
 			}
 			continue
 		}
@@ -23310,15 +23369,24 @@ func scanGoImports(content string) []string {
 		}
 		if matches := scanGoImportsBlockImport.FindStringSubmatch(line); len(matches) > 1 {
 			seen[matches[1]] = struct{}{}
+			if onImport != nil {
+				onImport(matches[1], lineNumber)
+			}
 		}
 	}
 	return sortedKeys(seen)
 }
 
 func scanImports(content string, expressions ...*regexp.Regexp) []string {
+	return scanImportsLocated(content, nil, expressions...)
+}
+
+func scanImportsLocated(content string, onImport importObserver, expressions ...*regexp.Regexp) []string {
 	seen := map[string]struct{}{}
 	scanner := bufio.NewScanner(strings.NewReader(content))
+	lineNumber := 0
 	for scanner.Scan() {
+		lineNumber++
 		line := scanner.Text()
 		for _, expression := range expressions {
 			matches := expression.FindStringSubmatch(line)
@@ -23330,10 +23398,29 @@ func scanImports(content string, expressions ...*regexp.Regexp) []string {
 					continue
 				}
 				seen[strings.TrimSpace(match)] = struct{}{}
+				if onImport != nil {
+					onImport(strings.TrimSpace(match), lineNumber)
+				}
 			}
 		}
 	}
 	return sortedKeys(seen)
+}
+
+// Import locations are observed only by outline reads. Ordinary scans retain
+// their sorted, distinct module results and do not allocate a location index.
+func importSourceLine(content string, offset int) int {
+	return strings.Count(content[:offset], "\n") + 1
+}
+
+func importMatchText(content string, loc []int) []string {
+	matches := make([]string, len(loc)/2)
+	for i := range matches {
+		if loc[2*i] >= 0 {
+			matches[i] = content[loc[2*i]:loc[2*i+1]]
+		}
+	}
+	return matches
 }
 
 func importedNamesFor(path, content string) map[string][]string {
