@@ -1,0 +1,14 @@
+package sample
+func TestTable(t *testing.T) {
+    cases := []string{"first", "second"}
+    for _, name := range cases {
+        t.Run("case", func(t *testing.T) {
+            prepare()
+            verify()
+        })
+        t.Run(name, func(t *testing.T) {
+            arrange()
+            check()
+        })
+    }
+}

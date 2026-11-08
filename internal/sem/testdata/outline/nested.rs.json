@@ -1,0 +1,83 @@
+[
+  {
+    "start_line": 1,
+    "end_line": 10,
+    "type": "mod_item",
+    "imports": false,
+    "children": [
+      {
+        "start_line": 1,
+        "end_line": 1,
+        "type": "identifier",
+        "imports": false
+      },
+      {
+        "start_line": 1,
+        "end_line": 10,
+        "type": "declaration_list",
+        "imports": false,
+        "children": [
+          {
+            "start_line": 2,
+            "end_line": 5,
+            "type": "function_item",
+            "imports": false,
+            "children": [
+              {
+                "start_line": 2,
+                "end_line": 2,
+                "type": "identifier",
+                "imports": false
+              },
+              {
+                "start_line": 2,
+                "end_line": 2,
+                "type": "parameters",
+                "imports": false
+              },
+              {
+                "start_line": 2,
+                "end_line": 5,
+                "type": "block",
+                "imports": false
+              }
+            ]
+          },
+          {
+            "start_line": 6,
+            "end_line": 9,
+            "type": "function_item",
+            "imports": false,
+            "children": [
+              {
+                "start_line": 6,
+                "end_line": 6,
+                "type": "identifier",
+                "imports": false
+              },
+              {
+                "start_line": 6,
+                "end_line": 6,
+                "type": "parameters",
+                "imports": false
+              },
+              {
+                "start_line": 6,
+                "end_line": 9,
+                "type": "block",
+                "imports": false
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "start_line": 11,
+    "end_line": 11,
+    "type": "expression_statement",
+    "imports": false,
+    "label": "case"
+  }
+]

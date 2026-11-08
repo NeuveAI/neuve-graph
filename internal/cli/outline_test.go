@@ -51,7 +51,20 @@ func TestSymbolsOutlineRecords(t *testing.T) {
 					if _, duplicate := got[record.FilePath]; duplicate {
 						t.Fatalf("duplicate outline for %s", record.FilePath)
 					}
-					got[record.FilePath] = string(line)
+					var outline sem.FileOutlineRecord
+					if err := json.Unmarshal(line, &outline); err != nil {
+						t.Fatal(err)
+					}
+					for i := range outline.TopLevel {
+						outline.TopLevel[i].Children = nil
+						outline.TopLevel[i].Label = ""
+						outline.TopLevel[i].Callback = false
+					}
+					legacyOutline, err := json.Marshal(outline)
+					if err != nil {
+						t.Fatal(err)
+					}
+					got[record.FilePath] = string(legacyOutline)
 					continue
 				}
 				legacy.Write(line)
@@ -172,7 +185,7 @@ func runOutlineCLI(t *testing.T, args ...string) []byte {
 func TestSymbolsOutlineUsesTerminalSafeJSON(t *testing.T) {
 	repo := t.TempDir()
 	path := "unsafe\u009b.ts"
-	write(t, repo, path, "const café = 1;\n")
+	write(t, repo, path, "const café = \"unsafe\u009b\";\n")
 	output := runOutlineCLI(t, "symbols", "--repo", repo, "--worktree", "--outline", "--profile", "syntax-only")
 	if bytes.Contains(output, []byte("\u009b")) || !bytes.Contains(output, []byte(`unsafe\u009b.ts`)) {
 		t.Fatalf("outline pathname bypassed terminal-safe encoding: %q", output)
@@ -183,7 +196,7 @@ func TestSymbolsOutlineUsesTerminalSafeJSON(t *testing.T) {
 			t.Fatal(err)
 		}
 		if record.RecordType == "file_outline" {
-			if record.FilePath != path || !reflect.DeepEqual(record.Identifiers, [][]any{{float64(1), "café"}}) {
+			if record.FilePath != path || record.TopLevel[0].Label != "unsafe\u009b" || !reflect.DeepEqual(record.Identifiers, [][]any{{float64(1), "café"}}) {
 				t.Fatalf("escaping changed outline data: %#v", record)
 			}
 			return

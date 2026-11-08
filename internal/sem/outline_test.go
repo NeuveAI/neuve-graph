@@ -104,7 +104,7 @@ func TestFileOutlineImportsKeepFileContext(t *testing.T) {
 			if profile == ProfileFull && !foundImport {
 				t.Fatal("control: full-profile IMPORTS evidence missing")
 			}
-			want := []OutlineNode{{StartLine: 1, EndLine: 1, Type: "lexical_declaration"}, {StartLine: 2, EndLine: 2, Type: "lexical_declaration", Imports: true}, {StartLine: 3, EndLine: 3, Type: "lexical_declaration"}}
+			want := []OutlineNode{{StartLine: 1, EndLine: 1, Type: "lexical_declaration", Label: "./target"}, {StartLine: 2, EndLine: 2, Type: "lexical_declaration", Imports: true}, {StartLine: 3, EndLine: 3, Type: "lexical_declaration"}}
 			if got == nil || !reflect.DeepEqual(got.TopLevel, want) {
 				t.Fatalf("outline = %#v, want nodes %#v", got, want)
 			}
@@ -168,7 +168,7 @@ func TestFileOutlineProtocolBuffersSourceCoordinates(t *testing.T) {
 	if status.ParseError || outline == nil {
 		t.Fatalf("proto2 outline missing: %#v", status)
 	}
-	if len(outline.TopLevel) != 1 || outline.TopLevel[0] != (OutlineNode{StartLine: 1, EndLine: 3, Type: "message"}) {
+	if len(outline.TopLevel) != 1 || !reflect.DeepEqual(outline.TopLevel[0], OutlineNode{StartLine: 1, EndLine: 3, Type: "message", Children: []OutlineNode{{StartLine: 1, EndLine: 1, Type: "message_name"}, {StartLine: 1, EndLine: 3, Type: "message_body"}}}) {
 		t.Fatalf("synthetic syntax leaked: %#v", outline.TopLevel)
 	}
 	if len(outline.Identifiers) != 2 || outline.Identifiers[0][0] != 1 || outline.Identifiers[0][1] != "Item" || outline.Identifiers[1][0] != 2 || outline.Identifiers[1][1] != "name" {

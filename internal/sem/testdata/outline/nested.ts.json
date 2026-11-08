@@ -1,0 +1,624 @@
+[
+  {
+    "start_line": 1,
+    "end_line": 16,
+    "type": "expression_statement",
+    "imports": false,
+    "children": [
+      {
+        "start_line": 1,
+        "end_line": 1,
+        "type": "identifier",
+        "imports": false
+      },
+      {
+        "start_line": 1,
+        "end_line": 16,
+        "type": "arguments",
+        "imports": false,
+        "children": [
+          {
+            "start_line": 1,
+            "end_line": 1,
+            "type": "string",
+            "imports": false,
+            "label": "suite"
+          },
+          {
+            "start_line": 1,
+            "end_line": 16,
+            "type": "arrow_function",
+            "imports": false,
+            "children": [
+              {
+                "start_line": 1,
+                "end_line": 1,
+                "type": "formal_parameters",
+                "imports": false
+              },
+              {
+                "start_line": 1,
+                "end_line": 16,
+                "type": "statement_block",
+                "imports": false,
+                "children": [
+                  {
+                    "start_line": 2,
+                    "end_line": 5,
+                    "type": "expression_statement",
+                    "imports": false,
+                    "label": "first"
+                  },
+                  {
+                    "start_line": 6,
+                    "end_line": 15,
+                    "type": "expression_statement",
+                    "imports": false,
+                    "label": "inner"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "start_line": 17,
+    "end_line": 94,
+    "type": "class_declaration",
+    "imports": false,
+    "children": [
+      {
+        "start_line": 17,
+        "end_line": 17,
+        "type": "type_identifier",
+        "imports": false
+      },
+      {
+        "start_line": 17,
+        "end_line": 94,
+        "type": "class_body",
+        "imports": false,
+        "children": [
+          {
+            "start_line": 18,
+            "end_line": 55,
+            "type": "method_definition",
+            "imports": false,
+            "children": [
+              {
+                "start_line": 18,
+                "end_line": 18,
+                "type": "property_identifier",
+                "imports": false
+              },
+              {
+                "start_line": 18,
+                "end_line": 18,
+                "type": "formal_parameters",
+                "imports": false
+              },
+              {
+                "start_line": 18,
+                "end_line": 55,
+                "type": "statement_block",
+                "imports": false,
+                "children": [
+                  {
+                    "start_line": 19,
+                    "end_line": 19,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 20,
+                    "end_line": 20,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 21,
+                    "end_line": 21,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 22,
+                    "end_line": 22,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 23,
+                    "end_line": 23,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 24,
+                    "end_line": 24,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 25,
+                    "end_line": 25,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 26,
+                    "end_line": 26,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 27,
+                    "end_line": 27,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 28,
+                    "end_line": 28,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 29,
+                    "end_line": 29,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 30,
+                    "end_line": 30,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 31,
+                    "end_line": 31,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 32,
+                    "end_line": 32,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 33,
+                    "end_line": 33,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 34,
+                    "end_line": 34,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 35,
+                    "end_line": 35,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 36,
+                    "end_line": 36,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 37,
+                    "end_line": 37,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 38,
+                    "end_line": 38,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 39,
+                    "end_line": 39,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 40,
+                    "end_line": 40,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 41,
+                    "end_line": 41,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 42,
+                    "end_line": 42,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 43,
+                    "end_line": 43,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 44,
+                    "end_line": 44,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 45,
+                    "end_line": 45,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 46,
+                    "end_line": 46,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 47,
+                    "end_line": 47,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 48,
+                    "end_line": 48,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 49,
+                    "end_line": 49,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 50,
+                    "end_line": 50,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 51,
+                    "end_line": 51,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 52,
+                    "end_line": 52,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 53,
+                    "end_line": 53,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 54,
+                    "end_line": 54,
+                    "type": "expression_statement",
+                    "imports": false
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "start_line": 56,
+            "end_line": 93,
+            "type": "method_definition",
+            "imports": false,
+            "children": [
+              {
+                "start_line": 56,
+                "end_line": 56,
+                "type": "property_identifier",
+                "imports": false
+              },
+              {
+                "start_line": 56,
+                "end_line": 56,
+                "type": "formal_parameters",
+                "imports": false
+              },
+              {
+                "start_line": 56,
+                "end_line": 93,
+                "type": "statement_block",
+                "imports": false,
+                "children": [
+                  {
+                    "start_line": 57,
+                    "end_line": 57,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 58,
+                    "end_line": 58,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 59,
+                    "end_line": 59,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 60,
+                    "end_line": 60,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 61,
+                    "end_line": 61,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 62,
+                    "end_line": 62,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 63,
+                    "end_line": 63,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 64,
+                    "end_line": 64,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 65,
+                    "end_line": 65,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 66,
+                    "end_line": 66,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 67,
+                    "end_line": 67,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 68,
+                    "end_line": 68,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 69,
+                    "end_line": 69,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 70,
+                    "end_line": 70,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 71,
+                    "end_line": 71,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 72,
+                    "end_line": 72,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 73,
+                    "end_line": 73,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 74,
+                    "end_line": 74,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 75,
+                    "end_line": 75,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 76,
+                    "end_line": 76,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 77,
+                    "end_line": 77,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 78,
+                    "end_line": 78,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 79,
+                    "end_line": 79,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 80,
+                    "end_line": 80,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 81,
+                    "end_line": 81,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 82,
+                    "end_line": 82,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 83,
+                    "end_line": 83,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 84,
+                    "end_line": 84,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 85,
+                    "end_line": 85,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 86,
+                    "end_line": 86,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 87,
+                    "end_line": 87,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 88,
+                    "end_line": 88,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 89,
+                    "end_line": 89,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 90,
+                    "end_line": 90,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 91,
+                    "end_line": 91,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 92,
+                    "end_line": 92,
+                    "type": "expression_statement",
+                    "imports": false
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "start_line": 95,
+    "end_line": 98,
+    "type": "function_declaration",
+    "imports": false,
+    "children": [
+      {
+        "start_line": 95,
+        "end_line": 95,
+        "type": "identifier",
+        "imports": false
+      },
+      {
+        "start_line": 95,
+        "end_line": 95,
+        "type": "formal_parameters",
+        "imports": false
+      },
+      {
+        "start_line": 95,
+        "end_line": 98,
+        "type": "statement_block",
+        "imports": false,
+        "children": [
+          {
+            "start_line": 96,
+            "end_line": 96,
+            "type": "expression_statement",
+            "imports": false
+          },
+          {
+            "start_line": 97,
+            "end_line": 97,
+            "type": "expression_statement",
+            "imports": false
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "start_line": 99,
+    "end_line": 99,
+    "type": "expression_statement",
+    "imports": false,
+    "label": "single"
+  }
+]

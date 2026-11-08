@@ -1,0 +1,111 @@
+[
+  {
+    "start_line": 1,
+    "end_line": 7,
+    "type": "class_definition",
+    "imports": false,
+    "children": [
+      {
+        "start_line": 1,
+        "end_line": 1,
+        "type": "identifier",
+        "imports": false
+      },
+      {
+        "start_line": 2,
+        "end_line": 7,
+        "type": "block",
+        "imports": false,
+        "children": [
+          {
+            "start_line": 2,
+            "end_line": 4,
+            "type": "function_definition",
+            "imports": false,
+            "children": [
+              {
+                "start_line": 2,
+                "end_line": 2,
+                "type": "identifier",
+                "imports": false
+              },
+              {
+                "start_line": 2,
+                "end_line": 2,
+                "type": "parameters",
+                "imports": false
+              },
+              {
+                "start_line": 3,
+                "end_line": 4,
+                "type": "block",
+                "imports": false,
+                "children": [
+                  {
+                    "start_line": 3,
+                    "end_line": 3,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 4,
+                    "end_line": 4,
+                    "type": "expression_statement",
+                    "imports": false
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "start_line": 5,
+            "end_line": 7,
+            "type": "function_definition",
+            "imports": false,
+            "children": [
+              {
+                "start_line": 5,
+                "end_line": 5,
+                "type": "identifier",
+                "imports": false
+              },
+              {
+                "start_line": 5,
+                "end_line": 5,
+                "type": "parameters",
+                "imports": false
+              },
+              {
+                "start_line": 6,
+                "end_line": 7,
+                "type": "block",
+                "imports": false,
+                "children": [
+                  {
+                    "start_line": 6,
+                    "end_line": 6,
+                    "type": "expression_statement",
+                    "imports": false
+                  },
+                  {
+                    "start_line": 7,
+                    "end_line": 7,
+                    "type": "expression_statement",
+                    "imports": false
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "start_line": 8,
+    "end_line": 8,
+    "type": "expression_statement",
+    "imports": false,
+    "label": "case"
+  }
+]

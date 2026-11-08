@@ -1,0 +1,11 @@
+mod tests {
+    fn first() {
+        prepare();
+        verify();
+    }
+    fn second() {
+        arrange();
+        check();
+    }
+}
+run(" case ");
