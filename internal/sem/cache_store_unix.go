@@ -62,7 +62,7 @@ func holdArtifactForRead(root *os.Root, name string, file *os.File) bool {
 	return stillNamed(root, name, file)
 }
 
-func identityOf(info os.FileInfo) FileIdentity {
+func identityOf(_ *os.File, info os.FileInfo) FileIdentity {
 	identity := FileIdentity{Present: true, Size: info.Size(), ModTime: info.ModTime().UnixNano()}
 	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
 		identity.Device, identity.Inode = uint64(stat.Dev), uint64(stat.Ino)
@@ -95,4 +95,16 @@ func freeDiskBytes(dir string) int64 {
 		return -1
 	}
 	return int64(stat.Bavail) * int64(stat.Bsize)
+}
+
+func removeLockedArtifact(root *os.Root, name string, _ func()) error {
+	return root.Remove(name)
+}
+
+func identifyFile(path string) FileIdentity {
+	info, err := os.Stat(path)
+	if err != nil {
+		return FileIdentity{}
+	}
+	return identityOf(nil, info)
 }

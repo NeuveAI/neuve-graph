@@ -120,6 +120,7 @@ func TestSnapshotMemoryAnswersLikeAFreshProcess(t *testing.T) {
 
 // A search that edits a record of its snapshot edits its own copy: the next
 // search reads the snapshot as it was decoded.
+// Why: Memory hits must return separate records on every platform, including Windows.
 func TestSnapshotMemoryHandsOutSeparateRecords(t *testing.T) {
 	file, err := os.CreateTemp(t.TempDir(), "snapshot")
 	if err != nil {
@@ -135,12 +136,12 @@ func TestSnapshotMemoryHandsOutSeparateRecords(t *testing.T) {
 	}}
 	memory := &snapshotMemory{max: 2, entries: map[string]*snapshotMemoryEntry{}}
 	decode := func() (cachedSearchSnapshot, error) { return decoded, nil }
-	first, _, _ := memory.read(file.Name(), info, decode)
+	first, _, _ := memory.read(file.Name(), file, info, decode)
 	first.Snapshot.Symbols[0].Name = "Changed"
 	first.Snapshot.Files[0].Path = "changed.go"
 	first.Snapshot.Relations[0].FromID = "changed"
 	first.Snapshot.Externals[0].ID = "changed"
-	second, hit, _ := memory.read(file.Name(), info, decode)
+	second, hit, _ := memory.read(file.Name(), file, info, decode)
 	if !hit || second.Snapshot.Symbols[0].Name != "Original" || second.Snapshot.Files[0].Path != "a.go" || second.Snapshot.Relations[0].FromID != "r1" || second.Snapshot.Externals[0].ID != "e1" {
 		t.Fatalf("an edit reached the remembered snapshot: %+v (hit %v)", second.Snapshot, hit)
 	}

@@ -243,13 +243,7 @@ type FileIdentity struct {
 }
 
 // IdentifyFile is what path names now (following links).
-func IdentifyFile(path string) FileIdentity {
-	info, err := os.Stat(path)
-	if err != nil {
-		return FileIdentity{}
-	}
-	return identityOf(info)
-}
+func IdentifyFile(path string) FileIdentity { return identifyFile(path) }
 
 // CacheOpenRecord collects the cache artifacts opened while it records, each
 // as the file it was when opened: the inputs, besides its arguments, a
@@ -295,7 +289,7 @@ func noteCacheOpen(cacheDir, relative string, file *os.File) {
 	}
 	identity := FileIdentity{}
 	if info, err := file.Stat(); err == nil {
-		identity = identityOf(info)
+		identity = identityOf(file, info)
 	}
 	path := filepath.Join(cacheDir, relative)
 	for record := range cacheOpenRecords.active {
@@ -767,12 +761,12 @@ func removeCacheUnit(root *os.Root, unit *cacheUnit) (int64, bool) {
 		unlocks = append(unlocks, unlock)
 	}
 	var removed int64
-	for _, name := range unit.paths {
+	for index, name := range unit.paths {
 		info, err := root.Lstat(name)
 		if err != nil {
 			continue
 		}
-		if err := root.Remove(name); err == nil {
+		if err := removeLockedArtifact(root, name, unlocks[index]); err == nil {
 			removed += info.Size()
 		}
 	}

@@ -430,19 +430,36 @@ func joinLSPCleanup(original, cleanup error) error {
 	return lspError("cleanup", "peer/source view finalization failed", cleanup)
 }
 func lspFileURI(path string) string {
-	return (&url.URL{Scheme: "file", Path: filepath.ToSlash(path)}).String()
+	return localFileURI(path)
 }
 func lspOriginalPath(uri, root string) string {
 	parsed, err := url.Parse(uri)
-	if err != nil || parsed.Scheme != "file" || parsed.Host != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+	rootURI, rootErr := url.Parse(localFileURI(root))
+	if err != nil || rootErr != nil || parsed.Scheme != "file" || parsed.User != nil || parsed.Opaque != "" ||
+		!strings.EqualFold(parsed.Host, rootURI.Host) || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return ""
 	}
-	path, err := filepath.Rel(root, filepath.FromSlash(parsed.Path))
+	// Refuse traversal before path cleaning or filesystem normalization.
+	for _, component := range strings.Split(strings.ReplaceAll(parsed.Path, "\\", "/"), "/") {
+		if component == ".." {
+			return ""
+		}
+	}
+	target, err := lspNormalizeURIPath(parsed)
+	if err != nil {
+		return ""
+	}
+	normalRoot, err := lspNormalizeURIPath(rootURI)
+	if err != nil {
+		return ""
+	}
+	path, err := filepath.Rel(normalRoot, target)
 	if err != nil || !lspCanonicalPath(filepath.ToSlash(path)) {
 		return ""
 	}
 	return filepath.ToSlash(path)
 }
+
 func lspLocations(raw json.RawMessage, root string, contents map[string]string) ([]LSPQualifiedLocation, error) {
 	if string(raw) == "null" {
 		return nil, nil

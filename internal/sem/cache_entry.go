@@ -396,13 +396,7 @@ func (entry cacheEntry) publish(ctx context.Context, temporaryPrefix string, val
 		if err := directory.Link(temporaryName, filepath.Base(entry.relative)); err != nil {
 			return err
 		}
-		directoryFile, err := directory.Open(".")
-		if err != nil {
-			return err
-		}
-		err = directoryFile.Sync()
-		_ = directoryFile.Close()
-		return err
+		return syncCacheDirectory(directory)
 	}
 	// Rename, not a write through the destination: renameat replaces a symlink sitting at the
 	// artifact name instead of following it, so the one component an attacker can predict without
