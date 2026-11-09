@@ -1,6 +1,7 @@
 package sem
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -61,11 +62,11 @@ func TestSharedContentReaderReadsOnce(t *testing.T) {
 			return commit + " " + prefix + path, true, nil
 		}
 	}
-	first := sharedContentReader(reader("aa", ""), "aa", "", 1000)
-	second := sharedContentReader(reader("aa", ""), "aa", "", 1000)
-	otherCommit := sharedContentReader(reader("bb", ""), "bb", "", 1000)
-	otherCeiling := sharedContentReader(reader("aa", ""), "aa", "", 2000)
-	subdirectory := sharedContentReader(reader("aa", "pkg/"), "aa", "pkg/", 1000)
+	first := sharedContentReader(context.Background(), reader("aa", ""), "aa", "", 1000)
+	second := sharedContentReader(context.Background(), reader("aa", ""), "aa", "", 1000)
+	otherCommit := sharedContentReader(context.Background(), reader("bb", ""), "bb", "", 1000)
+	otherCeiling := sharedContentReader(context.Background(), reader("aa", ""), "aa", "", 2000)
+	subdirectory := sharedContentReader(context.Background(), reader("aa", "pkg/"), "aa", "pkg/", 1000)
 	for _, read := range []contentReader{first, second} {
 		if content, ok := read("x.go"); !ok || content != "aa x.go" {
 			t.Fatalf("read %q %v", content, ok)
@@ -94,7 +95,7 @@ func TestSharedContentReaderReadsOnce(t *testing.T) {
 	if content, ok := first("flaky.go"); !ok || content != "aa flaky.go" {
 		t.Fatalf("after a failed read, read %q %v, want the file", content, ok)
 	}
-	plain := sharedContentReader(reader("cc", ""), "", "", 1000)
+	plain := sharedContentReader(context.Background(), reader("cc", ""), "", "", 1000)
 	plain("x.go")
 	plain("x.go")
 	if reads["cc:x.go"] != 2 {

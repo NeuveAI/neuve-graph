@@ -2359,7 +2359,7 @@ func openSearchContentReader(
 		closeReaders := func() error {
 			return errors.Join(batch.Close(), limited.Close())
 		}
-		return sharedContentReader(read, commit, treePathPrefix, maxBytes), closeReaders, nil
+		return sharedContentReader(ctx, read, commit, treePathPrefix, maxBytes), closeReaders, nil
 	}
 	opened, err := openSource(ctx, repo, "", sourceOptions{
 		ignoreFiles:  ignoreFiles,

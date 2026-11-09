@@ -2,6 +2,9 @@ package sem
 
 import (
 	"container/list"
+	"context"
+
+	"github.com/entireio/entire-graph/internal/sharedwork"
 	"strings"
 	"sync"
 )
@@ -19,8 +22,10 @@ import (
 //
 // Off (nil) in a process answering one search.
 type sharedCaches struct {
-	contents *byteLRU[contentKey, contentValue]
-	digests  *byteLRU[string, string]
+	contents    *byteLRU[contentKey, contentValue]
+	digests     *byteLRU[string, string]
+	contentWork sharedwork.Group[contentKey, contentValue]
+	digestWork  sharedwork.Group[string, string]
 }
 
 type contentKey struct {
@@ -42,8 +47,10 @@ const (
 )
 
 var (
-	sharedCachesMu     sync.Mutex
-	activeSharedCaches *sharedCaches
+	sharedCachesMu        sync.Mutex
+	activeSharedCaches    *sharedCaches
+	normalizeSharedDigest = normalizedDigest
+	sharedDigestContext   = context.Background
 )
 
 // EnableSharedCaches turns on, for the rest of this process, the caches
@@ -106,7 +113,7 @@ type committedRead func(path string) (content string, ok bool, err error)
 // sharedContentReader is read with the shared contents cache: the same
 // commit, tree path (prefix, the repository's directory within its tree,
 // then path) and ceiling read the same bytes. Only finished reads are kept.
-func sharedContentReader(read committedRead, commit, prefix string, maxBytes int) contentReader {
+func sharedContentReader(ctx context.Context, read committedRead, commit, prefix string, maxBytes int) contentReader {
 	caches := currentSharedCaches()
 	if caches == nil || commit == "" {
 		return func(path string) (string, bool) {
@@ -119,14 +126,21 @@ func sharedContentReader(read committedRead, commit, prefix string, maxBytes int
 		if value, ok := caches.contents.get(key); ok {
 			return value.content, value.ok
 		}
-		content, ok, err := read(path)
-		if err != nil {
-			return content, false
-		}
-		if len(content) <= sharedContentMaxFileBytes {
-			caches.contents.put(key, contentValue{content: content, ok: ok}, int64(len(content)+len(key.path)+64))
-		}
-		return content, ok
+		value, err := caches.contentWork.Do(ctx, key, func(context.Context) (contentValue, error) {
+			if value, ok := caches.contents.peek(key); ok {
+				return value, nil
+			}
+			content, ok, err := read(path)
+			if err != nil {
+				return contentValue{content: content}, sharedwork.Abandon(err)
+			}
+			value := contentValue{content: content, ok: ok}
+			if len(content) <= sharedContentMaxFileBytes {
+				caches.contents.put(key, value, int64(len(content)+len(key.path)+64))
+			}
+			return value, nil
+		})
+		return value.content, value.ok && err == nil
 	}
 }
 
@@ -140,10 +154,15 @@ func sharedNormalizedDigest(value string) string {
 	if digest, ok := caches.digests.get(value); ok {
 		return digest
 	}
-	digest := normalizedDigest(value)
-	// A copy, so the key holds only its own bytes, not a larger text value
-	// may be a slice of.
-	caches.digests.put(strings.Clone(value), digest, int64(len(value)+len(digest)+64))
+	digest, _ := caches.digestWork.Do(sharedDigestContext(), value, func(context.Context) (string, error) {
+		if digest, ok := caches.digests.peek(value); ok {
+			return digest, nil
+		}
+		digest := normalizeSharedDigest(value)
+		// A copy keeps a slice's larger backing text out of the cache.
+		caches.digests.put(strings.Clone(value), digest, int64(len(value)+len(digest)+64))
+		return digest, nil
+	})
 	return digest
 }
 
@@ -178,6 +197,17 @@ func (c *byteLRU[K, V]) get(key K) (V, bool) {
 		return element.Value.(*byteLRUItem[K, V]).value, true
 	}
 	c.misses++
+	var zero V
+	return zero, false
+}
+
+// peek rechecks publication after claiming without counting a second cache request.
+func (c *byteLRU[K, V]) peek(key K) (V, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if element, ok := c.items[key]; ok {
+		return element.Value.(*byteLRUItem[K, V]).value, true
+	}
 	var zero V
 	return zero, false
 }
