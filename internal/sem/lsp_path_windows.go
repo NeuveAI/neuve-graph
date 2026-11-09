@@ -8,9 +8,10 @@ import (
 	"io/fs"
 	"net/url"
 	"path/filepath"
+	"strings"
 )
 
-func lspNormalizeURIPath(uri *url.URL) (string, error) {
+func lspWindowsURIPath(uri *url.URL) string {
 	path := uri.Path
 	if uri.Host != "" {
 		path = "//" + uri.Host + path
@@ -18,8 +19,30 @@ func lspNormalizeURIPath(uri *url.URL) (string, error) {
 		path = path[1:]
 	}
 	path = filepath.FromSlash(path)
+	return path
+}
+
+func lspAdmittedWindowsURIPath(uri, root *url.URL) (string, error) {
+	path := lspWindowsURIPath(uri)
 	if !filepath.IsAbs(path) {
 		return "", fmt.Errorf("not an absolute file URI")
+	}
+	// UNC, device and extended-length spellings can reach remote hosts even
+	// before containment is checked. Require lexical containment under the
+	// caller's root before making any filesystem call for these namespaces.
+	if strings.HasPrefix(path, `\`) {
+		relative, err := filepath.Rel(lspWindowsURIPath(root), path)
+		if err != nil || (relative != "." && !lspCanonicalPath(filepath.ToSlash(relative))) {
+			return "", fmt.Errorf("file URI namespace is outside admitted root")
+		}
+	}
+	return path, nil
+}
+
+func lspNormalizeURIPath(uri, root *url.URL) (string, error) {
+	path, err := lspAdmittedWindowsURIPath(uri, root)
+	if err != nil {
+		return "", err
 	}
 	// EvalSymlinks expands 8.3 names and normalizes drive and component case.
 	// Exact-source buffers need not exist on disk, so normalize the nearest

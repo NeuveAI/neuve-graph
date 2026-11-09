@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 )
 
-func lspNormalizeURIPath(uri *url.URL) (string, error) {
+func lspNormalizeURIPath(uri, _ *url.URL) (string, error) {
 	if uri.Host != "" || !filepath.IsAbs(uri.Path) {
 		return "", fmt.Errorf("not a local absolute file URI")
 	}

@@ -445,11 +445,11 @@ func lspOriginalPath(uri, root string) string {
 			return ""
 		}
 	}
-	target, err := lspNormalizeURIPath(parsed)
+	target, err := lspNormalizeURIPath(parsed, rootURI)
 	if err != nil {
 		return ""
 	}
-	normalRoot, err := lspNormalizeURIPath(rootURI)
+	normalRoot, err := lspNormalizeURIPath(rootURI, rootURI)
 	if err != nil {
 		return ""
 	}
