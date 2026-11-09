@@ -1133,7 +1133,7 @@ func readSearchSnapshot(entry cacheEntry) (cachedSearchSnapshot, error) {
 	defer file.Close()
 	if memory := currentSnapshotMemory(); memory != nil {
 		if info, err := file.Stat(); err == nil {
-			cached, _, err := memory.read(filepath.Join(entry.root, entry.relative), info, func() (cachedSearchSnapshot, error) {
+			cached, _, err := memory.read(filepath.Join(entry.root, entry.relative), file, info, func() (cachedSearchSnapshot, error) {
 				return decodeSearchSnapshot(file)
 			})
 			return cached, err

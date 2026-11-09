@@ -8,7 +8,7 @@ import (
 	"syscall"
 )
 
-func cacheFileIdentity(info os.FileInfo) (string, bool) {
+func cacheFileIdentity(_ *os.File, info os.FileInfo) (string, bool) {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return "", false

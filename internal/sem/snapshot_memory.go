@@ -71,8 +71,8 @@ func SnapshotMemoryState() (held, limit, reads, hits int) {
 
 // read returns the snapshot of the opened artifact, decoding it at most once
 // per identity; concurrent readers of one identity share one decode.
-func (m *snapshotMemory) read(path string, info os.FileInfo, decode func() (cachedSearchSnapshot, error)) (cachedSearchSnapshot, bool, error) {
-	identity, ok := cacheFileIdentity(info)
+func (m *snapshotMemory) read(path string, file *os.File, info os.FileInfo, decode func() (cachedSearchSnapshot, error)) (cachedSearchSnapshot, bool, error) {
+	identity, ok := cacheFileIdentity(file, info)
 	if !ok {
 		m.mu.Lock()
 		m.reads++
