@@ -606,3 +606,27 @@ func TestLanesKeepTheirOwnSlots(t *testing.T) {
 		t.Fatalf("%d preparations ran at once, want one", peak.Load())
 	}
 }
+
+// Why: each caller's descriptor number changes without changing the shared service's identity.
+func TestLifelineDoesNotChooseService(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "gl-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	t.Setenv(EnvDirectory, dir)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := SocketPath(executable, []string{"A=1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fd := range []string{"0", "3", "9"} {
+		b, err := SocketPath(executable, []string{"A=1", "ENTIRE_GRAPH_LIFELINE_FD=" + fd})
+		if err != nil || a != b {
+			t.Fatalf("lifeline %s chose %s (%v), want %s", fd, b, err, a)
+		}
+	}
+}

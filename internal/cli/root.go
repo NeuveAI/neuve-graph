@@ -31,11 +31,14 @@ type Options struct {
 }
 
 func Execute(version string, args []string) error {
-	// Before anything else: while this process runs, no cache prune removes
-	// the engine copy it runs from.
-	sem.HoldExecutable()
-	ctx, stop := interruptibleContext(context.Background(), os.Exit)
+	ctx, stop, err := interruptibleContext(context.Background(), os.Exit)
+	if err != nil {
+		return err
+	}
 	defer stop()
+	// Claim the inherited lifeline before opening our own executable descriptor.
+	// While this process runs, no cache prune removes the engine copy it runs from.
+	sem.HoldExecutable()
 	handled, reason, err := forwardToService(ctx, args)
 	if handled {
 		return err

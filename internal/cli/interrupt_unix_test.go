@@ -25,7 +25,11 @@ func TestInterruptHelperProcess(t *testing.T) {
 	if os.Getenv(interruptHelperEnv) != "1" {
 		t.Skip("helper process only")
 	}
-	ctx, stop := interruptibleContext(context.Background(), os.Exit)
+	ctx, stop, err := interruptibleContext(context.Background(), os.Exit)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	defer stop()
 	child := exec.CommandContext(ctx, "sleep", "60")
 	if err := child.Start(); err != nil {

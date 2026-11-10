@@ -167,7 +167,8 @@ const maxSocketPath = 103
 // volatileEnvironment never changes what Graph computes and changes between
 // calls from one caller, so it does not choose the service.
 var volatileEnvironment = map[string]bool{
-	"PWD": true, "OLDPWD": true, "SHLVL": true, "_": true,
+	"ENTIRE_GRAPH_LIFELINE_FD": true,
+	"PWD":                      true, "OLDPWD": true, "SHLVL": true, "_": true,
 	// A call's class and deadline: they order the queue, never the answer.
 	"ENTIRE_GRAPH_CLASS": true, "ENTIRE_GRAPH_DEADLINE_MS": true,
 }
