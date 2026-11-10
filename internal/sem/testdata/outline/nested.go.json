@@ -1,0 +1,104 @@
+[
+  {
+    "start_line": 1,
+    "end_line": 1,
+    "type": "package_clause",
+    "imports": false
+  },
+  {
+    "start_line": 2,
+    "end_line": 14,
+    "type": "function_declaration",
+    "imports": false,
+    "children": [
+      {
+        "start_line": 2,
+        "end_line": 2,
+        "type": "identifier",
+        "imports": false
+      },
+      {
+        "start_line": 2,
+        "end_line": 2,
+        "type": "parameter_list",
+        "imports": false
+      },
+      {
+        "start_line": 2,
+        "end_line": 14,
+        "type": "block",
+        "imports": false,
+        "children": [
+          {
+            "start_line": 3,
+            "end_line": 3,
+            "type": "short_var_declaration",
+            "imports": false
+          },
+          {
+            "start_line": 4,
+            "end_line": 13,
+            "type": "for_statement",
+            "imports": false,
+            "children": [
+              {
+                "start_line": 4,
+                "end_line": 4,
+                "type": "range_clause",
+                "imports": false
+              },
+              {
+                "start_line": 4,
+                "end_line": 13,
+                "type": "block",
+                "imports": false,
+                "children": [
+                  {
+                    "start_line": 5,
+                    "end_line": 8,
+                    "type": "expression_statement",
+                    "imports": false,
+                    "children": [
+                      {
+                        "start_line": 5,
+                        "end_line": 5,
+                        "type": "selector_expression",
+                        "imports": false
+                      },
+                      {
+                        "start_line": 5,
+                        "end_line": 8,
+                        "type": "argument_list",
+                        "imports": false
+                      }
+                    ]
+                  },
+                  {
+                    "start_line": 9,
+                    "end_line": 12,
+                    "type": "expression_statement",
+                    "imports": false,
+                    "children": [
+                      {
+                        "start_line": 9,
+                        "end_line": 9,
+                        "type": "selector_expression",
+                        "imports": false
+                      },
+                      {
+                        "start_line": 9,
+                        "end_line": 12,
+                        "type": "argument_list",
+                        "imports": false
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+]

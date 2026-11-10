@@ -296,6 +296,9 @@ func runProviderRecords(ctx context.Context, opts Options, args []string, mode s
 	if mode != "snapshot" && mode != "symbols" && mode != "edges" {
 		return fmt.Errorf("unknown provider record mode %q", mode)
 	}
+	if flags.Outline && mode != "symbols" {
+		return errors.New("--outline is only valid for symbols")
+	}
 	filterActive := flags.To != "" || flags.From != "" || len(flags.Relation) > 0
 	compact := flags.Format == "compact-ndjson"
 	scip := flags.Format == "scip"
@@ -323,6 +326,7 @@ func runProviderRecords(ctx context.Context, opts Options, args []string, mode s
 		return err
 	}
 	options := sem.ProviderSnapshotOptions{
+		Outline:      flags.Outline,
 		NoNetwork:    flags.NoNetwork,
 		Worktree:     flags.Worktree,
 		IgnoreFiles:  flags.IgnoreFiles,
@@ -432,7 +436,7 @@ func runProviderRecords(ctx context.Context, opts Options, args []string, mode s
 	// expensive re-index. It is deliberately bypassed for --worktree and, by
 	// returning above, for targeted queries.
 	cacheDir := resolveCacheDir(flags.CacheDir, opts.Env.PluginDataDir)
-	useCache := !flags.DisableCache && !flags.Worktree && !scip && cacheDir != ""
+	useCache := !flags.DisableCache && !flags.Worktree && !flags.Outline && !scip && cacheDir != ""
 	var commit, tree string
 	cacheContext := ctx
 	if useCache {
@@ -617,6 +621,8 @@ func includeRecord(mode string, record any) bool {
 	switch record.(type) {
 	case sem.FileRecord, sem.ExternalRecord:
 		return mode == "snapshot"
+	case sem.FileOutlineRecord:
+		return mode == "symbols"
 	case sem.SymbolRecord:
 		return mode == "snapshot" || mode == "symbols"
 	case sem.RelationRecord:
@@ -644,6 +650,7 @@ type commonFlags struct {
 }
 
 type providerFlags struct {
+	Outline      bool
 	Repo         string
 	Format       string
 	Profile      string
@@ -736,6 +743,8 @@ func parseProviderFlags(args []string) (providerFlags, []string, error) {
 				return flags, nil, errors.New("--profile requires a value")
 			}
 			flags.Profile = args[i]
+		case "--outline":
+			flags.Outline = true
 		case "--no-network":
 			flags.NoNetwork = true
 		case "--worktree":

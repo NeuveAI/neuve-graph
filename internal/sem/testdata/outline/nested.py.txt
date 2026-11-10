@@ -1,0 +1,8 @@
+class TestSample:
+    def test_first(self):
+        prepare()
+        verify()
+    def test_second(self):
+        arrange()
+        check()
+run(" case ")

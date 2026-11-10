@@ -1,0 +1,3 @@
+# Outline fixtures pin byte-span selection, so their bytes must not change on checkout
+# (Windows converts line endings by default, which moves the 256-byte pass-through).
+internal/sem/testdata/outline/** -text

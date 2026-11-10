@@ -135,7 +135,9 @@ var treeSitterLanguages = map[string]languageSpec{
 	".dockerfile": {language: "Dockerfile"},
 }
 
-type TreeSitterParser struct{}
+type TreeSitterParser struct {
+	outline *FileOutlineRecord
+}
 
 const treeSitterParseTimeout = 5 * time.Second
 
@@ -239,7 +241,7 @@ func (TreeSitterParser) Parse(path, content string) ([]Entity, string) {
 	return entities, language
 }
 
-func (TreeSitterParser) ParseWithStatus(path, content string) ([]Entity, string, ParseStatus) {
+func (parserOptions TreeSitterParser) ParseWithStatus(path, content string) ([]Entity, string, ParseStatus) {
 	structuralWorkCounts.extractions.Add(1)
 	spec, ok := languageForContent(path, content)
 	if !ok {
@@ -378,6 +380,9 @@ func (TreeSitterParser) ParseWithStatus(path, content string) ([]Entity, string,
 			}
 		}
 		return nil, spec.language, ParseStatus{ParseError: true, Code: code, Detail: detail}
+	}
+	if parserOptions.outline != nil && !root.HasError() {
+		*parserOptions.outline = extractFileOutline(path, spec.language, root, entitySrc, parseSrc, entityLineOffset)
 	}
 	if spec.language == "YAML" {
 		status := ParseStatus{}

@@ -203,13 +203,17 @@ func TestServiceAnswersAsTheProcessDoes(t *testing.T) {
 		secondOut := run(serviceEnv, args...)
 		second := withoutTimings(t, secondOut)
 		// The service says it answered, with its memory and the read's CPU;
-		// the second read finds its snapshot decoded in memory.
+		// the second read finds its snapshot decoded in memory. Queue wait is
+		// the wall time from arrival to the task's start, so scheduler delay
+		// on a busy machine makes it a few milliseconds even with no other
+		// caller: it must be reported and non-negative, not exactly zero.
 		for index, out := range [][]byte{firstOut, secondOut} {
 			block := serviceBlock(t, out)
+			queueWait, queueWaitReported := block["queue_wait_ms"].(float64)
 			if block == nil || block["answered"] != true || block["reason"] != nil ||
 				block["rss_bytes"].(float64) <= 0 || block["max_rss_bytes"].(float64) < block["rss_bytes"].(float64) ||
 				block["snapshots_limit"] != 2.0 || block["snapshots_held"].(float64) < 1 ||
-				block["cpu_user_ms"].(float64) < 0 || block["cpu_system_ms"].(float64) < 0 || block["queue_wait_ms"] != 0.0 ||
+				block["cpu_user_ms"].(float64) < 0 || block["cpu_system_ms"].(float64) < 0 || !queueWaitReported || queueWait < 0 ||
 				block["cache_bytes"].(float64) <= 0 || block["cache_cap_bytes"] != float64(4<<30) {
 				t.Fatalf("%s call %d through the service: service block %v", args[0], index+1, block)
 			}

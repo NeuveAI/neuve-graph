@@ -1,0 +1,99 @@
+describe(" suite ", () => {
+  it("first", () => {
+    prepare();
+    verify();
+  });
+  describe("inner", function () {
+    it("second", () => {
+      arrange();
+      assertResult();
+    });
+    it("third", () => {
+      setup();
+      check();
+    });
+  });
+});
+class Large {
+  first() {
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+  }
+  second() {
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+    this.values.push(this.calculate(value, this.current, this.previous));
+  }
+}
+function run() {
+  prepare();
+  verify();
+}
+it(" single ", () => { prepare(); verify(); });

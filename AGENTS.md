@@ -92,8 +92,25 @@ entire graph impact --repo . --symbol NAME [--file path] [--depth 1|2] [--format
 Full stream of symbol records (stable `compound-v1` ID, kind, qualified name, source range, signature, language, container). This is a **bulk NDJSON stream of the whole repo**, filtered to the symbol record type — there is **no positional name argument** and no server-side name filter; grep the stream client-side, or prefer `query`/`neighbors` for a targeted single-symbol lookup.
 
 ```sh
-entire graph symbols --repo . --format ndjson [--worktree]
+entire graph symbols --repo . --format ndjson [--worktree] [--outline]
 ```
+
+`--outline` adds one `file_outline` record per successfully tree-sitter-parsed
+file, with root named-child ranges and grammar types in `top_level`, import
+classification from Graph's import scanners, and distinct identifier names per
+line in `identifiers`. Comments and strings are excluded from identifiers.
+Nodes spanning at least two lines may have recursive `children`, while fewer
+than four non-pass-through levels are above the node, with a hard cap of sixteen
+child edges below `top_level`. A chosen list is a pass-through when exactly one
+child spans at least 256 bytes and all others span fewer than 256 bytes, matching
+the harness's small-unit threshold. Each list comes from the descendant within
+twelve tree edges with at least two named, non-comment children and the greatest
+summed byte span, provided that sum covers at least half the original node. Ties
+follow source preorder. This can select expression operands or signature parts,
+not just statements. Identifiers are the only source text beyond the existing
+range, grammar type, import classification, path and language fields.
+Inventory-only and failed parses have no outline. All profiles support the flag;
+committed reads bypass caches so outlines always describe the selected source.
 
 **When:** you need the complete definition inventory (e.g. ingesting into a store), not a single lookup.
 
