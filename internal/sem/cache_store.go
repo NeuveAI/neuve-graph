@@ -243,13 +243,7 @@ type FileIdentity struct {
 }
 
 // IdentifyFile is what path names now (following links).
-func IdentifyFile(path string) FileIdentity {
-	info, err := os.Stat(path)
-	if err != nil {
-		return FileIdentity{}
-	}
-	return identityOf(info)
-}
+func IdentifyFile(path string) FileIdentity { return identifyFile(path) }
 
 // CacheOpenRecord collects the cache artifacts opened while it records, each
 // as the file it was when opened: the inputs, besides its arguments, a
@@ -295,7 +289,7 @@ func noteCacheOpen(cacheDir, relative string, file *os.File) {
 	}
 	identity := FileIdentity{}
 	if info, err := file.Stat(); err == nil {
-		identity = identityOf(info)
+		identity = identityOf(file, info)
 	}
 	path := filepath.Join(cacheDir, relative)
 	for record := range cacheOpenRecords.active {
@@ -749,31 +743,35 @@ func measureCache(store *cacheStore, limits CacheLimits, evict bool, keepTrees [
 	return usage, nil
 }
 
+// cacheArtifactRemoval owns a lock and the operation that retires its artifact.
+// Windows must retain the DELETE-capable handle across acquisition of the other
+// locks in a derived unit; a pathname can name a replacement by retirement time.
+type cacheArtifactRemoval struct {
+	unlock func()
+	remove func() (int64, error)
+}
+
 // removeCacheUnit removes an artifact with its derived artifacts, unless a
 // read holds one of them open or a writer has just replaced one. It returns
 // the bytes removed.
 func removeCacheUnit(root *os.Root, unit *cacheUnit) (int64, bool) {
-	var unlocks []func()
+	var locks []*cacheArtifactRemoval
 	defer func() {
-		for _, unlock := range unlocks {
-			unlock()
+		for _, lock := range locks {
+			lock.unlock()
 		}
 	}()
 	for _, name := range unit.paths {
-		unlock, held := lockArtifactForRemoval(root, name)
+		lock, held := lockArtifactForRemoval(root, name)
 		if !held {
 			return 0, false
 		}
-		unlocks = append(unlocks, unlock)
+		locks = append(locks, lock)
 	}
 	var removed int64
-	for _, name := range unit.paths {
-		info, err := root.Lstat(name)
-		if err != nil {
-			continue
-		}
-		if err := root.Remove(name); err == nil {
-			removed += info.Size()
+	for _, lock := range locks {
+		if size, err := lock.remove(); err == nil {
+			removed += size
 		}
 	}
 	// The derived directory, now empty unless written since.

@@ -30,10 +30,17 @@ func lockCacheStoreFile(root *os.Root, name string, wait bool) (func(), error) {
 // it (reads hold a shared lock on the file they read: holdArtifactForRead) or
 // a writer published another file under its name since the prune looked. An
 // artifact that cannot be opened is held by no read.
-func lockArtifactForRemoval(root *os.Root, name string) (func(), bool) {
+func lockArtifactForRemoval(root *os.Root, name string) (*cacheArtifactRemoval, bool) {
+	remove := func() (int64, error) {
+		info, err := root.Lstat(name)
+		if err != nil {
+			return 0, err
+		}
+		return info.Size(), root.Remove(name)
+	}
 	file, err := openRootBoundedRegularFile(root, name)
 	if err != nil {
-		return func() {}, true
+		return &cacheArtifactRemoval{unlock: func() {}, remove: remove}, true
 	}
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		file.Close()
@@ -43,7 +50,7 @@ func lockArtifactForRemoval(root *os.Root, name string) (func(), bool) {
 		file.Close()
 		return nil, false
 	}
-	return func() { file.Close() }, true
+	return &cacheArtifactRemoval{unlock: func() { file.Close() }, remove: remove}, true
 }
 
 // holdArtifactForRead keeps the store from removing an artifact while it is
@@ -62,7 +69,7 @@ func holdArtifactForRead(root *os.Root, name string, file *os.File) bool {
 	return stillNamed(root, name, file)
 }
 
-func identityOf(info os.FileInfo) FileIdentity {
+func identityOf(_ *os.File, info os.FileInfo) FileIdentity {
 	identity := FileIdentity{Present: true, Size: info.Size(), ModTime: info.ModTime().UnixNano()}
 	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
 		identity.Device, identity.Inode = uint64(stat.Dev), uint64(stat.Ino)
@@ -95,4 +102,12 @@ func freeDiskBytes(dir string) int64 {
 		return -1
 	}
 	return int64(stat.Bavail) * int64(stat.Bsize)
+}
+
+func identifyFile(path string) FileIdentity {
+	info, err := os.Stat(path)
+	if err != nil {
+		return FileIdentity{}
+	}
+	return identityOf(nil, info)
 }

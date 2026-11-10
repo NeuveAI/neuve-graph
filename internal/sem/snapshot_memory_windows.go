@@ -2,7 +2,15 @@
 
 package sem
 
-import "os"
+import (
+	"fmt"
+	"os"
+)
 
-// Windows has no Graph service, so snapshots are never remembered there.
-func cacheFileIdentity(os.FileInfo) (string, bool) { return "", false }
+func cacheFileIdentity(file *os.File, info os.FileInfo) (string, bool) {
+	identity := identityOf(file, info)
+	if !identity.Present {
+		return "", false
+	}
+	return fmt.Sprintf("%d:%d:%d:%d", identity.Device, identity.Inode, identity.Size, identity.ModTime), true
+}

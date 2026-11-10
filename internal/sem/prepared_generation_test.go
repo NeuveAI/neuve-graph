@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -490,7 +491,16 @@ func TestIncrementalImmutablePublicationCannotReplaceReadyBytes(t *testing.T) {
 		t.Fatal("immutable ready name was overwritten")
 	}
 	info, err := file.Stat()
-	if err != nil || info.Mode().Perm() != 0600 {
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		// Why: Go maps Windows' read-only attribute to synthesized mode bits, so a
+		// writable file reports 0666 rather than Unix's private 0600 permissions.
+		if !info.Mode().IsRegular() || info.Mode().Perm()&0200 == 0 {
+			t.Fatalf("artifact must be a regular file writable by its owner: mode=%v", info.Mode())
+		}
+	} else if info.Mode().Perm() != 0600 {
 		t.Fatalf("private artifact mode=%v err=%v", info, err)
 	}
 }
