@@ -223,12 +223,22 @@ func TestPythonIndentationIsDeclaredSignificant(t *testing.T) {
 // one comment, so a consumer must compare it by text. Ordinary non-ASCII
 // letters in prose are not such characters.
 func TestDirectiveCommentsWithHiddenBreaksOrSpaces(t *testing.T) {
-	hidden := []string{"\u2028", "\u2029", "\u0085", "\v", "\f", "\x01", "\x1b", "\u00a0", "\u2007", "\u3000", "\ufeff"}
+	hidden := []string{"\u2028", "\u2029", "\u0085", "\v", "\f", "\x01", "\x1b", "\u00a0", "\u2007", "\u3000", "\ufeff",
+		// An invalid UTF-8 sequence (Go, Python and Rust reject the file).
+		"\xc0\xaf", "\xff",
+		// Bidirectional controls (Rust rejects them by default) and other
+		// format characters.
+		"\u061c", "\u200e", "\u200f", "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",
+		"\u2066", "\u2067", "\u2068", "\u2069", "\u200b", "\u200d",
+		// A private-use code point.
+		"\ue000",
+	}
 	forms := []struct{ path, before, comment, after string }{
 		{"a.ts", "function f() { return ", "/* see the%snote below */", " 1; }\n"},
 		{"a.cs", "class A { int x = 1; ", "// see the%snote below", "\n}\n"},
 		{"a.go", "package p\n\n", "// See the%snote below.", "\nvar x = 1\n"},
 		{"a.py", "x = 1  ", "# see the%snote below", "\n"},
+		{"a.rs", "fn f() {} ", "// see the%snote below", "\n"},
 	}
 	for _, form := range forms {
 		for _, char := range hidden {
@@ -255,14 +265,27 @@ func TestDirectiveCommentsWithHiddenBreaksOrSpaces(t *testing.T) {
 			t.Errorf("Java comment with a Unicode escape %q is not flagged", comment)
 		}
 	}
-	for _, prose := range []string{"// Café crème is served here.", "// \u65e5\u672c\u8a9e\u306e\u8aac\u660e \u3053\u3053\u306b", "// Ship it \U0001F680 today.", "// Naïve résumé of the flow."} {
+	// C: a trigraph; ??/ is a backslash in ISO modes, so the comment swallows
+	// the next line.
+	for _, comment := range []string{"// see the note ??/", "// a ??( b", "/* see ??= here */", "// ok ??! or ??-"} {
+		if !directiveFlags(t, "a.c", "int x = 1; "+comment+"\nint y = 2;\n", comment) {
+			t.Errorf("C comment with a trigraph %q is not flagged", comment)
+		}
+	}
+	// An emoji sequence joined by a zero-width joiner is flagged (the joiner
+	// is a format character): accepted over-flagging. A variation selector is
+	// a mark, so an emoji with one alone is prose.
+	if !directiveFlags(t, "a.ts", "// Family \U0001F468\u200d\U0001F469 today\nf();\n", "// Family \U0001F468\u200d\U0001F469 today") {
+		t.Error("an emoji joined by U+200D is not flagged")
+	}
+	for _, prose := range []string{"// Café crème is served here.", "// \u65e5\u672c\u8a9e\u306e\u8aac\u660e \u3053\u3053\u306b", "// Ship it \U0001F680 today.", "// Naïve résumé of the flow.", "// Heart \u2764\ufe0f shown."} {
 		if directiveFlags(t, "a.ts", prose+"\nf();\n", prose) {
 			t.Errorf("prose %q with ordinary non-ASCII letters is flagged", prose)
 		}
 	}
 }
 
-// Under the consumer's rule the reviewer's two pairs read as a change.
+// Under the consumer's rule the reviewers' pairs read as a change.
 func TestHiddenLineTerminatorInCommentIsTokenChange(t *testing.T) {
 	tsBase := "function f() { return /* see the note below */ 1; }\n"
 	csBase := "class A { int x = 1; // see the note int y = 2;\n}\n"
@@ -272,6 +295,10 @@ func TestHiddenLineTerminatorInCommentIsTokenChange(t *testing.T) {
 		{"a.cs", csBase, "class A { int x = 1; // see the note\u2028int y = 2;\n}\n"},
 		{"a.cs", csBase, "class A { int x = 1; // see the note\u2029int y = 2;\n}\n"},
 		{"a.cs", csBase, "class A { int x = 1; // see the note\u0085int y = 2;\n}\n"},
+		// An invalid UTF-8 sequence, a bidirectional control, a C trigraph.
+		{"a.go", "package p\n\n// see the note\nvar x = 1\n", "package p\n\n// see the \xc0\xaf note\nvar x = 1\n"},
+		{"a.rs", "// see the note\nfn f() {}\n", "// see the \u202e note\nfn f() {}\n"},
+		{"a.c", "int x = 1; // see the note\nint y = 2;\n", "int x = 1; // see the note ??/\nint y = 2;\n"},
 	}
 	for _, p := range pairs {
 		if tokensAvailable(t, p.path, p.head) && consumerNoTokenChange(t, p.path, p.base, p.head) {

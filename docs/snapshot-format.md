@@ -351,15 +351,25 @@ establish](#what-the-leaves-do-and-do-not-establish)).
    `nosec`, `nocov` or `skipcq` are often one word, and no list of them can be
    complete). So `// TODO: x`, `//nolint`, `// explain`, `# [tool]`, `// x=1`,
    `// 3rd` and an empty `/**/` are flagged, and `// This loop retries.` is
-   not. A comment holding any character that is neither printable text nor
-   plain layout is flagged as well, whatever its words: a Unicode line or
-   paragraph separator (U+2028, U+2029), U+0085, vertical tab, form feed, any
-   other C0 or C1 control character except tab, line feed and carriage return,
-   and any space other than U+0020 (category Zs, and U+FEFF), because some
-   compilers end a line there (tsc at U+2028 and U+2029, C# also at U+0085)
-   while the grammar keeps one comment. Ordinary non-ASCII letters, accented
-   or CJK, and emoji are printable text. In Java a comment holding a Unicode
-   escape (`\u` with any number of `u`s and four hex digits) is flagged.
+   not. A comment is also flagged, whatever its words, unless its text is
+   printable text and plain layout only: valid UTF-8 in which every character
+   is a letter, mark, number, punctuation or symbol (Unicode categories L, M,
+   N, P, S), U+0020, tab, line feed or carriage return. Anything else flags
+   it: an invalid byte sequence (Go, Python and Rust reject the whole file),
+   a control character, a format character (a bidirectional control such as
+   U+202E, a compile error in Rust by default; zero-width characters; U+FEFF),
+   a separator other than the plain space (U+2028 and U+2029, where tsc ends a
+   line, while C# also ends one at the control U+0085), a private-use or
+   unassigned code point. The grammar keeps one comment in each of these
+   cases, so the consumer must compare it by text. Accented and CJK letters
+   and plain emoji are printable text; an emoji sequence joined by a
+   zero-width joiner is flagged (the joiner is a format character), which is
+   accepted over-flagging, while a variation selector is a mark and does not
+   flag. In C a comment holding a trigraph (`??` followed by one of
+   `= / ' ( ) ! < > -`) is flagged: `??/` is a backslash in ISO modes, so a
+   line comment ending in one swallows the next line. In Java a comment
+   holding a Unicode escape (`\u` with any number of `u`s and four hex
+   digits) is flagged.
 
 Capability `optional_local_only_features.symbols_outline_token_directives`,
 with its languages in `feature_languages` (today the same as
@@ -456,6 +466,10 @@ same tree-sitter tree. They do not mean the same behaviour:
   line, `.size`), or a comment line in the same place (which Ruby 2.6
   rejects), may change how Ruby parses it, while the rule above reads it as
   layout.
+- Identifier flags follow the grammar's node types, not the language's
+  keyword list: Rust's `Self` is flagged identifier although it is a keyword,
+  and Go's predeclared `nil`, `true`, `false` and `iota` are not flagged
+  identifier although a program can redeclare them.
 - Java translates Unicode escapes before it reads comments, so
   `// … \u000a code` turns the rest of the line into code. The tree does not
   model that; such comments are flagged directive.

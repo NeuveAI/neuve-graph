@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // A directive comment is a comment that a compiler or a tool reads, or may
@@ -99,7 +100,9 @@ var directivePatterns = map[string][]*regexp.Regexp{
 		// analysistest expectations.
 		regexp.MustCompile(`^//\s*want\s`),
 	},
-	"C": {fallThroughComment},
+	// A trigraph: ??/ is a backslash in ISO modes, so a line comment ending
+	// in one swallows the next line.
+	"C": {fallThroughComment, regexp.MustCompile(`\?\?[=/'()!<>-]`)},
 	// javac translates Unicode escapes before it reads comments, so
 	// `\u000a` in a comment ends it and the rest of the line is code.
 	"Java":       {fallThroughComment, regexp.MustCompile(`\\u+[0-9A-Fa-f]{4}`)},
@@ -140,22 +143,27 @@ func directiveComment(language, text string) bool {
 	return !commentLooksLikeProse(language, text)
 }
 
-// commentHoldsHiddenBreakOrSpace reports whether a comment holds a character
-// that is neither printable text nor plain layout: a Unicode line or paragraph
-// separator, NEL (U+0085), vertical tab, form feed, any other C0 or C1 control
-// character except tab, line feed and carriage return, or any space other than
-// U+0020 (category Zs, and U+FEFF). Some compilers end a line at such a
-// character (tsc at U+2028 and U+2029, C# also at U+0085) while the grammar
-// keeps one comment, so the comment must be compared by text.
+// commentHoldsHiddenBreakOrSpace reports whether a comment holds anything
+// other than printable text and plain layout. Defined positively: the text
+// must be valid UTF-8, and every character a letter, mark, number,
+// punctuation or symbol (Unicode categories L, M, N, P, S), U+0020, tab, line
+// feed or carriage return. Everything else is flagged: an invalid byte
+// sequence (Go, Python and Rust reject the file), a control character, a
+// format character (the bidirectional controls, which Rust rejects by
+// default, zero-width characters, U+FEFF), a separator other than the plain
+// space (U+2028 and U+2029, where tsc ends a line; C# also ends one at the
+// control U+0085), a private-use or unassigned code point.
 func commentHoldsHiddenBreakOrSpace(text string) bool {
-	for _, r := range text {
-		switch {
-		case r == '\t' || r == '\n' || r == '\r':
-		case r < 0x20 || r >= 0x7f && r <= 0x9f:
+	for i := 0; i < len(text); {
+		r, size := utf8.DecodeRuneInString(text[i:])
+		i += size
+		if r == utf8.RuneError && size <= 1 {
 			return true
-		case r == 0x2028 || r == 0x2029 || r == 0xFEFF:
-			return true
-		case r != ' ' && unicode.Is(unicode.Zs, r):
+		}
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			continue
+		}
+		if !unicode.In(r, unicode.L, unicode.M, unicode.N, unicode.P, unicode.S) {
 			return true
 		}
 	}
