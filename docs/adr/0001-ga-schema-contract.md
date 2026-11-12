@@ -116,12 +116,22 @@ as a need to refresh derived semantic data. History consumers must also migrate
 previously persisted entity deltas rather than merely append newly parsed ones.
 
 This is one global revision for parser identity rules across all languages.
-The value is a decimal revision encoded as a string, currently `"5"`. Consumers
+The value is a decimal revision encoded as a string, currently `"6"`. Consumers
 compare the complete opaque string for equality rather than relying on numeric
 ordering. The field name supplies its meaning; the value names no language or
 feature. A bump invalidates both snapshot and search
 cache namespaces even when the source tree and provider release are unchanged.
 It does not change the individual symbol-ID format.
+
+Revision `"6"` re-keys no symbol and changes no entity: it adds `IMPORTS`
+relations, one for each specifier a TypeScript, JavaScript, Go or Python import
+statement in the syntax tree gives that the import scanner did not read. None
+is removed; an existing relation changes only by gaining an import-target
+entry when a new specifier reaches its file. The snapshot of an unchanged tree
+therefore differs.
+Consumers upgrading from `"5"` must refresh derived snapshots; entity deltas
+are unaffected. Every cache namespace carries the token and is invalidated by
+it. See [ADR 0012](0012-imports-from-the-tree.md).
 
 Revision `"5"` emits `block` symbols for HCL only. The block case read any
 grammar's `block` node as an HCL block, so a statement body whose named children

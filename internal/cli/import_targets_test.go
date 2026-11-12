@@ -358,32 +358,210 @@ func TestStatementSpecifiersWithAnEntry(t *testing.T) {
 	}
 }
 
-// A known limit, documented in docs/snapshot-format.md: the relation side
-// reads imports with text patterns and misses some statements, so their
-// specifiers have no import-target entry (a consumer reads that as "no
-// answer"). This pins a multi-line TypeScript import as having none today.
-// Invert it when IMPORTS are read from the tree.
-func TestKnownGapMultiLineTypeScriptImportHasNoEntry(t *testing.T) {
-	repo := t.TempDir()
+// treeImportFixture holds each form the import scanner misses, per language,
+// beside forms it reads, a file the tree cannot parse and a language outside
+// the four.
+func treeImportFixture(t *testing.T) (repo, commit string) {
+	t.Helper()
+	repo = t.TempDir()
 	git(t, repo, "init")
 	git(t, repo, "config", "user.name", "Graph test")
 	git(t, repo, "config", "user.email", "graph@example.com")
-	write(t, repo, "web/a.ts", "import first from \"./first\";\nimport {\n  a,\n  b,\n} from \"./multi\";\n")
+	files := map[string]string{
+		"go.mod":                   "module example.com/m\n\ngo 1.22\n",
+		"web/a.ts":                 "export const first = 1;\n",
+		"web/b.ts":                 "export const b = 1;\n",
+		"web/types.ts":             "export type T = number;\n",
+		"web/z.ts":                 "export default 1;\n",
+		"web/x.js":                 "export const x = 1;\n",
+		"web/multi.ts":             "import first from \"./a\";\nimport {\n  b,\n} from \"./b\";\nimport type {\n  T,\n} from \"./types\";\nimport z from \"./z\";\nexport const all = [first, b, z];\n",
+		"web/multi.js":             "import {\n  x,\n} from './x.js';\nexport default x;\n",
+		"web/bad.ts":               "import one from \"./a\";\nimport {\n  two,\n} from \"./b\";\nexport const = ;\n",
+		"svc/comment.go":           "package svc\n\nimport (\n\t/* note */ \"fmt\"\n\t\"strings\" // tail\n)\n\nfunc C() { fmt.Println(strings.ToUpper(\"\")) }\n",
+		"svc/raw.go":               "package svc\n\nimport `os`\n\nfunc R() []string { return os.Args }\n",
+		"svc/group.go":             "package svc\n\nimport (\n\tstr \"strings\"\n\t_ \"embed\"\n\t. \"math\"\n)\n\nfunc G() string { _ = Pi; return str.ToLower(\"\") }\n",
+		"py/multi.py":              "import os, json\n",
+		"py/spaced.py":             "import os . path\n",
+		"py/pkg/__init__.py":       "",
+		"py/pkg/x.py":              "X = 1\n",
+		"py/pkg/rel.py":            "from . import x\n",
+		"py/pkg/star.py":           "from . import *\n",
+		"py/top/__init__.py":       "",
+		"py/top/pkg.py":            "y = 1\n",
+		"py/top/inner/__init__.py": "",
+		"py/top/inner/deep.py":     "from .. pkg import y\n",
+		"rust/lib.rs":              "use std::fmt;\nfn main() {}\n",
+	}
+	for path, content := range files {
+		write(t, repo, path, content)
+	}
 	git(t, repo, "add", ".")
 	git(t, repo, "commit", "-m", "fixture")
-	targets, _ := importTargets(t, runOutlineCLI(t, "snapshot", "--repo", repo, "--commit", rev(t, repo, "HEAD"), "--format", "ndjson", "--no-cache"))
-	records, _ := tokensStream(t, repo)
-	specifiers := map[string]bool{}
-	for _, statement := range records["web/a.ts"].Imports {
-		specifiers[statement.Specifier] = true
+	return repo, rev(t, repo, "HEAD")
+}
+
+// tokensAt reads the tokens records of one exact commit.
+func tokensAt(t *testing.T, repo, commit string) map[string]sem.FileTokensRecord {
+	t.Helper()
+	records := map[string]sem.FileTokensRecord{}
+	for _, line := range bytes.Split(bytes.TrimSpace(runOutlineCLI(t, "symbols", "--repo", repo, "--commit", commit, "--format", "ndjson", "--outline", "--tokens")), []byte("\n")) {
+		var record sem.FileTokensRecord
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Fatal(err)
+		}
+		if record.RecordType == "file_tokens" {
+			records[record.FilePath] = record
+		}
 	}
-	if !specifiers["./multi"] || !specifiers["./first"] {
-		t.Fatalf("tokens record statements %v", specifiers)
+	return records
+}
+
+// Each form the scanner misses now has its relation and its entry, with the
+// class its tree gives. Reason: these are the forms the consumer's rule was
+// blocked on (docs/snapshot-format.md listed them as the limit).
+func TestTreeImportFormsHaveRelationsAndEntries(t *testing.T) {
+	repo, commit := treeImportFixture(t)
+	const file, builtin = "import_target_file", "import_target_builtin"
+	want := map[[2]string]importTarget{
+		{"web/multi.ts", "./a"}:           {file, "web/a.ts"},
+		{"web/multi.ts", "./b"}:           {file, "web/b.ts"},     // multi-line TypeScript import
+		{"web/multi.ts", "./types"}:       {file, "web/types.ts"}, // import type across lines
+		{"web/multi.ts", "./z"}:           {file, "web/z.ts"},
+		{"web/multi.js", "./x.js"}:        {file, "web/x.js"}, // multi-line JavaScript import
+		{"svc/comment.go", "fmt"}:         {builtin, ""},      // a spec beside a leading comment
+		{"svc/comment.go", "strings"}:     {builtin, ""},
+		{"svc/raw.go", "os"}:              {builtin, ""}, // a raw-string path
+		{"svc/group.go", "strings"}:       {builtin, ""}, // aliased in a group
+		{"svc/group.go", "embed"}:         {builtin, ""}, // blank identifier
+		{"svc/group.go", "math"}:          {builtin, ""}, // dot import
+		{"py/multi.py", "os"}:             {builtin, ""},
+		{"py/multi.py", "json"}:           {builtin, ""}, // the second module of `import a, b`
+		{"py/spaced.py", "os.path"}:       {builtin, ""}, // `import os . path`
+		{"py/pkg/rel.py", ".x"}:           {file, "py/pkg/x.py"},
+		{"py/pkg/rel.py", "."}:            {file, "py/pkg/__init__.py"},
+		{"py/pkg/star.py", "."}:           {file, "py/pkg/__init__.py"}, // no name to ride on
+		{"py/top/inner/deep.py", "..pkg"}: {file, "py/top/pkg.py"},      // `from .. pkg import y`
+		{"rust/lib.rs", "std::fmt"}:       {"import_target_not_classified", ""},
+		{"web/bad.ts", "./a"}:             {file, "web/a.ts"},
 	}
-	if _, ok := targets[[2]string{"web/a.ts", "./first"}]; !ok {
-		t.Error("the single-line import lost its entry")
+	for _, profile := range []string{"full", "fast"} {
+		targets, _ := importTargets(t, runOutlineCLI(t, "snapshot", "--repo", repo, "--commit", commit, "--format", "ndjson", "--profile", profile, "--no-cache"))
+		for key, expected := range want {
+			if got, ok := targets[key]; !ok || got != expected {
+				t.Errorf("%s: %s %q: got %v (present %v), want %v", profile, key[0], key[1], got, ok, expected)
+			}
+		}
+		// A file whose tree has an error keeps the scanner's answer alone.
+		if got, ok := targets[[2]string{"web/bad.ts", "./b"}]; ok {
+			t.Errorf("%s: a file with a parse error got a tree import: %v", profile, got)
+		}
 	}
-	if got, ok := targets[[2]string{"web/a.ts", "./multi"}]; ok {
-		t.Errorf("the multi-line import now has an entry (%v): the known gap is closed; invert this test and update the docs", got)
+	if _, ok := tokensAt(t, repo, commit)["web/bad.ts"]; ok {
+		t.Error("fixture: web/bad.ts must have no tokens record")
+	}
+}
+
+// The promise of import_targets_cover_statements, as a property: for every
+// file whose tokens record says its imports were extracted, every statement's
+// specifier has an import-target entry on an IMPORTS relation of that file in
+// the snapshot of the same commit. Reason: this is what a consumer may now rely
+// on; it replaces the test that pinned the gap.
+func TestEveryExtractedImportStatementHasAnEntry(t *testing.T) {
+	treeRepo, treeCommit := treeImportFixture(t)
+	targetRepo, targetCommit := importTargetFixture(t)
+	for _, fixture := range []struct{ repo, commit string }{{treeRepo, treeCommit}, {targetRepo, targetCommit}} {
+		records := tokensAt(t, fixture.repo, fixture.commit)
+		extracted := 0
+		for _, profile := range []string{"full", "fast"} {
+			targets, _ := importTargets(t, runOutlineCLI(t, "snapshot", "--repo", fixture.repo, "--commit", fixture.commit, "--format", "ndjson", "--profile", profile, "--no-cache"))
+			for path, record := range records {
+				if record.ImportBindings != "extracted" {
+					continue
+				}
+				extracted++
+				for _, statement := range record.Imports {
+					if _, ok := targets[[2]string{path, statement.Specifier}]; !ok {
+						t.Errorf("%s: %s line %d: statement specifier %q has no import-target entry", profile, path, statement.StartLine, statement.Specifier)
+					}
+				}
+			}
+		}
+		if extracted < 8 {
+			t.Fatalf("only %d extracted tokens records: the property was not exercised", extracted)
+		}
+	}
+}
+
+// The relations the scanner gives come first, unchanged and in its order; the
+// tree's additions follow in statement order; a statement the scanner already
+// read adds nothing, so no relation is duplicated and each specifier has one
+// entry; two runs give the same bytes. Reason: old IMPORTS must stay exactly
+// as they were for every existing reader.
+func TestTreeImportsFollowTheScannersOnceEach(t *testing.T) {
+	repo, commit := treeImportFixture(t)
+	args := []string{"snapshot", "--repo", repo, "--commit", commit, "--format", "ndjson", "--no-cache"}
+	first, second := runOutlineCLI(t, args...), runOutlineCLI(t, args...)
+	if !bytes.Equal(first, second) {
+		t.Fatal("two runs gave different bytes")
+	}
+	var order []string
+	pairs := map[[2]string]int{}
+	entries := map[[2]string]int{}
+	for _, line := range bytes.Split(bytes.TrimSpace(first), []byte("\n")) {
+		var record sem.RelationRecord
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Fatal(err)
+		}
+		if record.RecordType != "relation" || record.Type != "IMPORTS" {
+			continue
+		}
+		from := record.FromID[strings.LastIndex(record.FromID, ":file:")+len(":file:"):]
+		pairs[[2]string{from, record.ToID}]++
+		for _, evidence := range record.Evidence {
+			if strings.HasPrefix(evidence.Kind, "import_target_") {
+				entries[[2]string{from, evidence.Detail}]++
+			}
+		}
+		if from == "web/multi.ts" {
+			order = append(order, record.ToID[strings.LastIndex(record.ToID, ":file:")+len(":file:"):])
+		}
+	}
+	// The scanner reads ./a and ./z (its list is sorted); ./b and ./types are
+	// the tree's, in statement order.
+	if want := []string{"web/a.ts", "web/z.ts", "web/b.ts", "web/types.ts"}; !reflect.DeepEqual(order, want) {
+		t.Errorf("web/multi.ts IMPORTS order %v, want %v", order, want)
+	}
+	if len(pairs) == 0 {
+		t.Fatal("no IMPORTS relations")
+	}
+	for pair, count := range pairs {
+		if count != 1 {
+			t.Errorf("%v: %d IMPORTS relations", pair, count)
+		}
+	}
+	for key, count := range entries {
+		if count != 1 {
+			t.Errorf("%s %q: %d entries", key[0], key[1], count)
+		}
+	}
+	// svc/comment.go's "strings" and svc/group.go's aliased and blank specs are
+	// read by the scanner as well as the tree: one relation, one entry.
+	for _, key := range [][2]string{{"svc/comment.go", "strings"}, {"svc/group.go", "strings"}, {"svc/group.go", "embed"}, {"py/multi.py", "os"}} {
+		if entries[key] != 1 {
+			t.Errorf("%s %q: %d entries, want 1", key[0], key[1], entries[key])
+		}
+	}
+}
+
+func TestImportStatementCoverageCapability(t *testing.T) {
+	var capabilities sem.CapabilityReport
+	if err := json.Unmarshal(runOutlineCLI(t, "capabilities", "--json"), &capabilities); err != nil {
+		t.Fatal(err)
+	}
+	if !capabilities.OptionalLocalOnlyFeatures["import_targets_cover_statements"] {
+		t.Error("capabilities omit import_targets_cover_statements")
+	}
+	if got := capabilities.FeatureLanguages["import_targets_cover_statements"]; !reflect.DeepEqual(got, []string{"Go", "JavaScript", "Python", "TypeScript"}) {
+		t.Errorf("import_targets_cover_statements languages %v", got)
 	}
 }

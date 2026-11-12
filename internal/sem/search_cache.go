@@ -33,7 +33,9 @@ import (
 // v19 retires omissions of live-parse-proven Erlang named body self calls.
 // v20 retains C/C++ declaration ownership and C-linkage metadata alongside
 // the shared extraction products; dropping them changes downstream binding.
-const searchSnapshotCacheVersion = "search-snapshot-v20-" + IdentityRevision
+// v21 retains each file's tree import statements, which a selective view's
+// IMPORTS relations add to the scanner's as a cold build does.
+const searchSnapshotCacheVersion = "search-snapshot-v21-" + IdentityRevision
 
 type cachedSymbolByteRange struct {
 	Start int `json:"start"`
@@ -73,7 +75,11 @@ type cachedSnapshotInternals struct {
 	// intentionally absent from the public wire format, but relation resolution
 	// consumes them. Preserve those internal fields so a complete preindex can
 	// derive an exact selective view without reparsing source files.
-	FileLines                    map[string]int                   `json:"file_lines,omitempty"`
+	FileLines map[string]int `json:"file_lines,omitempty"`
+	// FileTreeImports are FileRecord.treeImports: the IMPORTS relations of a
+	// selective view add their specifiers, as a cold build does, and the view
+	// has no tree to read them from.
+	FileTreeImports              map[string][]treeImportStatement `json:"file_tree_imports,omitempty"`
 	LocalSymbolIDs               []string                         `json:"local_symbol_ids,omitempty"`
 	SymbolByteRanges             map[string]cachedSymbolByteRange `json:"symbol_byte_ranges,omitempty"`
 	SymbolParameterNames         map[string][]string              `json:"symbol_parameter_names,omitempty"`
@@ -643,6 +649,12 @@ func newCachedSearchSnapshotFrom(providerVersion, commit, tree, derivedFrom stri
 func captureCachedSnapshotInternals(snapshot ProviderSnapshot) cachedSnapshotInternals {
 	var internals cachedSnapshotInternals
 	for _, file := range snapshot.Files {
+		if len(file.treeImports) > 0 {
+			if internals.FileTreeImports == nil {
+				internals.FileTreeImports = make(map[string][]treeImportStatement)
+			}
+			internals.FileTreeImports[file.ID] = file.treeImports
+		}
 		if file.Lines == 0 {
 			continue
 		}
@@ -714,6 +726,7 @@ func restoreCachedSearchInternals(cache *cachedSearchSnapshot) {
 func restoreCachedSnapshotInternals(snapshot *ProviderSnapshot, internals cachedSnapshotInternals) {
 	for index := range snapshot.Files {
 		snapshot.Files[index].Lines = internals.FileLines[snapshot.Files[index].ID]
+		snapshot.Files[index].treeImports = internals.FileTreeImports[snapshot.Files[index].ID]
 	}
 	localIDs := make(map[string]bool, len(internals.LocalSymbolIDs))
 	for _, id := range internals.LocalSymbolIDs {

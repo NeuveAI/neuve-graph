@@ -28,7 +28,9 @@ import (
 // v14 retires summaries written before W_SUBMODULE_NOT_READ and
 // W_GO_BUILD_EXCLUDED named the source a stream did not read.
 // v15 retires streams whose IMPORTS relations lack import target evidence.
-const providerRecordsCacheVersion = "provider-records-v15-" + IdentityRevision
+// v16 retires streams whose IMPORTS relations come from the import scanner
+// alone, without the specifiers the syntax tree's import statements add.
+const providerRecordsCacheVersion = "provider-records-v16-" + IdentityRevision
 
 // cachedProviderRecords is the on-disk envelope for a cached record stream. The
 // key alone is authoritative (sha256 over version+commit+tree+mode+profile+

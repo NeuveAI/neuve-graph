@@ -44,9 +44,10 @@ const (
 	StableSymbolIDVersion = "compound-v1"
 	// IdentityRevision is a global, opaque revision of parser identity rules across
 	// all languages. Change it when corrections re-key existing symbols or change
-	// emitted entity membership. Revision 5 stops emitting `block` symbols
-	// outside HCL (see ADR 0001).
-	IdentityRevision     = "5"
+	// emitted entity or relation membership. Revision 5 stops emitting `block`
+	// symbols outside HCL (see ADR 0001). Revision 6 gives every import
+	// statement the syntax tree shows an IMPORTS relation (see ADR 0012).
+	IdentityRevision     = "6"
 	defaultMaxParseBytes = 4 * 1024 * 1024
 	// defaultMaxSourceFiles bounds how many files one snapshot will list. The
 	// per-file indexes a snapshot keeps (one file record and its retained symbols)
@@ -310,6 +311,11 @@ type FileRecord struct {
 	Language   string `json:"language,omitempty"`
 	Bytes      int    `json:"bytes"`
 	Lines      int    `json:"-"`
+	// treeImports are the file's import statements as its tokens record reads
+	// them, from the parse that produced its symbols; nil when the file had no
+	// usable tree (see parseWithOutlineTokensImports). Not on the wire; the
+	// relation side adds their specifiers to the import scanner's.
+	treeImports []treeImportStatement
 }
 
 type ExternalRecord struct {
@@ -751,6 +757,7 @@ func Capabilities() CapabilityReport {
 			"symbols_outline_indentation_significant": true,
 			"symbols_outline_import_bindings":         true,
 			"import_target_classification":            true,
+			"import_targets_cover_statements":         true,
 			"compact_snapshot_ndjson_v1":              true,
 			"scip_snapshot_experimental":              true,
 			"hybrid_source_search":                    true,
@@ -772,6 +779,9 @@ func Capabilities() CapabilityReport {
 			"symbols_outline_indentation_significant": IndentationSignificantLanguages(),
 			"symbols_outline_import_bindings":         ImportBindingLanguages(),
 			"import_target_classification":            ImportTargetLanguages(),
+			// Every import statement a file's tokens record extracts has an
+			// import-target entry on an IMPORTS relation of that file.
+			"import_targets_cover_statements": ImportBindingLanguages(),
 		},
 		FeaturesRequiringNetworkAccess: map[string]bool{
 			"grammar_download":  false,
@@ -5434,6 +5444,7 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 				imports = importsFor(file.Path, content)
 			}
 		}
+		imports = withTreeImports(imports, file.treeImports)
 		fromID := fileID(repoKey, file.Path)
 		// With classification on, a file's IMPORTS relations are held until its
 		// import list is done, so a specifier that reaches a target an earlier
@@ -5539,15 +5550,11 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 				content, _ = readContent(file.Path)
 				contentRead = true
 			}
-			for _, statement := range pythonFromImportStatements(content) {
-				module := statement.module
-				if module == "" || strings.Trim(module, ".") != "" || len(statement.items) == 0 {
-					continue
-				}
+			for _, statement := range pythonRelativeModuleStatements(content, file.treeImports) {
+				module, name := statement[0], statement[1]
 				if _, has := heldBySpecifier[module]; has {
 					continue
 				}
-				name, _ := parsePythonImportItem(statement.items[0])
 				at, ok := heldBySpecifier[pythonFromImportModuleSpec(module, name)]
 				if !ok {
 					continue
@@ -23314,6 +23321,86 @@ func importsFor(path, content string) []string {
 		return nil
 	}
 	return scan(content, nil)
+}
+
+// withTreeImports is a file's import list for its IMPORTS relations: the
+// scanner's list as it is, followed by each specifier the tree's import
+// statements give that the list does not already hold, in statement order.
+// The scanner also reads forms that are not import statements (require(),
+// dynamic import(), export … from), so nothing it finds is dropped.
+//
+// A Python `from` import gives what the scanner would give for it: the module,
+// plus `m.n` for each name n of an absolute module without a dot; a bare
+// relative module (`.`, `..`) gives `.n` for each name instead, and its own
+// entry rides on the first of those (pythonRelativeModuleEntries), or, with
+// no names (`from . import *`), it is a specifier itself.
+func withTreeImports(scanned []string, statements []treeImportStatement) []string {
+	if len(statements) == 0 {
+		return scanned
+	}
+	seen := make(map[string]bool, len(scanned))
+	for _, specifier := range scanned {
+		seen[specifier] = true
+	}
+	var out []string
+	add := func(specifier string) {
+		if specifier == "" || seen[specifier] {
+			return
+		}
+		seen[specifier] = true
+		if out == nil {
+			out = append(make([]string, 0, len(scanned)+len(statements)), scanned...)
+		}
+		out = append(out, specifier)
+	}
+	for _, statement := range statements {
+		module := statement.Specifier
+		if !statement.PythonFrom {
+			add(module)
+			continue
+		}
+		bareRelative := strings.HasPrefix(module, ".") && strings.Trim(module, ".") == ""
+		if !bareRelative || len(statement.Names) == 0 {
+			add(module)
+		}
+		for _, name := range statement.Names {
+			switch {
+			case bareRelative:
+				add(pythonFromImportModuleSpec(module, name))
+			case module != "" && !strings.HasPrefix(module, ".") && !strings.Contains(module, "."):
+				add(module + "." + name)
+			}
+		}
+	}
+	if out == nil {
+		return scanned
+	}
+	return out
+}
+
+// pythonRelativeModuleStatements lists, as (module, first name) pairs, the
+// Python `from` imports of a bare relative module (`from . import x`) with at
+// least one name: first as the text scanner reads them, as before, then as the
+// tree reads them, so a statement the scanner missed still gets its module's
+// entry. The caller keeps one entry per module.
+func pythonRelativeModuleStatements(content string, tree []treeImportStatement) [][2]string {
+	var out [][2]string
+	for _, statement := range pythonFromImportStatements(content) {
+		module := statement.module
+		if module == "" || strings.Trim(module, ".") != "" || len(statement.items) == 0 {
+			continue
+		}
+		name, _ := parsePythonImportItem(statement.items[0])
+		out = append(out, [2]string{module, name})
+	}
+	for _, statement := range tree {
+		module := statement.Specifier
+		if !statement.PythonFrom || module == "" || strings.Trim(module, ".") != "" || len(statement.Names) == 0 {
+			continue
+		}
+		out = append(out, [2]string{module, statement.Names[0]})
+	}
+	return out
 }
 
 var (

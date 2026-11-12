@@ -435,11 +435,11 @@ included; in a grouped `import ( … )` each spec alone is a statement, so the
 `import a, b` gives both objects the whole statement's range. Re-exports
 (`export … from`), `import x = A.B` aliases, dynamic `import()` and `require()`
 calls are not import statements. The `specifier` is the text as written, and
-the `IMPORTS` relations give it an import target entry where the relation
-side's scanner reads the statement (not always: see [Import
-targets](#import-targets)). Python's scanner reads `from m import n` as `m`
-and `m.n`, and `from . import x` as `.x`, so the engine adds an entry for `.`
-itself. Every other language
+every statement of an `extracted` record has an import target entry under it
+on an `IMPORTS` relation of the same file (see [Import
+targets](#import-targets)). Python's `from m import n` also gives `m.n`, and
+`from . import x` gives `.x`, whose relation carries the entry for `.` itself.
+Every other language
 says `not_extracted` and has no `imports` field. Capabilities `optional_local_only_features` keys
 `symbols_outline_tokens` and `symbols_outline_import_bindings`, with their
 languages in `feature_languages`, declare both.
@@ -513,11 +513,9 @@ around every directive-flagged comment are byte-identical. The rows' positions
 and the file's bytes are enough to compute this, since outside rows a stretch
 holds only space, tab, carriage return and line feed.
 
-An import statement's specifier may have no import-target entry (see [Import
-targets](#import-targets)): the relation side reads imports with text patterns
-and misses some forms, and about one statement in five went without an entry on
-the consumer's TypeScript reference. No entry means "no answer", not
-unresolved.
+Every import statement of an `extracted` record has an import-target entry
+(see [Import targets](#import-targets)), so a statement's target can be read
+next to its bindings.
 
 The `directive` flag is over-inclusive by design and still not complete. A
 comment that is not flagged may be read by a tool: an analysistest
@@ -540,29 +538,22 @@ saying where that specifier resolves in the snapshot's own tree:
 | `import_target_unresolved` | (none) | Graph looked and found nothing |
 | `import_target_not_classified` | (none) | Graph does not classify this specifier |
 
-`detail` is the specifier as the import scanner read it, and the entries carry
+`detail` is the specifier (see [where specifiers come
+from](#where-specifiers-come-from)), and the entries carry
 no lines. Each entry classifies its own `detail`. All entries on one relation
 share one kind, except that the entry for a Python relative `from` module
 (`.`, `..`) rides on the relation of its first imported name and has its own
 kind (`import_target_file` for the package's `__init__.py`, else
-`import_target_unresolved`). Several entries appear
+`import_target_unresolved`); a statement that names none (`from . import *`)
+makes the module a specifier with a relation of its own. Several entries appear
 only when several specifiers of one file reach one file (`./util` and
 `./util.ts`); the relation, which keeps its first specifier's
 `import_statement` evidence as before, lists each. The `fast` profile, which
 drops evidence, keeps these entries. Relations, their ids and every other field
 are unchanged; manifests are read from the snapshot's tree through its content
 reader, so `--commit` classifies against that commit. Interactive and search
-snapshots (`query`, `neighbors`, `impact`, `def`) do not carry the entries.
-
-Not every import statement in a tokens record has an import-target entry. The
-relation side reads imports with text patterns and misses some forms:
-multi-line TypeScript and JavaScript imports, a Go spec beside a comment or
-with a raw-string path, the second module of a Python `import a, b`, a Python
-name spaced around its dots. A consumer that finds no entry for a statement's
-specifier must treat it as "no answer", never as unresolved. Measured on the
-consumer's reference ranges (TypeScript, every changed blob side): 968 of
-1,271 statements (76.2%) have an entry at 25 commits, 2,449 of 3,019 (81.1%)
-at 100, and 5,787 of 6,969 (83.0%) at 420.
+snapshots (`query`, `neighbors`, `impact`, `def`) do not carry the entries;
+they carry the same `IMPORTS` relations.
 
 | Language | Declared | Builtin | Otherwise |
 | --- | --- | --- | --- |
@@ -582,6 +573,36 @@ Packages of a nested Go module resolve to files only for the root `go.mod`'s
 module today, so such an import says declared by the nested `go.mod`.
 Capability `optional_local_only_features.import_target_classification`, with its
 languages in `feature_languages`, declares it.
+
+### Where specifiers come from
+
+A file's specifiers are its import scanner's, followed by each specifier its
+syntax tree's import statements give that the scanner did not, in statement
+order (TypeScript, JavaScript, Go and Python). The statements are the ones its
+tokens record carries, read from the same parse whether or not `--tokens` is
+asked for. So a multi-line import (`import type` included), a Go spec beside a
+comment or with a raw-string path, every module of Python's `import a, b` and
+a Python name spaced around its dots each have a relation and an entry. The
+scanner also reads forms that are not import statements (`require()`, dynamic
+`import()`, `export … from`); they keep their relations. A Python `from`
+statement gives what the scanner gives for it: the module, `m.n` for each name
+of an absolute module without a dot, and, for a bare relative module, `.n` for
+each name. A specifier both read has one relation and one entry. The
+scanner's relations come first, in their order and unchanged, except that a
+tree specifier reaching a file an earlier specifier reached adds its entry to
+that relation, as a second scanner specifier does.
+
+The tree is read only when it has no error and the parse completed. A file
+with a syntax error, over the parser's input limit or minified keeps the
+scanner's specifiers alone, as does every other language. Capability
+`optional_local_only_features.import_targets_cover_statements`, with its
+languages in `feature_languages`, declares the promise: for a file whose
+tokens record says `import_bindings` is `extracted`, every statement's
+specifier has an import-target entry on an `IMPORTS` relation of that file in
+the snapshot of the same commit. A file with no tokens record (a tree with an
+error) has no such promise. On the consumer's reference ranges (TypeScript,
+every changed blob side) every statement has an entry: 1,271 at 25 commits,
+3,019 at 100 and 6,969 at 420. See [ADR 0012](adr/0012-imports-from-the-tree.md).
 
 ## Compact snapshot NDJSON v1
 

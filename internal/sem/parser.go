@@ -140,6 +140,11 @@ type TreeSitterParser struct {
 	// tokens, when set with outline, receives the file's leaves and imports
 	// from the same tree whenever the outline is extracted.
 	tokens *FileTokensRecord
+	// imports, when set, receives the import statements the tokens record
+	// would carry, from the same tree and the same node list, whenever the
+	// tree has no error. The relation side adds their specifiers to the
+	// scanner's.
+	imports *[]treeImportStatement
 }
 
 const treeSitterParseTimeout = 5 * time.Second
@@ -384,6 +389,13 @@ func (parserOptions TreeSitterParser) ParseWithStatus(path, content string) ([]E
 		}
 		return nil, spec.language, ParseStatus{ParseError: true, Code: code, Detail: detail}
 	}
+	var importNodes []*sitter.Node
+	if !root.HasError() && (parserOptions.imports != nil || parserOptions.outline != nil && parserOptions.tokens != nil) {
+		importNodes = collectImportNodes(spec.language, root)
+		if parserOptions.imports != nil {
+			*parserOptions.imports = treeImportStatements(spec.language, importNodes, src)
+		}
+	}
 	if parserOptions.outline != nil && !root.HasError() {
 		*parserOptions.outline = extractFileOutline(path, spec.language, root, entitySrc, parseSrc, entityLineOffset)
 		if parserOptions.tokens != nil {
@@ -396,7 +408,7 @@ func (parserOptions TreeSitterParser) ParseWithStatus(path, content string) ([]E
 				}
 				view.insertN = len(protobufSyntheticSyntax)
 			}
-			*parserOptions.tokens = extractFileTokens(path, spec.language, root, view)
+			*parserOptions.tokens = extractFileTokens(path, spec.language, root, view, importNodes)
 		}
 	}
 	if spec.language == "YAML" {

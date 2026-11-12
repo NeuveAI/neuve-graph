@@ -229,8 +229,9 @@ func processProviderFileUncached(
 		return result
 	}
 
-	entities, parsedLanguage, parseStatus, outline, tokens := parseWithOutlineTokens(spec, langSpec, path, content)
+	entities, parsedLanguage, parseStatus, outline, tokens, treeImports := parseWithOutlineTokensImports(spec, langSpec, path, content)
 	result.outline, result.tokens = outline, tokens
+	file.treeImports = treeImports
 	if parsedLanguage == "" {
 		result.failures = append(result.failures, PartialFailure{
 			Code:                 "E_UNSUPPORTED_LANGUAGE",

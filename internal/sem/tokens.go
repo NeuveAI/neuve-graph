@@ -224,7 +224,9 @@ type tokenFrame struct {
 // extractFileTokens walks the whole tree once. Every leaf becomes a row, and
 // text a node owns between its children becomes a row typed with that node
 // (all-whitespace text only inside a content node), so the rows tile the file.
-func extractFileTokens(path, language string, root *sitter.Node, view tokenSourceView) FileTokensRecord {
+// importNodes are the tree's import statement nodes as collectImportNodes
+// gives them; the relation side reads the same list (treeImportStatements).
+func extractFileTokens(path, language string, root *sitter.Node, view tokenSourceView, importNodes []*sitter.Node) FileTokensRecord {
 	record := FileTokensRecord{
 		RecordType: "file_tokens", FilePath: path, Language: language,
 		HasErrors: root.HasError(), ImportBindings: importBindingsNotExtracted,
@@ -286,7 +288,6 @@ func extractFileTokens(path, language string, root *sitter.Node, view tokenSourc
 	}
 
 	var rows []tokenRow
-	var importNodes []*sitter.Node
 	stack := []tokenFrame{}
 	firstUnopened := 0
 	emit := func(parent int, typ string, start, end, flags int) {
@@ -399,9 +400,6 @@ func extractFileTokens(path, language string, root *sitter.Node, view tokenSourc
 			node := cursor.CurrentNode()
 			parent := len(stack) - 1
 			ownText(stack[parent].pos, int(node.StartByte()))
-			if importNode(language, node.Type()) {
-				importNodes = append(importNodes, node)
-			}
 			if node.ChildCount() > 0 && cursor.GoToFirstChild() {
 				push(node, int(node.StartByte()), int(node.EndByte()))
 				continue
@@ -644,18 +642,108 @@ func importNode(language, typ string) bool {
 	return false
 }
 
-func extractImportStatements(language string, nodes []*sitter.Node, view tokenSourceView, lineStarts []int, leaves [][8]int) []ImportStatementRecord {
-	var out []ImportStatementRecord
-	text := func(node *sitter.Node) string {
+// collectImportNodes gives the tree's import statement nodes (importNode) in
+// source preorder. It is the one list both readers of a file's imports use:
+// the tokens record's statements (extractImportStatements) and the relation
+// side's (treeImportStatements). Only the languages whose bindings are
+// extracted have such nodes.
+func collectImportNodes(language string, root *sitter.Node) []*sitter.Node {
+	if !importBindingsCovered(language) || root == nil || root.IsNull() {
+		return nil
+	}
+	var nodes []*sitter.Node
+	cursor := sitter.NewTreeCursor(root)
+	defer cursor.Close()
+	if !cursor.GoToFirstChild() {
+		return nil
+	}
+	depth := 1
+	for {
+		node := cursor.CurrentNode()
+		typ := node.Type()
+		if importNode(language, typ) {
+			nodes = append(nodes, node)
+		}
+		// Go's grammar allows an import_spec only inside an import_declaration,
+		// and that only at the top level, so no other top-level node is
+		// entered. Every other language's import statements can nest.
+		descend := language != "Go" || depth > 1 || typ == "import_declaration"
+		if descend && node.ChildCount() > 0 && cursor.GoToFirstChild() {
+			depth++
+			continue
+		}
+		for !cursor.GoToNextSibling() {
+			if depth == 1 || !cursor.GoToParent() {
+				return nodes
+			}
+			depth--
+		}
+	}
+}
+
+// importNodeText reads a node's text from the file as given; the parse view
+// differs from it only by same-length masks in these languages.
+func importNodeText(file []byte) func(*sitter.Node) string {
+	return func(node *sitter.Node) string {
 		if node == nil || node.IsNull() {
 			return ""
 		}
 		start, end := int(node.StartByte()), int(node.EndByte())
-		if end > len(view.file) || start > end {
+		if end > len(file) || start > end {
 			return ""
 		}
-		return string(view.file[start:end])
+		return string(file[start:end])
 	}
+}
+
+// importStatementsOf reads one import statement node: its specifiers and
+// bindings, without ranges. A node gives none when it names no specifier.
+func importStatementsOf(language string, node *sitter.Node, text func(*sitter.Node) string) []ImportStatementRecord {
+	switch language {
+	case "TypeScript", "JavaScript":
+		if statement, ok := jsImportStatement(node, text); ok {
+			return []ImportStatementRecord{statement}
+		}
+	case "Go":
+		return []ImportStatementRecord{goImportStatement(node, text)}
+	case "Python":
+		return pythonImportStatements(node, text)
+	}
+	return nil
+}
+
+// treeImportStatement is what the relation side keeps of one tokens-record
+// import statement: its specifier as written and, for a Python `from` import,
+// the names it imports, which the relation side's Python convention reads.
+type treeImportStatement struct {
+	Specifier  string   `json:"specifier"`
+	PythonFrom bool     `json:"python_from,omitempty"`
+	Names      []string `json:"names,omitempty"`
+}
+
+// treeImportStatements reads the statements the tokens record would give for
+// these nodes, in the same order, keeping what the relation side needs.
+func treeImportStatements(language string, nodes []*sitter.Node, file []byte) []treeImportStatement {
+	text := importNodeText(file)
+	var out []treeImportStatement
+	for _, node := range nodes {
+		pythonFrom := language == "Python" && (node.Type() == "import_from_statement" || node.Type() == "future_import_statement")
+		for _, statement := range importStatementsOf(language, node, text) {
+			kept := treeImportStatement{Specifier: statement.Specifier, PythonFrom: pythonFrom}
+			if pythonFrom {
+				for _, binding := range statement.Bindings {
+					kept.Names = append(kept.Names, binding.Imported)
+				}
+			}
+			out = append(out, kept)
+		}
+	}
+	return out
+}
+
+func extractImportStatements(language string, nodes []*sitter.Node, view tokenSourceView, lineStarts []int, leaves [][8]int) []ImportStatementRecord {
+	var out []ImportStatementRecord
+	text := importNodeText(view.file)
 	for _, node := range nodes {
 		// The statement is the grammar's import statement node. For Go it is
 		// the import_spec, except that a declaration holding one spec without
@@ -690,24 +778,10 @@ func extractImportStatements(language string, nodes []*sitter.Node, view tokenSo
 		if endByte > startByte {
 			endLine = outlineSourceLine(lineStarts, endByte-1)
 		}
-		switch language {
-		case "TypeScript", "JavaScript":
-			if statement, ok := jsImportStatement(node, text); ok {
-				statement.StartLine, statement.EndLine = startLine, endLine
-				statement.StartByte, statement.EndByte = startByte, endByte
-				out = append(out, statement)
-			}
-		case "Go":
-			statement := goImportStatement(node, text)
+		for _, statement := range importStatementsOf(language, node, text) {
 			statement.StartLine, statement.EndLine = startLine, endLine
 			statement.StartByte, statement.EndByte = startByte, endByte
 			out = append(out, statement)
-		case "Python":
-			for _, statement := range pythonImportStatements(node, text) {
-				statement.StartLine, statement.EndLine = startLine, endLine
-				statement.StartByte, statement.EndByte = startByte, endByte
-				out = append(out, statement)
-			}
 		}
 	}
 	return out

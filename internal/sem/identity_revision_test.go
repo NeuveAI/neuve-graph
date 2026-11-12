@@ -8,7 +8,8 @@ import (
 func TestParserIdentityRevisionsSnapshotAndCaches(t *testing.T) {
 	header := leanHeader(sourceContext{}, "same-release", profileSpec{})
 	// "5": `block` symbols are emitted for HCL only (Rust function bodies lost theirs).
-	if header.IdentityRevision != "5" {
+	// "6": every import statement the syntax tree shows has an IMPORTS relation.
+	if header.IdentityRevision != "6" {
 		t.Fatalf("identity=%q", header.IdentityRevision)
 	}
 	if !strings.HasSuffix(searchSnapshotCacheVersion, "-"+header.IdentityRevision) || !strings.HasSuffix(providerRecordsCacheVersion, "-"+header.IdentityRevision) ||

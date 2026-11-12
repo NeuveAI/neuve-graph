@@ -12,8 +12,9 @@ import (
 )
 
 // v2 records why a Go file was left out of the default build, so a reused
-// extraction can still report W_GO_BUILD_EXCLUDED.
-const extractionCacheVersion = "file-extraction-v2-" + IdentityRevision
+// extraction can still report W_GO_BUILD_EXCLUDED. v3 records the file's tree
+// import statements (in its internals), which its IMPORTS relations read.
+const extractionCacheVersion = "file-extraction-v3-" + IdentityRevision
 
 type cachedFileExtraction struct {
 	Key                   string                  `json:"key"`

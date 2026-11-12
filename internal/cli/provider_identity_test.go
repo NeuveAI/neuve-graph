@@ -19,7 +19,7 @@ func TestVersionAdvertisesParserIdentity(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &info); err != nil {
 		t.Fatal(err)
 	}
-	if info["identity_revision"] != "5" {
+	if info["identity_revision"] != "6" {
 		t.Fatalf("identity=%v", info)
 	}
 	path, err := os.Executable()

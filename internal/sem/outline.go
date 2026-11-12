@@ -35,16 +35,34 @@ func parseWithOutline(spec profileSpec, langSpec languageSpec, path, content str
 // parseWithOutlineTokens also returns the tokens record when spec.tokens asks
 // for it, extracted from the same tree as the outline.
 func parseWithOutlineTokens(spec profileSpec, langSpec languageSpec, path, content string) ([]Entity, string, ParseStatus, *FileOutlineRecord, *FileTokensRecord) {
+	entities, language, status, outline, tokens, _ := parseWithOutlineTokensImports(spec, langSpec, path, content)
+	return entities, language, status, outline, tokens
+}
+
+// parseWithOutlineTokensImports also returns the file's import statements as
+// the tokens record reads them, from the same parse. They are nil whenever the
+// file would have no tokens record imports for want of a usable tree: no tree,
+// a tree with an error, a partial parse, or a language whose bindings are not
+// extracted. Unlike the tokens record they do not depend on --tokens or on the
+// tokens record's size limits.
+func parseWithOutlineTokensImports(spec profileSpec, langSpec languageSpec, path, content string) ([]Entity, string, ParseStatus, *FileOutlineRecord, *FileTokensRecord, []treeImportStatement) {
+	var imports []treeImportStatement
 	if !spec.outline {
-		entities, language, status := parseWithProfile(TreeSitterParser{}, spec, langSpec, path, content)
-		return entities, language, status, nil, nil
+		entities, language, status := parseWithProfile(TreeSitterParser{imports: &imports}, spec, langSpec, path, content)
+		if status.ParseError || status.Partial {
+			imports = nil
+		}
+		return entities, language, status, nil, nil, imports
 	}
 	outline := &FileOutlineRecord{}
 	var tokens *FileTokensRecord
 	if spec.tokens {
 		tokens = &FileTokensRecord{}
 	}
-	entities, language, status := (TreeSitterParser{outline: outline, tokens: tokens}).ParseWithStatus(path, content)
+	entities, language, status := (TreeSitterParser{outline: outline, tokens: tokens, imports: &imports}).ParseWithStatus(path, content)
+	if status.ParseError || status.Partial {
+		imports = nil
+	}
 	if useFastCFamilyParser(spec, langSpec) {
 		// These profiles normally use structural extraction without a tree. Keep
 		// their symbol inventory while parsing once for the requested outline.
@@ -58,7 +76,7 @@ func parseWithOutlineTokens(spec profileSpec, langSpec languageSpec, path, conte
 	if tokens != nil && tokens.RecordType == "" {
 		tokens = nil
 	}
-	return entities, language, status, outline, tokens
+	return entities, language, status, outline, tokens, imports
 }
 
 func extractFileOutline(path, language string, root *sitter.Node, src, parsed []byte, lineOffset int) FileOutlineRecord {
