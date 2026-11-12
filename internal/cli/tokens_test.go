@@ -514,7 +514,7 @@ func TestSymbolsTokensFlagAndCapabilities(t *testing.T) {
 	if err := json.Unmarshal(runOutlineCLI(t, "capabilities", "--json"), &capabilities); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"symbols_outline_tokens", "symbols_outline_import_bindings"} {
+	for _, key := range []string{"symbols_outline_tokens", "symbols_outline_import_bindings", "symbols_outline_token_directives"} {
 		if !capabilities.OptionalLocalOnlyFeatures[key] {
 			t.Errorf("capabilities omit %s", key)
 		}
@@ -523,6 +523,11 @@ func TestSymbolsTokensFlagAndCapabilities(t *testing.T) {
 		t.Errorf("import binding languages %v", got)
 	}
 	tokenLanguages := capabilities.FeatureLanguages["symbols_outline_tokens"]
+	// The directive flag is declared on its own; a consumer evaluates its
+	// comment rule only for the languages listed there.
+	if directives := capabilities.FeatureLanguages["symbols_outline_token_directives"]; !reflect.DeepEqual(directives, tokenLanguages) || len(directives) == 0 {
+		t.Errorf("directive languages %v, token languages %v", directives, tokenLanguages)
+	}
 	for _, language := range []string{"Go", "JavaScript", "Python", "Rust", "TypeScript"} {
 		if !slices.Contains(tokenLanguages, language) {
 			t.Errorf("token languages miss %s: %v", language, tokenLanguages)

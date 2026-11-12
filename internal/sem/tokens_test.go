@@ -120,6 +120,7 @@ func fileTokensFor(t *testing.T, path, source string) *FileTokensRecord {
 
 // consumerNoTokenChange is the consumer's rule: the non-comment leaves of both
 // sides are equal in number and pairwise in type, text, ancestors and opens,
+// and the directive comment leaves pairwise in text and position among them,
 // with no error leaf and has_errors false on both sides.
 func consumerNoTokenChange(t *testing.T, path, base, head string) bool {
 	t.Helper()
@@ -134,8 +135,13 @@ func consumerNoTokenChange(t *testing.T, path, base, head string) bool {
 			if row[5]&tokenFlagError != 0 {
 				bad = true
 			}
-			if row[5]&tokenFlagComment == 0 {
+			switch {
+			case row[5]&tokenFlagComment == 0:
 				out = append(out, record.LeafTypes[row[0]]+"\x00"+source[row[1]:row[2]]+"\x00"+record.Ancestors[row[6]]+"\x00"+string(rune('0'+row[7])))
+			case row[5]&tokenFlagDirective != 0:
+				// A directive comment is compared by text, in its place among
+				// the compared leaves.
+				out = append(out, "directive\x00"+source[row[1]:row[2]])
 			}
 		}
 		return out, bad

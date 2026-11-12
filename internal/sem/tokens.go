@@ -67,6 +67,10 @@ const (
 	tokenFlagError      = 4
 	tokenFlagNamed      = 8
 	tokenFlagRewritten  = 16
+	// tokenFlagDirective marks the leaves of a comment that a compiler or a
+	// tool reads, or may read (directives.go). It is set only with
+	// tokenFlagComment.
+	tokenFlagDirective = 32
 )
 
 const (
@@ -207,8 +211,10 @@ type tokenFrame struct {
 	chainEnd int // length of the encoded ancestor chain including this node
 	hash     int // ancestors-table index of the chain ending at this node, -1 until needed
 	comment  bool
-	content  bool // the node's own text is content, whitespace included
-	err      bool
+	// directive: the comment this frame lies in is a directive comment.
+	directive bool
+	content   bool // the node's own text is content, whitespace included
+	err       bool
 }
 
 // extractFileTokens walks the whole tree once. Every leaf becomes a row, and
@@ -314,6 +320,9 @@ func extractFileTokens(path, language string, root *sitter.Node, view tokenSourc
 		}
 		if frame.comment {
 			flags |= tokenFlagComment
+			if frame.directive {
+				flags |= tokenFlagDirective
+			}
 		} else if frame.node.IsNamed() && identifierTypes[frame.node.Type()] {
 			flags |= tokenFlagIdentifier
 		}
@@ -323,14 +332,16 @@ func extractFileTokens(path, language string, root *sitter.Node, view tokenSourc
 		emit(top, frame.node.Type(), start, end, flags)
 	}
 	push := func(node *sitter.Node, pos, end int) {
-		parentComment, parentErr, parentContent := false, false, false
+		parentComment, parentErr, parentContent, parentDirective := false, false, false, false
 		if len(stack) > 0 {
 			parent := stack[len(stack)-1]
-			parentComment, parentErr = parent.comment, parent.err
+			parentComment, parentErr, parentDirective = parent.comment, parent.err, parent.directive
 			parentContent = parent.content && !classes.interpolationLayout
 		}
+		opensComment := !parentComment && node.IsNamed() && commentTypes[node.Type()]
 		stack = append(stack, tokenFrame{
-			node: node, pos: pos, end: end, chainEnd: appendChain(node), hash: -1,
+			directive: parentDirective || opensComment && directiveComment(language, string(view.parsed[node.StartByte():node.EndByte()])),
+			node:      node, pos: pos, end: end, chainEnd: appendChain(node), hash: -1,
 			comment: parentComment || (node.IsNamed() && commentTypes[node.Type()]),
 			content: parentContent || node.IsNamed() && contentTypes[node.Type()],
 			err:     parentErr || node.IsError(),
@@ -395,6 +406,9 @@ func extractFileTokens(path, language string, root *sitter.Node, view tokenSourc
 			}
 			if stack[parent].comment || node.IsNamed() && commentTypes[node.Type()] {
 				flags |= tokenFlagComment
+				if stack[parent].directive || !stack[parent].comment && directiveComment(language, string(view.parsed[node.StartByte():node.EndByte()])) {
+					flags |= tokenFlagDirective
+				}
 			} else if node.IsNamed() && identifierTypes[node.Type()] {
 				flags |= tokenFlagIdentifier
 			}
@@ -427,6 +441,9 @@ func extractFileTokens(path, language string, root *sitter.Node, view tokenSourc
 	}
 	rows = mapTokenRows(rows, view)
 	rows, rewritten := mergeRewrittenTokenRows(rows, view, internType)
+	if language == "Go" {
+		markCgoPreamble(rows, importNodes, view.file)
+	}
 	lineStarts := []int{0}
 	for i, b := range view.file {
 		if b == '\n' {
@@ -863,4 +880,33 @@ func pythonImportStatements(node *sitter.Node, text func(*sitter.Node) string) [
 		out = append(out, statement)
 	}
 	return out
+}
+
+// markCgoPreamble flags as directives the comment group directly above each
+// `import "C"`: cgo compiles it as C. The group is the run of comment rows
+// that ends on the line before the import declaration, each row separated from
+// the next by whitespace holding at most one line break.
+func markCgoPreamble(rows []tokenRow, importNodes []*sitter.Node, file []byte) {
+	for _, spec := range importNodes {
+		path := spec.ChildByFieldName("path")
+		if path == nil || unquoteImportSpecifier(string(file[path.StartByte():path.EndByte()])) != "C" {
+			continue
+		}
+		declaration := spec
+		for declaration != nil && declaration.Type() != "import_declaration" {
+			declaration = declaration.Parent()
+		}
+		if declaration == nil {
+			continue
+		}
+		next := int(declaration.StartByte())
+		i := sort.Search(len(rows), func(i int) bool { return rows[i].start >= next }) - 1
+		for ; i >= 0 && rows[i].flags&tokenFlagComment != 0; i-- {
+			if bytes.Count(file[rows[i].end:next], []byte("\n")) > 1 || len(bytes.TrimSpace(file[rows[i].end:next])) > 0 {
+				break
+			}
+			rows[i].flags |= tokenFlagDirective
+			next = rows[i].start
+		}
+	}
 }

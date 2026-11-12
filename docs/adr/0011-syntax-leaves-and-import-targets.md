@@ -23,6 +23,10 @@ A gap a node owns between its children is a row exactly as written. Inside a con
 
 Builtin import targets come from exact pinned lists (Go 1.27.0's importable standard packages, Node 24's and Bun 1.4.4's modules, CPython 3.14's modules and dotted submodules), never from a prefix, a parent or a pattern, because the consumer treats builtin as resolved. Every specifier as written in an import statement has an entry; for a Python relative `from` import the engine adds one for the module (`.`).
 
+## Comments that carry meaning
+
+A comment a compiler or tool reads is still a comment; its leaves add the `directive` flag (bit 32), set from a per-language list of known directives and, for every other comment, from a shape rule that flags anything that does not read as plain prose. The flag is additive (readers ignore unknown bits), so no version moves. A consumer that skips comments compares directive leaves by text instead.
+
 ## Limits
 
 A tree with an error node gets no outline and so no tokens record. TypeScript aliases come from the root `tsconfig.json` only; an alias the engine cannot follow is `import_target_unresolved`, never a declared package. A nested Go module's packages do not resolve to files, so they read as declared by the nested `go.mod`. A Python name no manifest declares by identity is not classified. The declared package's name is not carried; it is the specifier's package part, or for Go the required module that prefixes it.
