@@ -67,29 +67,52 @@ func TestTokenClassTableCoversTreeSitterLanguages(t *testing.T) {
 // docs/snapshot-format.md states, per language, the node types read as
 // identifiers and comments. It mirrors the code table exactly.
 func TestTokenClassificationDocMirrorsTable(t *testing.T) {
-	var table strings.Builder
-	table.WriteString("| Language | Identifier leaf types | Comment node types | Content node types |\n| --- | --- | --- | --- |\n")
-	for _, language := range TokenLanguages() {
-		classes := tokenClassTable[language]
-		quote := func(types []string) string {
-			if len(types) == 0 {
-				return "none"
-			}
-			quoted := make([]string, len(types))
-			for i, typ := range types {
-				quoted[i] = "`" + typ + "`"
-			}
-			return strings.Join(quoted, ", ")
-		}
-		table.WriteString("| " + language + " | " + quote(classes.identifiers) + " | " + quote(classes.comments) + " | " + quote(classes.content) + " |\n")
-	}
 	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "snapshot-format.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(doc), table.String()) {
-		t.Errorf("docs/snapshot-format.md does not mirror tokenClassTable; expected table:\n%s", table.String())
+	table := tokenClassificationDocTable()
+	if !docMirrorsTable(string(doc), table) {
+		t.Errorf("docs/snapshot-format.md does not mirror tokenClassTable; expected table:\n%s", table)
 	}
+	// A Windows checkout converts the doc's line endings to CRLF (Git's
+	// core.autocrlf), while the table is built with LF. Feed the doc through
+	// the same comparison with every line ending as CRLF, so that checkout is
+	// exercised on every platform, and check the raw text would not match.
+	crlf := strings.ReplaceAll(strings.ReplaceAll(string(doc), "\r\n", "\n"), "\n", "\r\n")
+	if strings.Contains(crlf, table) {
+		t.Fatal("the CRLF copy matched without normalisation; the case no longer exercises it")
+	}
+	if !docMirrorsTable(crlf, table) {
+		t.Error("the table comparison fails on a CRLF checkout of the doc")
+	}
+}
+
+// docMirrorsTable reports whether doc holds table, compared with every CRLF
+// line ending read as LF: the doc is compared as text, and its line endings
+// depend on the checkout.
+func docMirrorsTable(doc, table string) bool {
+	return strings.Contains(strings.ReplaceAll(doc, "\r\n", "\n"), table)
+}
+
+func tokenClassificationDocTable() string {
+	var table strings.Builder
+	table.WriteString("| Language | Identifier leaf types | Comment node types | Content node types |\n| --- | --- | --- | --- |\n")
+	quote := func(types []string) string {
+		if len(types) == 0 {
+			return "none"
+		}
+		quoted := make([]string, len(types))
+		for i, typ := range types {
+			quoted[i] = "`" + typ + "`"
+		}
+		return strings.Join(quoted, ", ")
+	}
+	for _, language := range TokenLanguages() {
+		classes := tokenClassTable[language]
+		table.WriteString("| " + language + " | " + quote(classes.identifiers) + " | " + quote(classes.comments) + " | " + quote(classes.content) + " |\n")
+	}
+	return table.String()
 }
 
 // Protocol Buffers is parsed through a view with a synthetic syntax line
