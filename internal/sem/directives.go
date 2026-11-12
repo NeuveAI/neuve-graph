@@ -82,11 +82,32 @@ var jsDirectiveMarkers = []string{
 	"global ", "globals ", "exported ", "@flow", "@noflow", "$FlowFixMe", "$FlowIgnore", "NOSONAR",
 }
 
+// fallThroughComment matches the fall-through comments compilers and linters
+// read (GCC's -Wimplicit-fallthrough, ESLint's no-fallthrough, javac -Xlint),
+// in any case: fallthrough, fall through, falls through, fall-thru, fall thru.
+var fallThroughComment = regexp.MustCompile(`(?i)fall(s|ing)?[ \t-]*thr(u|ough)`)
+
 // directivePatterns are known directives a substring cannot state.
 var directivePatterns = map[string][]*regexp.Regexp{
-	// PEP 263 encoding declaration.
-	"Python": {regexp.MustCompile(`coding[:=]`)},
+	"Python": {
+		regexp.MustCompile(`coding[:=]`),     // PEP 263 encoding declaration
+		regexp.MustCompile(`(?i)\bpragma\b`), // coverage.py pragmas, with or without the colon
+	},
+	"Go": {
+		// go/ast.IsGenerated: a line comment "// Code generated ... DO NOT EDIT."
+		regexp.MustCompile(`^// Code generated .* DO NOT EDIT\.$`),
+		// analysistest expectations.
+		regexp.MustCompile(`^//\s*want\s`),
+	},
+	"C":          {fallThroughComment},
+	"Java":       {fallThroughComment},
+	"JavaScript": {fallThroughComment},
+	"TypeScript": {fallThroughComment},
 }
+
+// commonDirectiveMarkers are tool markers that apply in every declared
+// language: JetBrains inspections, SonarQube, and generated-code banners.
+var commonDirectiveMarkers = []string{"noinspection", "NOSONAR", "DO NOT EDIT", "@generated"}
 
 // directiveComment reports whether one comment, given as its whole text, is a
 // directive in the language.
@@ -97,6 +118,11 @@ func directiveComment(language, text string) bool {
 		}
 	}
 	for _, marker := range directiveMarkers[language] {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	for _, marker := range commonDirectiveMarkers {
 		if strings.Contains(text, marker) {
 			return true
 		}
@@ -195,3 +221,21 @@ func proseLine(line string) bool {
 // tokenFlagDirective: today every language the tokens read covers, declared
 // under its own capability key so the two can differ.
 func DirectiveLanguages() []string { return TokenLanguages() }
+
+// indentationSignificantLanguages are the declared languages in which a line's
+// leading whitespace is syntax. In Python the tree does not check it: an
+// inconsistent dedent, an over-indented line with no block to open, or mixed
+// widths inside one block parse without error and give the same leaves, while
+// CPython raises IndentationError. A consumer must therefore not treat a change
+// to leading whitespace as layout in these languages unless the bytes are
+// identical. The other declared languages are free-form: leading whitespace
+// there is layout (C's preprocessor allows it before `#`; Ruby's and
+// Elixir's column-sensitive forms, `=begin`, `__END__`, a heredoc terminator,
+// either change the tree or sit inside a content node).
+var indentationSignificantLanguages = []string{"Python"}
+
+// IndentationSignificantLanguages lists the declared languages whose leading
+// whitespace is syntax.
+func IndentationSignificantLanguages() []string {
+	return append([]string(nil), indentationSignificantLanguages...)
+}

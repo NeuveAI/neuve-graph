@@ -25,7 +25,11 @@ Builtin import targets come from exact pinned lists (Go 1.27.0's importable stan
 
 ## Comments that carry meaning
 
-A comment a compiler or tool reads is still a comment; its leaves add the `directive` flag (bit 32), set from a per-language list of known directives and, for every other comment, from a shape rule that flags anything that does not read as plain prose. The flag is additive (readers ignore unknown bits), so no version moves. A consumer that skips comments compares directive leaves by text instead.
+A comment a compiler or tool reads is still a comment; its leaves add the `directive` flag (bit 32), set from a best-effort per-language list of known directives and, for every other comment, from a shape rule that flags anything that does not read as plain prose. The flag is over-inclusive and not complete: an unflagged comment may still be read by a tool. The flag is additive (readers ignore unknown bits), so no version moves. A consumer that skips comments compares directive leaves by text instead.
+
+## What the leaves do and do not establish
+
+Equal leaves mean the same tokens in the same tree-sitter tree, not the same behaviour. The compiler's grammar can differ from the tree's after a line break (TypeScript `abstract`, `using`, `interface`; JavaScript `async`), and position matters for some comments (a directive that must start its line, the cgo preamble touching `import "C"`, a coding cookie's line, a shebang at byte 0) and for tab indentation. Python's leading whitespace is syntax the tree does not check (an inconsistent dedent parses cleanly); the engine declares it under `symbols_outline_indentation_significant` instead of checking indentation. The engine does not add per-language whitespace rules for these; it gives exact positions, and a consumer deciding "layout only" also compares the gaps between rows (class kept, tabs and carriage returns and the gaps around directive comments byte-identical). Comment changes always need a reading.
 
 ## Limits
 

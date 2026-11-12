@@ -41,9 +41,13 @@ type FileTokensRecord struct {
 }
 
 // ImportStatementRecord is one imported specifier of one import statement.
+// StartByte and EndByte are the statement node's range in the file as given,
+// end exclusive like a leaf's, and the lines are that range's lines.
 type ImportStatementRecord struct {
 	StartLine      int                   `json:"start_line"`
 	EndLine        int                   `json:"end_line"`
+	StartByte      int                   `json:"start_byte"`
+	EndByte        int                   `json:"end_byte"`
 	Specifier      string                `json:"specifier"`
 	Bindings       []ImportBindingRecord `json:"bindings"`
 	SideEffectOnly bool                  `json:"side_effect_only"`
@@ -298,9 +302,11 @@ func extractFileTokens(path, language string, root *sitter.Node, view tokenSourc
 		rows = append(rows, tokenRow{typ: internType(typ), start: start, end: end, flags: flags, ancestors: frame.hash, opens: opens})
 	}
 	// ownText emits the text of [from, to) owned by the node on top of the
-	// stack as one row typed with that node, covering exactly those bytes. A
-	// gap that is all whitespace is content inside a content node and layout
-	// (no row) anywhere else. A byte-order mark at byte 0 is never a row.
+	// stack as one row typed with that node, covering exactly those bytes.
+	// Outside a content node a gap made only of layout bytes (space, tab,
+	// carriage return, line feed) has no row; any other byte, every non-ASCII
+	// space included (U+00A0, U+2028, U+2029, a byte-order mark after byte
+	// 0), makes the gap a row. A byte-order mark at byte 0 is never a row.
 	ownText := func(from, to int) {
 		if from == 0 && bytes.HasPrefix(view.parsed, utf8BOM) && bytes.HasPrefix(view.file, utf8BOM) {
 			from = len(utf8BOM)
@@ -309,7 +315,7 @@ func extractFileTokens(path, language string, root *sitter.Node, view tokenSourc
 			return
 		}
 		top := len(stack) - 1
-		if !stack[top].content && len(bytes.TrimLeftFunc(view.parsed[from:to], unicode.IsSpace)) == 0 {
+		if !stack[top].content && onlyLayoutBytes(view.parsed[from:to]) {
 			return
 		}
 		start, end := from, to
@@ -443,6 +449,7 @@ func extractFileTokens(path, language string, root *sitter.Node, view tokenSourc
 	rows, rewritten := mergeRewrittenTokenRows(rows, view, internType)
 	if language == "Go" {
 		markCgoPreamble(rows, importNodes, view.file)
+		markExampleOutput(rows, view.file)
 	}
 	lineStarts := []int{0}
 	for i, b := range view.file {
@@ -658,20 +665,35 @@ func extractImportStatements(language string, nodes []*sitter.Node, view tokenSo
 		return start, end
 	}
 	for _, node := range nodes {
-		startLine, endLine := lines(node)
+		// The statement is the grammar's import statement node. For Go it is
+		// the import_spec, except that a declaration holding one spec without
+		// parentheses (`import "fmt"`) is the statement as a whole, keyword
+		// included; in a grouped `import ( … )` the keyword and parentheses
+		// belong to no statement.
+		span := node
+		if language == "Go" {
+			if parent := node.Parent(); parent != nil && parent.Type() == "import_declaration" {
+				span = parent
+			}
+		}
+		startLine, endLine := lines(span)
+		startByte, endByte := int(span.StartByte()), int(span.EndByte())
 		switch language {
 		case "TypeScript", "JavaScript":
 			if statement, ok := jsImportStatement(node, text); ok {
 				statement.StartLine, statement.EndLine = startLine, endLine
+				statement.StartByte, statement.EndByte = startByte, endByte
 				out = append(out, statement)
 			}
 		case "Go":
 			statement := goImportStatement(node, text)
 			statement.StartLine, statement.EndLine = startLine, endLine
+			statement.StartByte, statement.EndByte = startByte, endByte
 			out = append(out, statement)
 		case "Python":
 			for _, statement := range pythonImportStatements(node, text) {
 				statement.StartLine, statement.EndLine = startLine, endLine
+				statement.StartByte, statement.EndByte = startByte, endByte
 				out = append(out, statement)
 			}
 		}
@@ -908,5 +930,52 @@ func markCgoPreamble(rows []tokenRow, importNodes []*sitter.Node, file []byte) {
 			rows[i].flags |= tokenFlagDirective
 			next = rows[i].start
 		}
+	}
+}
+
+// onlyLayoutBytes reports whether a gap holds only the bytes that are layout
+// in every declared language: space, tab, carriage return and line feed.
+// Form feed, vertical tab and every non-ASCII space are not layout: a gap that
+// holds one is a row, so a change to it reads as a token change.
+func onlyLayoutBytes(gap []byte) bool {
+	for _, b := range gap {
+		if b != ' ' && b != '\t' && b != '\r' && b != '\n' {
+			return false
+		}
+	}
+	return true
+}
+
+// markExampleOutput flags every comment in a comment group that holds a Go
+// example's "// Output:" or "// Unordered output:" line: go test compares the
+// lines that follow it with the example's output. A group is a run of comment
+// rows separated by whitespace holding at most one line break.
+func markExampleOutput(rows []tokenRow, file []byte) {
+	isOutput := func(row tokenRow) bool {
+		text := bytes.TrimSpace(bytes.TrimPrefix(file[row.start:row.end], []byte("//")))
+		return bytes.HasPrefix(text, []byte("Output:")) || bytes.HasPrefix(text, []byte("Unordered output:"))
+	}
+	joined := func(a, b tokenRow) bool {
+		gap := file[a.end:b.start]
+		return bytes.Count(gap, []byte("\n")) <= 1 && len(bytes.TrimSpace(gap)) == 0
+	}
+	for i := 0; i < len(rows); i++ {
+		if rows[i].flags&tokenFlagComment == 0 {
+			continue
+		}
+		j := i
+		for j+1 < len(rows) && rows[j+1].flags&tokenFlagComment != 0 && joined(rows[j], rows[j+1]) {
+			j++
+		}
+		output := false
+		for k := i; k <= j; k++ {
+			output = output || isOutput(rows[k])
+		}
+		if output {
+			for k := i; k <= j; k++ {
+				rows[k].flags |= tokenFlagDirective
+			}
+		}
+		i = j
 	}
 }

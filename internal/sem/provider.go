@@ -742,34 +742,36 @@ func Capabilities() CapabilityReport {
 		IncrementalPreparationProfiles:  []string{"syntax-only"},
 		HeuristicRelationTypes:          []string{"HANDLES_ROUTE", "HTTP_CALLS", "EMITS", "LISTENS_ON", "HANDLES_TOOL", "SIMILAR_TO", "TESTS"},
 		OptionalLocalOnlyFeatures: map[string]bool{
-			"stable_symbol_ids":                true,
-			"semantic_diff":                    true,
-			"ndjson_snapshot":                  true,
-			"symbols_outline":                  true,
-			"symbols_outline_tokens":           true,
-			"symbols_outline_token_directives": true,
-			"symbols_outline_import_bindings":  true,
-			"import_target_classification":     true,
-			"compact_snapshot_ndjson_v1":       true,
-			"scip_snapshot_experimental":       true,
-			"hybrid_source_search":             true,
-			"near_clone_detection":             true,
-			"git_cochange_edges":               true,
-			"durable_preindex":                 true,
-			"prepared_snapshot_query":          true,
-			"exact_commit_prepared_read":       true,
-			"exact_commit_bulk_streams":        true,
-			"source_omission_warnings":         true,
-			"incremental_syntax_preparation":   true,
-			"incremental_preparation_plan":     true,
-			"focused_neighbors":                true,
-			"neighbor_frontier_summary":        true,
+			"stable_symbol_ids":                       true,
+			"semantic_diff":                           true,
+			"ndjson_snapshot":                         true,
+			"symbols_outline":                         true,
+			"symbols_outline_tokens":                  true,
+			"symbols_outline_token_directives":        true,
+			"symbols_outline_indentation_significant": true,
+			"symbols_outline_import_bindings":         true,
+			"import_target_classification":            true,
+			"compact_snapshot_ndjson_v1":              true,
+			"scip_snapshot_experimental":              true,
+			"hybrid_source_search":                    true,
+			"near_clone_detection":                    true,
+			"git_cochange_edges":                      true,
+			"durable_preindex":                        true,
+			"prepared_snapshot_query":                 true,
+			"exact_commit_prepared_read":              true,
+			"exact_commit_bulk_streams":               true,
+			"source_omission_warnings":                true,
+			"incremental_syntax_preparation":          true,
+			"incremental_preparation_plan":            true,
+			"focused_neighbors":                       true,
+			"neighbor_frontier_summary":               true,
 		},
 		FeatureLanguages: map[string][]string{
-			"symbols_outline_tokens":           TokenLanguages(),
-			"symbols_outline_token_directives": DirectiveLanguages(),
-			"symbols_outline_import_bindings":  ImportBindingLanguages(),
-			"import_target_classification":     ImportTargetLanguages(),
+			"symbols_outline_tokens":                  TokenLanguages(),
+			"symbols_outline_token_directives":        DirectiveLanguages(),
+			"symbols_outline_indentation_significant": IndentationSignificantLanguages(),
+			"symbols_outline_import_bindings":         ImportBindingLanguages(),
+			"import_target_classification":            ImportTargetLanguages(),
 		},
 		FeaturesRequiringNetworkAccess: map[string]bool{
 			"grammar_download":  false,
@@ -20487,7 +20489,7 @@ func importCapableExtension(ext string) bool {
 func isRelativeImportSpec(importingPath, spec string) bool {
 	switch strings.ToLower(filepath.Ext(importingPath)) {
 	case ".js", ".jsx", ".ts", ".tsx":
-		return strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../")
+		return spec == "." || spec == ".." || strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../")
 	case ".py":
 		return strings.HasPrefix(spec, ".")
 	default:
@@ -20550,6 +20552,14 @@ func resolveReadableLocalImport(importingPath, spec string, readContent contentR
 }
 
 func jsLocalImportCandidates(importingPath, spec string) []string {
+	// "." and ".." name the directory itself, as "./" and "../" do, so they
+	// take the same directory-index candidates.
+	switch spec {
+	case ".":
+		spec = "./"
+	case "..":
+		spec = "../"
+	}
 	if !strings.HasPrefix(spec, "./") && !strings.HasPrefix(spec, "../") {
 		return nil
 	}

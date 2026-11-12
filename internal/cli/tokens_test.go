@@ -10,8 +10,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/entireio/entire-graph/internal/sem"
 )
@@ -76,14 +74,15 @@ func tokenLeaves(record sem.FileTokensRecord, src []byte) []tokenLeaf {
 	return leaves
 }
 
+// onlySpace reports whether a gap between rows holds only layout bytes:
+// space, tab, carriage return and line feed (a byte-order mark is allowed
+// only by callers that start at byte 0).
 func onlySpace(segment []byte) bool {
 	segment = bytes.TrimPrefix(segment, []byte{0xEF, 0xBB, 0xBF})
-	for len(segment) > 0 {
-		r, size := utf8.DecodeRune(segment)
-		if !unicode.IsSpace(r) {
+	for _, b := range segment {
+		if b != ' ' && b != '\t' && b != '\r' && b != '\n' {
 			return false
 		}
-		segment = segment[size:]
 	}
 	return true
 }
@@ -458,6 +457,10 @@ func TestSymbolsTokensImportBindings(t *testing.T) {
 		if record.ImportBindings != "extracted" {
 			t.Errorf("%s: import_bindings %q", path, record.ImportBindings)
 		}
+		// Byte ranges are pinned by TestImportStatementByteRanges.
+		for i := range record.Imports {
+			record.Imports[i].StartByte, record.Imports[i].EndByte = 0, 0
+		}
 		if !reflect.DeepEqual(record.Imports, tc.want) {
 			got, _ := json.Marshal(record.Imports)
 			want, _ := json.Marshal(tc.want)
@@ -514,7 +517,7 @@ func TestSymbolsTokensFlagAndCapabilities(t *testing.T) {
 	if err := json.Unmarshal(runOutlineCLI(t, "capabilities", "--json"), &capabilities); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"symbols_outline_tokens", "symbols_outline_import_bindings", "symbols_outline_token_directives"} {
+	for _, key := range []string{"symbols_outline_tokens", "symbols_outline_import_bindings", "symbols_outline_token_directives", "symbols_outline_indentation_significant"} {
 		if !capabilities.OptionalLocalOnlyFeatures[key] {
 			t.Errorf("capabilities omit %s", key)
 		}
@@ -523,6 +526,9 @@ func TestSymbolsTokensFlagAndCapabilities(t *testing.T) {
 		t.Errorf("import binding languages %v", got)
 	}
 	tokenLanguages := capabilities.FeatureLanguages["symbols_outline_tokens"]
+	if got := capabilities.FeatureLanguages["symbols_outline_indentation_significant"]; !reflect.DeepEqual(got, []string{"Python"}) {
+		t.Errorf("indentation-significant languages %v, want [Python]", got)
+	}
 	// The directive flag is declared on its own; a consumer evaluates its
 	// comment rule only for the languages listed there.
 	if directives := capabilities.FeatureLanguages["symbols_outline_token_directives"]; !reflect.DeepEqual(directives, tokenLanguages) || len(directives) == 0 {

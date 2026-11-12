@@ -243,10 +243,19 @@ node inside it: interpolations and format clauses are content too (Python's
 them). Only TypeScript and JavaScript, whose template substitutions are plain
 expressions, treat whitespace inside `${…}` as layout, each with the test pairs
 that show it; a literal inside a substitution is still content. For any other
-node an all-whitespace gap is layout and has no row. With that rule the rows
-tile the file: every byte is in at most one row, a byte in no row is
-whitespace outside every content node, and every literal byte is in a row. A
-byte-order mark at byte 0 is never a row. Strings and templates are one row per
+node a gap made only of space, tab, carriage return and line feed is layout and
+has no row; a gap holding any other byte (form feed, vertical tab, and every
+non-ASCII space: U+00A0, U+2028, U+2029, U+3000, a byte-order mark after byte
+0) is a row of its own, typed with the node that owns the gap, so a change to
+it reads as a token change. With that rule the rows tile the file: every byte
+is in at most one row, a byte in no row is a space, tab, carriage return or
+line feed outside every content node, and every literal byte is in a row.
+Between two consecutive rows, and before the first and after the last, there
+is nothing but space, tab, carriage return and line feed (and a byte-order mark
+at byte 0), so a consumer can compare the gaps from the rows' positions alone. A
+byte-order mark at byte 0 is never a row. (The JavaScript grammar itself reads
+U+2028 and U+2029 as line ends, so `return`, U+2028, `x` already parses as
+`return` before a line break.) Strings and templates are one row per
 fragment as the grammar gives them, neither identifier nor comment.
 
 Some languages are parsed through a same-length rewritten view of the file
@@ -276,11 +285,13 @@ parses `a` newline `- b` and `f` newline `(a)` as one expression, though a
 Kotlin line break ends the statement there.
 
 Whitespace outside literals, per declared language, as the consumer's rule
-reads it (any "change" answer is the safe direction):
+reads it (any "change" answer is the safe direction). This table is not
+exhaustive: see [What the leaves do and do not
+establish](#what-the-leaves-do-and-do-not-establish).
 
 | Language | Checked | Reads as |
 | --- | --- | --- |
-| Python | Re-indent that changes nesting; consistent re-indent of a whole block; blank lines; a backslash line continuation | Change; no change (same meaning); no change; change |
+| Python | Re-indent that changes nesting; consistent re-indent of a whole block; blank lines; a backslash line continuation | Change; no change (same meaning when written with spaces; with tabs it can raise `TabError`); no change; change |
 | TypeScript, JavaScript | JSX text between expressions, added or reflowed; a line break inside an expression; `return` before a line break | Change; no change (no ASI there); change |
 | Go | A blank line between statements | Change (the statement-ending line break is a token) |
 | C | `#define A(x)` against `#define A (x)`; spacing in a macro body; a backslash continuation; spacing in `#include < >` | Change in each |
@@ -291,14 +302,18 @@ reads it (any "change" answer is the safe direction):
 | Rust | Spacing inside a macro call (`stringify!(a b)`) | No change (tokens are what the macro sees) |
 
 A comment that a compiler or a tool reads is flagged directive (`32`) on all
-its leaves, in two layers; over-flagging is the safe direction.
+its leaves, in two layers; over-flagging is the safe direction, and the flag
+is best effort, not complete (see [What the leaves do and do not
+establish](#what-the-leaves-do-and-do-not-establish)).
 
-1. Known directives, per language, matched anywhere in the comment's text (so
-   every spelling a tool accepts is covered): Go `//go:` (any, written without
-   a space), `+build`, `//line`, `//export`, `//extern`, `nolint`,
-   `lint:ignore`, `nosec`, example `Output:` and `output:`, and every comment
-   in the group directly above `import "C"` (the cgo preamble: comments
-   separated by at most one line break, ending on the line before the import);
+1. Known directives, per language, matched anywhere in the comment's text:
+   Go `//go:` (any, written without a space), `+build`, `//line`, `//export`,
+   `//extern`, `nolint`, `lint:ignore`, `nosec`, `// want` (analysistest),
+   `// Code generated … DO NOT EDIT.` (the `go/ast.IsGenerated` form), every
+   comment in a group holding an example's `// Output:` or
+   `// Unordered output:` line (the expected output), and every comment in the
+   group directly above `import "C"` (the cgo preamble; a group is comments
+   separated by at most one line break);
    TypeScript and JavaScript `@ts-ignore`, `@ts-expect-error`, `@ts-nocheck`,
    `@ts-check`, `<reference`, `<amd-module`, `<amd-dependency`, `@jsx`,
    `@jsxImportSource`, `@jsxRuntime`, `@jsxFrag`, `__PURE__`,
@@ -306,22 +321,26 @@ its leaves, in two layers; over-flagging is the safe direction.
    `# sourceURL`, `eslint`, `prettier-ignore`, `biome-ignore`,
    `istanbul ignore`, `c8 ignore`, `v8 ignore`, `@license`, `@preserve`,
    `jshint`, `tslint:`, `global `, `@flow`, `$FlowFixMe` and a few more; Python
-   `coding[:=]`, `type:`, `noqa`, `pragma:`, `pylint:`, `mypy:`, `fmt:`,
+   `coding[:=]`, `pragma` in any case with or without a colon, `type:`,
+   `noqa`, `pylint:`, `mypy:`, `fmt:`,
    `isort:`, `ruff:`, `pyright:`, `nosec`, `yapf:`; Ruby
    `frozen_string_literal`, `encoding`, `coding`, `warn_indent`,
    `shareable_constant_value`, `rubocop:`, `typed:`, `-*-`; Rust every doc
    comment (`///`, `//!`, `/**`, `/*!`, which rustdoc compiles as tests); C
-   `NOLINT`, `clang-format`, `clang-tidy`, `fallthrough` and the other
-   fall-through spellings, `NOTREACHED`, `lint`; C# every `///` XML doc
+   `NOLINT`, `clang-format`, `clang-tidy`, `NOTREACHED`, `lint`; in C, Java,
+   JavaScript and TypeScript, fall-through comments in any case matching
+   `fall(s|ing)?[ \t-]*thr(u|ough)` (`fallthrough`, `Fall through.`,
+   `Falls through`, `fall thru`; GCC, javac and ESLint read them); C# every `///` XML doc
    comment (the compiler reads them under `-doc` or
    `GenerateDocumentationFile`), `ReSharper`, `<auto-generated`; Java
    `noinspection`, `CHECKSTYLE`, `NOSONAR`, `@formatter:`, `NOPMD`,
    `@deprecated` (javac reads it from javadoc); Elixir `credo:`,
    `coveralls-ignore`, `sobelow` (Elixir's compiler reads no comment: its
    documentation is the `@doc` and `@moduledoc` attributes, which are
-   tokens). `NOSONAR` in every language. `#pragma` in C and C# is a
-   preprocessor token, not a comment. The full lists are `directiveMarkers` in
-   `internal/sem/directives.go`.
+   tokens). In every language: `noinspection`, `NOSONAR`, `DO NOT EDIT`,
+   `@generated`. `#pragma` in C and C# is a preprocessor token, not a comment.
+   The full lists are `directiveMarkers`, `directivePatterns` and
+   `commonDirectiveMarkers` in `internal/sem/directives.go`.
 2. Every other comment is flagged unless it reads as plain prose: after the
    comment marker (or a documentation opening the language defines, such as
    `/**`) comes at least one space or tab, and every non-empty line of the body
@@ -362,14 +381,25 @@ change: the safe direction.
 
 `import_bindings` is `extracted` for TypeScript, JavaScript, Go and Python, with
 `imports` listing one object per imported specifier: `start_line`, `end_line`,
-`specifier` (as written, without quotes; Python relative modules keep their
+`start_byte`, `end_byte` (the statement's range in the bytes as given, end
+exclusive like a leaf's, and the lines are that range's lines), `specifier` (as written, without quotes; Python relative modules keep their
 dots), `bindings` (`imported`, `local`, `type_only`, and `local_inferred: true`
 for a Go import without a name, whose local name is the one goimports assumes
 from the path), `side_effect_only` and `names_unknown`. `imported` is the
 imported name, `default`, `*` for a whole module under one name, or `=` for
 TypeScript `import x = require("y")`. `type_only` is set by `import type`,
 `import typeof` and per-specifier `type`. Go's grouped `import (...)` gives one
-object per spec; Python's `import a, b` gives one per module. Re-exports
+object per spec; Python's `import a, b` gives one per module.
+
+The range is the grammar's import statement node and nothing else on its
+lines: code before or after the statement on the same line, a trailing
+comment, and the `;` of Python's `import os; import sys` are outside, while
+TypeScript and JavaScript keep the statement's own `;` and its import
+attribute clause (`with { type: "json" }`) inside. For Go a declaration with
+one spec and no parentheses (`import "fmt"`) is the statement, keyword
+included; in a grouped `import ( … )` each spec alone is a statement, so the
+`import` keyword and the parentheses belong to no statement. Python's
+`import a, b` gives both objects the whole statement's range. Re-exports
 (`export … from`), `import x = A.B` aliases, dynamic `import()` and `require()`
 calls are not import statements. The `specifier` is the text as written, and
 each one has an import target entry on the `IMPORTS` relations: Python's
@@ -378,6 +408,56 @@ scanner reads `from m import n` as `m` and `m.n`, and `from . import x` as
 says `not_extracted` and has no `imports` field. Capabilities `optional_local_only_features` keys
 `symbols_outline_tokens` and `symbols_outline_import_bindings`, with their
 languages in `feature_languages`, declare both.
+
+## What the leaves do and do not establish
+
+Equal leaves (type, text, `ancestors`, `opens`) mean the same tokens in the
+same tree-sitter tree. They do not mean the same behaviour:
+
+- The compiler's grammar can differ from the tree's. Where a line break
+  follows certain keywords (TypeScript `abstract`, `accessor`, `asserts`,
+  `using`, `interface`; JavaScript `async` before an arrow function), the
+  compiler starts another statement while tree-sitter gives the same tree.
+- Position matters for some comments: a directive that must start its line
+  (`//go:generate`, `//line`), a comment group that must touch the next
+  declaration (the cgo preamble above `import "C"`), a coding cookie that must
+  be on line 1 or 2, a shebang that must be at byte 0.
+- Indentation written with tabs matters where the language counts columns
+  (Python raises `TabError`; tree-sitter counts a tab as eight columns).
+- Leading whitespace is syntax in the languages listed under
+  `feature_languages.symbols_outline_indentation_significant` (capability
+  `optional_local_only_features.symbols_outline_indentation_significant`;
+  today `["Python"]`). The Python tree does not check it: an inconsistent
+  dedent, a line indented deeper than its block with no line opening one, and
+  mixed widths inside one block all parse without error and give the same
+  leaves, though CPython raises `IndentationError`. In these languages a
+  consumer must not treat a change in a line's leading whitespace as layout
+  unless the bytes are identical. The other declared languages are free-form;
+  their column-sensitive forms (a Ruby `=begin`, `__END__` or heredoc
+  terminator, an Elixir heredoc's closing delimiter) either change the tree or
+  lie inside a content node.
+- Source positions the program can observe (`__LINE__`, `line!()`, stack
+  traces) change with layout.
+
+Literals whose value depends on where the closing delimiter sits (Java text
+blocks, C# raw strings, Elixir heredocs and sigils, Ruby heredocs, and every
+multi-line literal) keep the delimiter's indentation inside their content node,
+so moving it, or reindenting the whole block, changes a leaf.
+
+A consumer that wants to decide that a change is layout only must, besides
+equal leaves, compare the gaps between consecutive rows, and the file's
+leading gap (before the first row) and trailing gap (after the last): each keeps its class
+(nothing, spaces on one line, or at least one line break), a gap holding a tab
+or carriage return is byte-identical, and the gaps around every
+directive-flagged comment are byte-identical. The rows' positions are enough to
+compute this, since a gap holds only space, tab, carriage return and line feed.
+
+The `directive` flag is over-inclusive by design and still not complete. A
+comment that is not flagged may be read by a tool: an analysistest
+expectation written in an unusual form, a project's own `// lint-allow`
+convention, a template engine's marker that reads as prose. A consumer must
+not conclude from an unflagged comment that no tool reads it; a change to a
+comment needs a reading.
 
 ## Import targets
 
@@ -413,6 +493,11 @@ snapshots (`query`, `neighbors`, `impact`, `def`) do not carry the entries.
 | Go | Within the module path of the nearest `go.mod`, or of a module it requires | `C` (cgo), and the importable standard-library packages of Go 1.27.0 (`go list std` without `internal/` and `vendor/` paths, which code outside the standard library cannot import, plus `syscall/js`, the one package `go list std` lists only under a build constraint across every `go tool dist list` target) | Unresolved, including a typo of a standard package and standard `internal/` or `vendor/` paths |
 | Python | The top-level module equals, under PEP 503 normalization, a distribution in the nearest directory's `pyproject.toml` (`[project]` dependencies and optional dependencies, `[dependency-groups]`, Poetry tables) or `requirements*.txt`, or the project's own name | A standard top-level module (CPython 3.14's names plus those removed since 3.11), or a dotted name that is itself a CPython 3.14 standard module (aliases such as `os.path` and `collections.abc` included) | Relative, or a dotted name that is no standard module, a mistyped submodule (`os.pathh`) as much as `pathlib.Path` from `from pathlib import Path` (that statement's own `pathlib` entry is builtin): unresolved; bare: not classified, since a distribution's import name need not be its own name |
 | Any other | | | A file target says `import_target_file`; any other target is not classified |
+
+A TypeScript or JavaScript `"."` or `".."` names a directory as `"./"` and
+`"../"` do: each resolves to that directory's index file
+(`index.ts`, `index.tsx`, `index.js`, `index.jsx`), and without one is an
+unresolved relative import.
 
 Packages of a nested Go module resolve to files only for the root `go.mod`'s
 module today, so such an import says declared by the nested `go.mod`.

@@ -303,6 +303,46 @@ func TestFileTokensLiteralWhitespaceIsContent(t *testing.T) {
 			t.Errorf("%s treats interpolation whitespace as layout without the pairs that prove it", language)
 		}
 	}
+	// Strings whose value depends on where the closing delimiter sits (Java
+	// text blocks, C# raw strings, Elixir heredocs, Ruby heredocs, and any
+	// multi-line literal): moving only the delimiter's indentation, and
+	// reindenting the whole block with it, must each read as a change. The
+	// literal's first %s is the content line's indentation, the second the
+	// closing delimiter's.
+	delimited := map[string]struct {
+		path, file, literal string
+	}{
+		"Java text block":      {"A.java", "class A {\n  String s = %s;\n}\n", "\"\"\"\n%sx\n%s\"\"\""},
+		"C# raw string":        {"a.cs", "class A {\n  string s = %s;\n}\n", "\"\"\"\n%sx\n%s\"\"\""},
+		"Elixir heredoc":       {"a.ex", "s = %s\n", "\"\"\"\n%sx\n%s\"\"\""},
+		"Elixir charlist":      {"a.ex", "s = %s\n", "'''\n%sx\n%s'''"},
+		"Elixir sigil heredoc": {"a.ex", "s = %s\n", "~S\"\"\"\n%sx\n%s\"\"\""},
+		"Ruby squiggly":        {"a.rb", "s = %s\n", "<<~EOS\n%sx\n%sEOS"},
+		"Ruby dash heredoc":    {"a.rb", "s = %s\n", "<<-EOS\n%sx\n%sEOS"},
+		"Python triple":        {"a.py", "s = %s\n", "\"\"\"\n%sx\n%s\"\"\""},
+		"TypeScript template":  {"a.ts", "const s = %s;\n", "`\n%sx\n%s`"},
+		"JavaScript template":  {"a.js", "const s = %s;\n", "`\n%sx\n%s`"},
+		"Rust string":          {"a.rs", "fn f() {\n    let s = %s;\n}\n", "\"\n%sx\n%s\""},
+		"Go raw":               {"a.go", "package p\n\nvar s = %s\n", "`\n%sx\n%s`"},
+		"C string":             {"a.c", "const char *s = %s;\n", "\"\\\n%sx\\\n%s\""},
+	}
+	for name, tc := range delimited {
+		t.Run(name+" closing delimiter", func(t *testing.T) {
+			base := fmt.Sprintf(tc.file, fmt.Sprintf(tc.literal, "    ", "    "))
+			heads := []string{
+				fmt.Sprintf(tc.file, fmt.Sprintf(tc.literal, "    ", "  ")),       // only the delimiter moves
+				fmt.Sprintf(tc.file, fmt.Sprintf(tc.literal, "      ", "      ")), // the whole block reindents
+			}
+			for _, head := range heads {
+				if !tokensAvailable(t, tc.path, head) {
+					continue // no extracted record: never read as "no change"
+				}
+				if consumerNoTokenChange(t, tc.path, base, head) {
+					t.Errorf("%q -> %q read as no token change", base, head)
+				}
+			}
+		})
+	}
 	languages := map[string]bool{}
 	for name, tc := range cases {
 		language := tokenLanguageFor(t, tc.path)
@@ -377,7 +417,7 @@ func TestFileTokensUndeclaredLanguage(t *testing.T) {
 // with all-whitespace and whitespace-edged literals of each form.
 func TestFileTokensTileContentNodes(t *testing.T) {
 	fixtures := map[string]string{
-		"a.ts":   "const a = \" \", b = '  x ', c = ` ${ y }  `, d = /  /;\n// c\n",
+		"a.ts":   "const a = \" \", b = '  x ', c = ` ${ y }  `, d = /  /;\n// c\nconst z\u00a0= 1;\n",
 		"a.tsx":  "const e = <b c=\" \">  {x}  </b>;\n",
 		"a.js":   "const a = \" \";\nconst t = `\n  two\n`;\n",
 		"a.go":   "package p\n\nvar a, b, c, d = \" \", \"x \\n \", `\n  `, ' '\n",

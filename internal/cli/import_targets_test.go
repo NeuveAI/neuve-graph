@@ -283,3 +283,31 @@ func TestPythonFromImportModuleHasItsOwnEntry(t *testing.T) {
 		}
 	}
 }
+
+// "." and ".." name a directory as "./" and "../" do, so all four resolve to
+// that directory's index file, and without one are unresolved relative imports.
+func TestJSBareDotSpecifiersResolveToTheDirectoryIndex(t *testing.T) {
+	repo := t.TempDir()
+	git(t, repo, "init")
+	git(t, repo, "config", "user.name", "Graph test")
+	git(t, repo, "config", "user.email", "graph@example.com")
+	write(t, repo, "src/index.ts", "export default 1;\n")
+	write(t, repo, "src/sub/a.ts", "import up from \"..\";\nimport upSlash from \"../\";\n")
+	write(t, repo, "src/b.js", "import here from \".\";\nimport hereSlash from \"./\";\n")
+	write(t, repo, "lib/c.ts", "import none from \".\";\n")
+	git(t, repo, "add", ".")
+	git(t, repo, "commit", "-m", "fixture")
+	output := runOutlineCLI(t, "snapshot", "--repo", repo, "--commit", rev(t, repo, "HEAD"), "--format", "ndjson", "--no-cache")
+	targets, _ := importTargets(t, output)
+	for _, key := range [][2]string{{"src/sub/a.ts", ".."}, {"src/sub/a.ts", "../"}, {"src/b.js", "."}, {"src/b.js", "./"}} {
+		if got := targets[key]; got.kind != "import_target_file" || got.path != "src/index.ts" {
+			t.Errorf("%s %q: %v, want the directory's index.ts", key[0], key[1], got)
+		}
+	}
+	if got := targets[[2]string{"lib/c.ts", "."}]; got.kind != "import_target_unresolved" {
+		t.Errorf("lib/c.ts \".\" with no index: %v", got)
+	}
+	if !bytes.Contains(output, []byte(`"UNRESOLVED_RELATIVE_IMPORT"`)) {
+		t.Error("an unresolved bare-dot import lost its UNRESOLVED_RELATIVE_IMPORT warning")
+	}
+}
