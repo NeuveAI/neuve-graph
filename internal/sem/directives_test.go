@@ -86,9 +86,15 @@ func TestDirectiveComments(t *testing.T) {
 		line("a.rb", "# coding: utf-8", "x = 1"), line("a.rb", "# -*- coding: utf-8 -*-", "x = 1"),
 		line("a.rb", "# warn_indent: true", "x = 1"), line("a.rb", "# shareable_constant_value: literal", "x = 1"),
 		line("a.rb", "# rubocop:disable Style/Foo", "x = 1"), line("a.rb", "# typed: strict", "x = 1"),
+		line("a.rb", "=begin\nEmbedded document.\n=end", "x = 1"),
 		// Rust: every documentation comment.
 		line("a.rs", "/// Adds two numbers.", "fn f() {}"), line("a.rs", "//! Crate docs.", "fn f() {}"),
 		line("a.rs", "/** Block docs. */", "fn f() {}"), line("a.rs", "/*! Inner block docs. */", "fn f() {}"),
+		// C: a line comment whose line ends in a backslash, with or without
+		// spaces or tabs after it, continues onto the next line.
+		{"a.c", "int f(void) {\n  int x = 1;\n  // Hello world \\ \n  x = 2;\n  return x;\n}\n", "// Hello world \\ "},
+		{"a.c", "int f(void) {\n  int x = 1;\n  // Hello world \\\t\n  x = 2;\n  return x;\n}\n", "// Hello world \\\t"},
+		{"a.c", "int f(void) {\n  int x = 1;\n  // Hello world \\\n  x = 2;\n  return x;\n}\n", "// Hello world \\\n  x = 2;"},
 		// C markers.
 		line("a.c", "// NOLINT", "int x;"), line("a.c", "// NOLINTNEXTLINE(bugprone-x)", "int x;"),
 		line("a.c", "/* clang-format off */", "int x;"), line("a.c", "/* fallthrough */", "int x;"),
@@ -147,6 +153,8 @@ func TestDirectiveComments(t *testing.T) {
 		line("a.cs", "// Plain prose.", "class A {}"), line("a.cs", "/** Plain doc prose. */", "class A {}"),
 		line("A.java", "// Plain prose.", "class A {}"), line("A.java", "/** Plain javadoc prose. */", "class A {}"),
 		line("a.ex", "# Plain prose.", "x = 1"),
+		// A backslash in the middle of a C comment is no continuation.
+		line("a.c", "// Paths look like a \\ b here.", "int x;"),
 		// Prose that only resembles a marker stays prose.
 		line("a.c", "// The value falls back to zero.", "int x;"), line("a.ts", "// We want the retry bounded.", "f();"),
 		// A Go comment group that is not directly above import "C".
@@ -289,6 +297,32 @@ func TestDirectiveCommentsWithHiddenBreaksOrSpaces(t *testing.T) {
 func TestHiddenLineTerminatorInCommentIsTokenChange(t *testing.T) {
 	tsBase := "function f() { return /* see the note below */ 1; }\n"
 	csBase := "class A { int x = 1; // see the note int y = 2;\n}\n"
+	// Read with the consumer's full rule: the stretches around a directive
+	// comment must be byte-identical.
+	full := []struct{ path, base, head string }{
+		{"a.c", "int f(void) {\n  int x = 1;\n  // Hello world\n  x = 2;\n  return x;\n}\n", "int f(void) {\n  int x = 1;\n  // Hello world \\ \n  x = 2;\n  return x;\n}\n"},
+		{"a.rb", "puts 1\n=begin\nputs 2\n=end\nputs 3\n", "puts 1\n  =begin\nputs 2\n=end\nputs 3\n"},
+		{"a.rb", "puts 1\n=begin\nputs 2\n=end\nputs 3\n", "puts 1\n=begin\nputs 2\n  =end\nputs 3\n"},
+	}
+	for _, p := range full {
+		if !tokensAvailable(t, p.path, p.head) {
+			t.Fatalf("%s: no extracted record for %q", p.path, p.head)
+		}
+		if consumerLayoutOnly(t, p.path, p.base, p.head) {
+			t.Errorf("%s: %q read as layout only", p.path, p.head)
+		}
+	}
+	// Controls: the full rule still reads a layout-only change as one.
+	controls := []struct{ path, base, head string }{
+		{"a.rb", "puts 1\n=begin\nputs 2\n=end\nputs 3\n", "puts  1\n=begin\nputs 2\n=end\nputs 3\n"},
+		{"a.ts", "function f() {\n  return 1;\n}\n", "function f() {\n  // Explain why the retry is bounded.\n  return 1;\n}\n"},
+		{"a.c", "int f(void) {\n  int x = 1;\n  // Hello world.\n  x = 2;\n  return x;\n}\n", "int f(void) {\n    int x = 1;\n    // Hello world.\n    x = 2;\n    return x;\n}\n"},
+	}
+	for _, p := range controls {
+		if !consumerLayoutOnly(t, p.path, p.base, p.head) {
+			t.Errorf("%s: control %q no longer reads as layout only", p.path, p.head)
+		}
+	}
 	pairs := []struct{ path, base, head string }{
 		{"a.ts", tsBase, "function f() { return /* see the\u2028note below */ 1; }\n"},
 		{"a.ts", tsBase, "function f() { return /* see the\u2029note below */ 1; }\n"},
@@ -301,7 +335,10 @@ func TestHiddenLineTerminatorInCommentIsTokenChange(t *testing.T) {
 		{"a.c", "int x = 1; // see the note\nint y = 2;\n", "int x = 1; // see the note ??/\nint y = 2;\n"},
 	}
 	for _, p := range pairs {
-		if tokensAvailable(t, p.path, p.head) && consumerNoTokenChange(t, p.path, p.base, p.head) {
+		if !tokensAvailable(t, p.path, p.head) {
+			t.Fatalf("%s: no extracted record for %q", p.path, p.head)
+		}
+		if consumerNoTokenChange(t, p.path, p.base, p.head) {
 			t.Errorf("%s: %q read as no token change", p.path, p.head)
 		}
 	}

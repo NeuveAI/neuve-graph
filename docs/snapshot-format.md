@@ -295,7 +295,7 @@ establish](#what-the-leaves-do-and-do-not-establish).
 | TypeScript, JavaScript | JSX text between expressions, added or reflowed; a line break inside an expression; `return` before a line break | Change; no change (no ASI there); change |
 | Go | A blank line between statements | Change (the statement-ending line break is a token) |
 | C | `#define A(x)` against `#define A (x)`; spacing in a macro body; a backslash continuation; spacing in `#include < >` | Change in each |
-| Ruby | `foo -1` against `foo - 1`; `foo[1]` against `foo [1]`; `a` newline `- b`; a leading-dot chain; `%w(a b)` spacing; text after `__END__`; heredoc terminator indent | Change; change; change; no change (same meaning); no change (same value); change; change |
+| Ruby | `foo -1` against `foo - 1`; `foo[1]` against `foo [1]`; `a` newline `- b`; a leading-dot chain; `%w(a b)` spacing; text after `__END__`; heredoc terminator indent; an indented `=begin` or `=end` | Change; change; change; no change (same meaning); no change (same value); change; change; change (every embedded-document comment is flagged `directive`, so the whitespace around it and its text are compared; the grammar takes an indented `=begin` or `=end` as part of a comment while Ruby rejects the first and leaves the second unterminated) |
 | Elixir | `a -1` against `a - 1`; `a` newline `- b`; `f` newline `(a)` | Change in each |
 | Java | Text block indentation | Change |
 | C# | A line break inside an expression; spacing in `#if` | No change (insignificant); change |
@@ -327,7 +327,10 @@ establish](#what-the-leaves-do-and-do-not-establish)).
    `frozen_string_literal`, `encoding`, `coding`, `warn_indent`,
    `shareable_constant_value`, `rubocop:`, `typed:`, `-*-`; Rust every doc
    comment (`///`, `//!`, `/**`, `/*!`, which rustdoc compiles as tests); C
-   `NOLINT`, `clang-format`, `clang-tidy`, `NOTREACHED`, `lint`; in C, Java,
+   `NOLINT`, `clang-format`, `clang-tidy`, `NOTREACHED`, `lint`, and every line
+   comment whose line ends in a backslash, even one followed by spaces or tabs
+   (GCC and clang join the next line into the comment; tree-sitter-c does not);
+   Ruby every embedded document (`=begin` … `=end`); in C, Java,
    JavaScript and TypeScript, fall-through comments in any case matching
    `fall(s|ing)?[ \t-]*thr(u|ough)` (`fallthrough`, `Fall through.`,
    `Falls through`, `fall thru`; GCC, javac and ESLint read them); C# every `///` XML doc
@@ -407,7 +410,15 @@ from the path), `side_effect_only` and `names_unknown`. `imported` is the
 imported name, `default`, `*` for a whole module under one name, or `=` for
 TypeScript `import x = require("y")`. `type_only` is set by `import type`,
 `import typeof` and per-specifier `type`. Go's grouped `import (...)` gives one
-object per spec; Python's `import a, b` gives one per module.
+object per spec; Python's `import a, b` gives one per module. Names and
+specifiers are built from the leaves that spell them, never from raw text: a
+Python dotted name is its identifier leaves joined with `.` (so
+`import os . path`, a name split by a backslash continuation and one split
+across parentheses with comments all give `os.path`-style names), a relative
+module is its dots followed by that name, and a binding's `imported` and
+`local` are the text of an identifier leaf (or, for an imported name written
+as a string, that string's content); an inferred Go local is the exception
+(`local_inferred`).
 
 The range starts at the start of the statement's first non-comment leaf and
 ends at the end of its last non-comment leaf, the statement being the
@@ -424,9 +435,11 @@ included; in a grouped `import ( … )` each spec alone is a statement, so the
 `import a, b` gives both objects the whole statement's range. Re-exports
 (`export … from`), `import x = A.B` aliases, dynamic `import()` and `require()`
 calls are not import statements. The `specifier` is the text as written, and
-each one has an import target entry on the `IMPORTS` relations: Python's
-scanner reads `from m import n` as `m` and `m.n`, and `from . import x` as
-`.x`, so the engine adds an entry for `.` itself. Every other language
+the `IMPORTS` relations give it an import target entry where the relation
+side's scanner reads the statement (not always: see [Import
+targets](#import-targets)). Python's scanner reads `from m import n` as `m`
+and `m.n`, and `from . import x` as `.x`, so the engine adds an entry for `.`
+itself. Every other language
 says `not_extracted` and has no `imports` field. Capabilities `optional_local_only_features` keys
 `symbols_outline_tokens` and `symbols_outline_import_bindings`, with their
 languages in `feature_languages`, declare both.
@@ -500,6 +513,12 @@ around every directive-flagged comment are byte-identical. The rows' positions
 and the file's bytes are enough to compute this, since outside rows a stretch
 holds only space, tab, carriage return and line feed.
 
+An import statement's specifier may have no import-target entry (see [Import
+targets](#import-targets)): the relation side reads imports with text patterns
+and misses some forms, and about one statement in five went without an entry on
+the consumer's TypeScript reference. No entry means "no answer", not
+unresolved.
+
 The `directive` flag is over-inclusive by design and still not complete. A
 comment that is not flagged may be read by a tool: an analysistest
 expectation written in an unusual form, a project's own `// lint-allow`
@@ -534,6 +553,16 @@ drops evidence, keeps these entries. Relations, their ids and every other field
 are unchanged; manifests are read from the snapshot's tree through its content
 reader, so `--commit` classifies against that commit. Interactive and search
 snapshots (`query`, `neighbors`, `impact`, `def`) do not carry the entries.
+
+Not every import statement in a tokens record has an import-target entry. The
+relation side reads imports with text patterns and misses some forms:
+multi-line TypeScript and JavaScript imports, a Go spec beside a comment or
+with a raw-string path, the second module of a Python `import a, b`, a Python
+name spaced around its dots. A consumer that finds no entry for a statement's
+specifier must treat it as "no answer", never as unresolved. Measured on the
+consumer's reference ranges (TypeScript, every changed blob side): 968 of
+1,271 statements (76.2%) have an entry at 25 commits, 2,449 of 3,019 (81.1%)
+at 100, and 5,787 of 6,969 (83.0%) at 420.
 
 | Language | Declared | Builtin | Otherwise |
 | --- | --- | --- | --- |

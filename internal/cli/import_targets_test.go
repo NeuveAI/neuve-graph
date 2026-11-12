@@ -311,3 +311,79 @@ func TestJSBareDotSpecifiersResolveToTheDirectoryIndex(t *testing.T) {
 		t.Error("an unresolved bare-dot import lost its UNRESOLVED_RELATIVE_IMPORT warning")
 	}
 }
+
+// The consumer joins a tokens-record statement's specifier with the
+// snapshot's import-target entries. These forms, which the relation side's
+// import scanner reads, have an entry under the specifier the tokens record
+// gives.
+func TestStatementSpecifiersWithAnEntry(t *testing.T) {
+	repo := t.TempDir()
+	git(t, repo, "init")
+	git(t, repo, "config", "user.name", "Graph test")
+	git(t, repo, "config", "user.email", "graph@example.com")
+	files := map[string]string{
+		"pkg/__init__.py": "",
+		"pkg/m.py":        "x = 1\n",
+		"pkg/app.py":      "import os\nimport os.path\nfrom . import m\nfrom os import path\n",
+		"web/a.ts":        "import first from \"./first\";\nimport { a, b } from \"node:fs\";\n",
+		"web/b.js":        "import x from './x.js';\n",
+		"go.mod":          "module example.com/m\n\ngo 1.22\n",
+		"svc/a.go":        "package svc\n\nimport \"fmt\"\nimport str \"strings\"\n",
+	}
+	for path, content := range files {
+		write(t, repo, path, content)
+	}
+	git(t, repo, "add", ".")
+	git(t, repo, "commit", "-m", "fixture")
+	targets, _ := importTargets(t, runOutlineCLI(t, "snapshot", "--repo", repo, "--commit", rev(t, repo, "HEAD"), "--format", "ndjson", "--no-cache"))
+	records, _ := tokensStream(t, repo)
+	for _, path := range []string{"pkg/app.py", "web/a.ts", "web/b.js", "svc/a.go"} {
+		if len(records[path].Imports) == 0 {
+			t.Fatalf("%s: no import statements", path)
+		}
+		for _, statement := range records[path].Imports {
+			if _, ok := targets[[2]string{path, statement.Specifier}]; !ok {
+				t.Errorf("%s: statement specifier %q has no import-target entry", path, statement.Specifier)
+			}
+		}
+	}
+	if got := targets[[2]string{"pkg/app.py", "os.path"}]; got.kind != "import_target_builtin" {
+		t.Errorf("os.path: %v", got)
+	}
+	if got := targets[[2]string{"pkg/app.py", "."}]; got.kind != "import_target_file" || got.path != "pkg/__init__.py" {
+		t.Errorf("from . import m, the module: %v", got)
+	}
+	if got := targets[[2]string{"pkg/app.py", ".m"}]; got.kind != "import_target_file" || got.path != "pkg/m.py" {
+		t.Errorf(".m: %v", got)
+	}
+}
+
+// A known limit, documented in docs/snapshot-format.md: the relation side
+// reads imports with text patterns and misses some statements, so their
+// specifiers have no import-target entry (a consumer reads that as "no
+// answer"). This pins a multi-line TypeScript import as having none today.
+// Invert it when IMPORTS are read from the tree.
+func TestKnownGapMultiLineTypeScriptImportHasNoEntry(t *testing.T) {
+	repo := t.TempDir()
+	git(t, repo, "init")
+	git(t, repo, "config", "user.name", "Graph test")
+	git(t, repo, "config", "user.email", "graph@example.com")
+	write(t, repo, "web/a.ts", "import first from \"./first\";\nimport {\n  a,\n  b,\n} from \"./multi\";\n")
+	git(t, repo, "add", ".")
+	git(t, repo, "commit", "-m", "fixture")
+	targets, _ := importTargets(t, runOutlineCLI(t, "snapshot", "--repo", repo, "--commit", rev(t, repo, "HEAD"), "--format", "ndjson", "--no-cache"))
+	records, _ := tokensStream(t, repo)
+	specifiers := map[string]bool{}
+	for _, statement := range records["web/a.ts"].Imports {
+		specifiers[statement.Specifier] = true
+	}
+	if !specifiers["./multi"] || !specifiers["./first"] {
+		t.Fatalf("tokens record statements %v", specifiers)
+	}
+	if _, ok := targets[[2]string{"web/a.ts", "./first"}]; !ok {
+		t.Error("the single-line import lost its entry")
+	}
+	if got, ok := targets[[2]string{"web/a.ts", "./multi"}]; ok {
+		t.Errorf("the multi-line import now has an entry (%v): the known gap is closed; invert this test and update the docs", got)
+	}
+}

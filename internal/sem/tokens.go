@@ -864,7 +864,10 @@ func goAssumedPackageName(importPath string) string {
 }
 
 // pythonImportStatements reads import, from-import and __future__ statements.
-// `import a, b` yields one entry per module.
+// `import a, b` yields one entry per module. Module names, binding names and
+// specifiers are built from the identifier leaves that spell them, joined with
+// ".", never from raw text, so spacing around dots, a backslash continuation,
+// parentheses and comments never reach a name.
 func pythonImportStatements(node *sitter.Node, text func(*sitter.Node) string) []ImportStatementRecord {
 	var out []ImportStatementRecord
 	switch node.Type() {
@@ -873,7 +876,7 @@ func pythonImportStatements(node *sitter.Node, text func(*sitter.Node) string) [
 			child := node.NamedChild(i)
 			switch child.Type() {
 			case "dotted_name":
-				module := text(child)
+				module := pythonDottedName(child, text)
 				local, _, _ := strings.Cut(module, ".")
 				out = append(out, ImportStatementRecord{Specifier: module, Bindings: []ImportBindingRecord{{Imported: "*", Local: local}}})
 			case "aliased_import":
@@ -881,7 +884,7 @@ func pythonImportStatements(node *sitter.Node, text func(*sitter.Node) string) [
 				if name == nil || alias == nil {
 					continue
 				}
-				out = append(out, ImportStatementRecord{Specifier: text(name), Bindings: []ImportBindingRecord{{Imported: "*", Local: text(alias)}}})
+				out = append(out, ImportStatementRecord{Specifier: pythonDottedName(name, text), Bindings: []ImportBindingRecord{{Imported: "*", Local: pythonDottedName(alias, text)}}})
 			}
 		}
 	case "import_from_statement", "future_import_statement":
@@ -890,7 +893,7 @@ func pythonImportStatements(node *sitter.Node, text func(*sitter.Node) string) [
 		if node.Type() == "future_import_statement" {
 			statement.Specifier = "__future__"
 		} else if module != nil {
-			statement.Specifier = text(module)
+			statement.Specifier = pythonModuleName(module, text)
 		}
 		for i := 0; i < int(node.NamedChildCount()); i++ {
 			child := node.NamedChild(i)
@@ -901,19 +904,53 @@ func pythonImportStatements(node *sitter.Node, text func(*sitter.Node) string) [
 			case "wildcard_import":
 				statement.NamesUnknown = true
 			case "dotted_name":
-				name := text(child)
+				name := pythonDottedName(child, text)
 				statement.Bindings = append(statement.Bindings, ImportBindingRecord{Imported: name, Local: name})
 			case "aliased_import":
 				name, alias := child.ChildByFieldName("name"), child.ChildByFieldName("alias")
 				if name == nil || alias == nil {
 					continue
 				}
-				statement.Bindings = append(statement.Bindings, ImportBindingRecord{Imported: text(name), Local: text(alias)})
+				statement.Bindings = append(statement.Bindings, ImportBindingRecord{Imported: pythonDottedName(name, text), Local: pythonDottedName(alias, text)})
 			}
 		}
 		out = append(out, statement)
 	}
 	return out
+}
+
+// pythonDottedName joins the identifier leaves under node with ".".
+func pythonDottedName(node *sitter.Node, text func(*sitter.Node) string) string {
+	if node.Type() == "identifier" {
+		return text(node)
+	}
+	var parts []string
+	for i := 0; i < int(node.NamedChildCount()); i++ {
+		if child := node.NamedChild(i); child.Type() == "identifier" {
+			parts = append(parts, text(child))
+		}
+	}
+	return strings.Join(parts, ".")
+}
+
+// pythonModuleName is a from-import's module: a dotted name, or a relative
+// import, whose leading dots are counted from the dot tokens of its prefix
+// (`from . . import x` is level two) and followed by its dotted name, if any.
+func pythonModuleName(node *sitter.Node, text func(*sitter.Node) string) string {
+	if node.Type() != "relative_import" {
+		return pythonDottedName(node, text)
+	}
+	dots, name := 0, ""
+	for i := 0; i < int(node.NamedChildCount()); i++ {
+		child := node.NamedChild(i)
+		switch child.Type() {
+		case "import_prefix":
+			dots += strings.Count(text(child), ".")
+		case "dotted_name":
+			name = pythonDottedName(child, text)
+		}
+	}
+	return strings.Repeat(".", dots) + name
 }
 
 // markCgoPreamble flags as directives the comment group directly above each

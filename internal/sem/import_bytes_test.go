@@ -1,6 +1,7 @@
 package sem
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -113,7 +114,16 @@ func TestFileTokensOnlyASCIILayoutIsLayout(t *testing.T) {
 		declared[tokenLanguageFor(t, path)] = true
 		for _, space := range []string{"\u00a0", "\u2028", "\u2029", "\ufeff", "\u3000", "\f", "\v"} {
 			head := strings.Replace(f.insert, "%s", space, 1)
-			if tokensAvailable(t, path, head) && consumerNoTokenChange(t, path, f.base, head) {
+			// Where the grammar rejects the character there is no record,
+			// which a consumer can never read as "no change"; that must come
+			// with a recorded parse error, never a silent absence.
+			if !tokensAvailable(t, path, head) {
+				if status := tokensParseStatus(t, path, head); !status.ParseError {
+					t.Errorf("%s: %q gave no record without a parse error (%+v)", path, space, status)
+				}
+				continue
+			}
+			if consumerNoTokenChange(t, path, f.base, head) {
 				t.Errorf("%s: %q inserted between tokens read as no token change", path, space)
 			}
 		}
@@ -138,4 +148,100 @@ func tokensAvailable(t *testing.T, path, source string) bool {
 	langSpec, _ := languageForPath(path)
 	_, _, _, _, tokens := parseWithOutlineTokens(spec, langSpec, path, source)
 	return tokens != nil && tokens.Status == tokensExtracted && !tokens.HasErrors
+}
+
+// Names and specifiers are taken from the leaves that spell them, never from
+// raw text: a binding's imported and local names (other than default, * and
+// =) hold no whitespace and are the text of an identifier leaf inside the
+// statement's range (an imported name written as a string is that string's
+// content); a specifier holds no whitespace or line break unless its string
+// does, and is spelled by leaves inside the range.
+func TestImportNamesAreLeafTexts(t *testing.T) {
+	fixtures := map[string]string{
+		"a.ts": "import D from \"d\";\nimport { n, o as p } from \"np\";\nimport * as ns from \"ns\";\nimport type T from \"t\";\n" +
+			"import { type X, Y } from \"xy\";\nimport \"side\";\nimport M, { m } from \"mixed\";\nimport {\n  multi, // c\n  /* d */ q as\n    r,\n} from \"lines\";\n" +
+			"import req = require(\"req\");\nimport * as\n  spaced from \"sp\";\nimport { \"a-b\" as ab } from \"str\";\nimport e from './a\\x2fb';\n",
+		"b.js": "import D, * as all from './d.js';\nimport { a /* x */ as b } from './a.js';\nimport './side.js';\n",
+		"c.go": "package p\n\nimport \"fmt\"\nimport str \"strings\"\nimport (\n\t_ \"embed\"\n\t. \"math\"\n\tsitter /* grammar */ \"github.com/smacker/go-tree-sitter\" // c\n\t`net/http`\n)\n",
+		"d.py": "import a\nimport a.b as c\nimport x.y, z\nfrom a import b as c2, d\nfrom q import *\nfrom . import sib\nfrom ..pkg.m import (e,\n    f as g)\n" +
+			"import os . path\nimport os . path as p\nfrom os . path import join\nfrom . m import x2\nfrom .. import y2\nimport json.\\\n    decoder\nfrom os import (path,  # c\n    sep)\nfrom . import  m as mm\nfrom . . import up\n",
+	}
+	wantSpecifiers := map[string][]string{
+		"d.py": {"a", "a.b", "x.y", "z", "a", "q", ".", "..pkg.m", "os.path", "os.path", "os.path", ".m", "..", "json.decoder", "os", ".", ".."},
+	}
+	for path, source := range fixtures {
+		record := fileTokensFor(t, path, source)
+		var specifiers []string
+		for _, statement := range record.Imports {
+			specifiers = append(specifiers, statement.Specifier)
+			var identifiers, strs []string
+			for _, row := range record.Leaves {
+				if row[1] < statement.StartByte || row[2] > statement.EndByte || row[5]&tokenFlagComment != 0 {
+					continue
+				}
+				text := source[row[1]:row[2]]
+				if row[5]&tokenFlagIdentifier != 0 {
+					identifiers = append(identifiers, text)
+				}
+				strs = append(strs, text)
+			}
+			for _, binding := range statement.Bindings {
+				names := []string{binding.Imported, binding.Local}
+				if binding.LocalInferred {
+					// A Go import without a name: the local is inferred from
+					// the path, not spelled by a leaf.
+					names = names[:1]
+				}
+				for _, name := range names {
+					if name == "default" || name == "*" || name == "=" {
+						continue
+					}
+					if strings.ContainsAny(name, " \t\r\n\\\\") {
+						t.Errorf("%s: name %q holds whitespace", path, name)
+					}
+					if !slices.Contains(identifiers, name) && !slices.Contains(strs, name) {
+						t.Errorf("%s: name %q is not the text of a leaf in %q", path, name, source[statement.StartByte:statement.EndByte])
+					}
+				}
+			}
+			if strings.ContainsAny(statement.Specifier, " \t\r\n") {
+				t.Errorf("%s: specifier %q holds whitespace", path, statement.Specifier)
+			}
+			// Every part of the specifier is spelled by a leaf inside the
+			// statement: for Python the dotted parts are identifier leaves;
+			// elsewhere the specifier is a string's content.
+			if path == "d.py" {
+				for _, part := range strings.Split(strings.TrimLeft(statement.Specifier, "."), ".") {
+					if part != "" && !slices.Contains(identifiers, part) && part != "__future__" {
+						t.Errorf("%s: specifier part %q of %q is no identifier leaf", path, part, statement.Specifier)
+					}
+				}
+			} else if !strings.Contains(strings.Join(strs, ""), statement.Specifier) {
+				t.Errorf("%s: specifier %q is not spelled by leaves in the statement", path, statement.Specifier)
+			}
+		}
+		if want, ok := wantSpecifiers[path]; ok && !slices.Equal(specifiers, want) {
+			t.Errorf("%s specifiers\n got %q\nwant %q", path, specifiers, want)
+		}
+		// The local name of every binding is among the file's identifier
+		// names: the statement spells it with an identifier leaf. An inferred
+		// Go local is not spelled by the statement.
+		for _, statement := range record.Imports {
+			for _, binding := range statement.Bindings {
+				if !binding.LocalInferred && binding.Local != "" && binding.Local != "*" && binding.Local != "default" && !slices.Contains(record.IdentifierNames, binding.Local) {
+					t.Errorf("%s: local %q is not in identifier_names", path, binding.Local)
+				}
+			}
+		}
+	}
+}
+
+// tokensParseStatus returns the parse status of a file read for tokens.
+func tokensParseStatus(t *testing.T, path, source string) ParseStatus {
+	t.Helper()
+	spec := resolveProfile(ProfileSyntaxOnly)
+	spec.outline, spec.tokens = true, true
+	langSpec, _ := languageForPath(path)
+	_, _, status, _, _ := parseWithOutlineTokens(spec, langSpec, path, source)
+	return status
 }

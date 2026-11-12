@@ -83,6 +83,10 @@ var jsDirectiveMarkers = []string{
 	"global ", "globals ", "exported ", "@flow", "@noflow", "$FlowFixMe", "$FlowIgnore", "NOSONAR",
 }
 
+// cLineCommentContinues matches a line of a comment that ends in a backslash
+// followed only by spaces or tabs.
+var cLineCommentContinues = regexp.MustCompile(`(?m)\\[ \t]*$`)
+
 // fallThroughComment matches the fall-through comments compilers and linters
 // read (GCC's -Wimplicit-fallthrough, ESLint's no-fallthrough, javac -Xlint),
 // in any case: fallthrough, fall through, falls through, fall-thru, fall thru.
@@ -138,6 +142,18 @@ func directiveComment(language, text string) bool {
 		}
 	}
 	if commentHoldsHiddenBreakOrSpace(text) {
+		return true
+	}
+	// C: a line comment whose line ends in a backslash, even one followed by
+	// spaces or tabs, continues onto the next line for GCC and clang, while
+	// tree-sitter-c ends the comment there.
+	if language == "C" && strings.HasPrefix(text, "//") && cLineCommentContinues.MatchString(text) {
+		return true
+	}
+	// Ruby: an embedded document (=begin … =end) must start and end in column
+	// 0; the grammar takes an indented =begin or =end as a comment all the
+	// same, so its position and text must be compared.
+	if language == "Ruby" && strings.HasPrefix(text, "=begin") {
 		return true
 	}
 	return !commentLooksLikeProse(language, text)

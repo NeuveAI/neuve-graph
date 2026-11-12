@@ -356,10 +356,12 @@ func TestFileTokensLiteralWhitespaceIsContent(t *testing.T) {
 				fmt.Sprintf(tc.file, fmt.Sprintf(tc.literal, "    ", "  ")),       // only the delimiter moves
 				fmt.Sprintf(tc.file, fmt.Sprintf(tc.literal, "      ", "      ")), // the whole block reindents
 			}
-			for _, head := range heads {
-				if !tokensAvailable(t, tc.path, head) {
-					continue // no extracted record: never read as "no change"
+			for _, source := range append([]string{base}, heads...) {
+				if !tokensAvailable(t, tc.path, source) {
+					t.Fatalf("%s: no extracted record for %q; every form must have one", name, source)
 				}
+			}
+			for _, head := range heads {
 				if consumerNoTokenChange(t, tc.path, base, head) {
 					t.Errorf("%q -> %q read as no token change", base, head)
 				}
@@ -519,4 +521,61 @@ func TestFileTokensTileContentNodes(t *testing.T) {
 			}
 		}
 	}
+}
+
+// consumerLayoutOnly is the consumer's full rule for a layout-only change:
+// consumerNoTokenChange, and every stretch between consecutive compared
+// leaves (and before the first and after the last) keeps its class (nothing,
+// spaces on one line, a line break), a stretch holding a tab or carriage
+// return is byte-identical, and the stretches around a directive comment are
+// byte-identical.
+func consumerLayoutOnly(t *testing.T, path, base, head string) bool {
+	t.Helper()
+	if !consumerNoTokenChange(t, path, base, head) {
+		return false
+	}
+	type span struct {
+		start, end int
+		directive  bool
+	}
+	compared := func(source string) []span {
+		var out []span
+		for _, row := range fileTokensFor(t, path, source).Leaves {
+			if row[5]&tokenFlagComment == 0 || row[5]&tokenFlagDirective != 0 {
+				out = append(out, span{row[1], row[2], row[5]&tokenFlagDirective != 0})
+			}
+		}
+		return out
+	}
+	class := func(stretch string) int {
+		switch {
+		case strings.Contains(stretch, "\n"):
+			return 2
+		case stretch == "":
+			return 0
+		}
+		return 1
+	}
+	b, h := compared(base), compared(head)
+	stretch := func(source string, spans []span, i int) (string, bool) {
+		start, end, directive := 0, len(source), false
+		if i > 0 {
+			start, directive = spans[i-1].end, spans[i-1].directive
+		}
+		if i < len(spans) {
+			end, directive = spans[i].start, directive || spans[i].directive
+		}
+		return source[start:end], directive
+	}
+	for i := 0; i <= len(b); i++ {
+		sb, db := stretch(base, b, i)
+		sh, dh := stretch(head, h, i)
+		if class(sb) != class(sh) {
+			return false
+		}
+		if (strings.ContainsAny(sb+sh, "\t\r") || db || dh) && sb != sh {
+			return false
+		}
+	}
+	return true
 }
