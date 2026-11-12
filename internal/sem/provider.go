@@ -44,8 +44,9 @@ const (
 	StableSymbolIDVersion = "compound-v1"
 	// IdentityRevision is a global, opaque revision of parser identity rules across
 	// all languages. Change it when corrections re-key existing symbols or change
-	// emitted entity membership.
-	IdentityRevision     = "4"
+	// emitted entity membership. Revision 5 stops emitting `block` symbols
+	// outside HCL (see ADR 0001).
+	IdentityRevision     = "5"
 	defaultMaxParseBytes = 4 * 1024 * 1024
 	// defaultMaxSourceFiles bounds how many files one snapshot will list. The
 	// per-file indexes a snapshot keeps (one file record and its retained symbols)
@@ -450,13 +451,25 @@ type ProviderSnapshotOptions struct {
 	// Ordinary builders cannot use it to prepare or silently rebuild a source.
 	PreparedCommit     string
 	preparedReadTarget *preparedReadTarget
-	committedTarget    string
-	extractionReuse    *providerExtractionCache
-	cacheSource        *cacheSource
-	NoNetwork          bool
-	Worktree           bool
-	IgnoreFiles        []string
-	IncludeFiles       []string
+	// committedTarget is an exact commit OID to build instead of HEAD. It is
+	// set by WithExactCommit (bulk streams) and by syntax-only incremental
+	// preparation. An unreadable target is an error, never a HEAD or worktree
+	// fallback. HEAD-keyed search caches refuse it.
+	committedTarget string
+	extractionReuse *providerExtractionCache
+	cacheSource     *cacheSource
+	NoNetwork       bool
+	Worktree        bool
+	// CoverageWarnings adds info-severity summary warnings for source the
+	// snapshot lists but does not read: W_SUBMODULE_NOT_READ for each gitlink
+	// in a committed tree and W_GO_BUILD_EXCLUDED for each Go file outside the
+	// host's default build. They are warnings, not partial failures, so stats,
+	// completeness and health are unchanged. The bulk record commands enable
+	// it; interactive query surfaces leave it off so their diagnostics are
+	// unchanged.
+	CoverageWarnings bool
+	IgnoreFiles      []string
+	IncludeFiles     []string
 	// OnlyFiles restricts parsing to these exact repository-relative paths.
 	// Empty means all discovered files. It is intended for query-time selective
 	// indexing; ignore and vendored-file rules still apply first.
@@ -509,6 +522,31 @@ type ProviderSnapshotOptions struct {
 	// cachePolicy is an immutable, bounded capture of external ignore inputs.
 	// Cache pipelines set it once and carry it through keying and construction.
 	cachePolicy *capturedIgnorePolicy
+}
+
+// WithExactCommit returns options that build the snapshot of one exact commit
+// (a lowercase 40- or 64-character commit OID) instead of HEAD, read from Git
+// objects without a checkout. The target must resolve to itself as a commit;
+// anything else fails the build with no HEAD or worktree fallback, and
+// combining it with Worktree is an error. External ignore policy still comes
+// from the serving directory. It is a constructor rather than an exported
+// field so the HEAD-keyed search and preindex caches, which take the same
+// options type, cannot be handed it by a struct literal; they refuse it.
+func (options ProviderSnapshotOptions) WithExactCommit(commit string) ProviderSnapshotOptions {
+	options.committedTarget = commit
+	return options
+}
+
+// ResolveExactCommit validates an exact commit selector and returns it with its
+// root tree. The selector must be a lowercase 40- or 64-character OID that Git
+// resolves to the same commit, so a tag object id, a ref name or an abbreviated
+// id is refused. ctx must carry Git metadata validation for repo.
+func ResolveExactCommit(ctx context.Context, repo, commit string) (string, string, error) {
+	absRepo, err := filepath.Abs(repo)
+	if err != nil {
+		return "", "", err
+	}
+	return resolvePreparedTarget(ctx, absRepo, commit)
 }
 
 type BuildPhase string
@@ -705,6 +743,8 @@ func Capabilities() CapabilityReport {
 			"durable_preindex":               true,
 			"prepared_snapshot_query":        true,
 			"exact_commit_prepared_read":     true,
+			"exact_commit_bulk_streams":      true,
+			"source_omission_warnings":       true,
 			"incremental_syntax_preparation": true,
 			"incremental_preparation_plan":   true,
 			"focused_neighbors":              true,
@@ -1333,6 +1373,7 @@ func streamSnapshotWithWorkerCount(ctx context.Context, repo, providerVersion st
 	languageSet := map[string]struct{}{}
 	completenessLangs := map[string]LanguageCompleteness{}
 	var failures []PartialFailure
+	var buildExcluded []ProviderWarning
 	var files []FileRecord
 	recordsByFile := map[string][]SymbolRecord{}
 	structuralByFile := map[string][]structuralSymbol{}
@@ -1373,6 +1414,9 @@ func streamSnapshotWithWorkerCount(ctx context.Context, repo, providerVersion st
 				return result.err
 			}
 			failures = append(failures, result.failures...)
+			if result.goBuildExcluded != "" && options.CoverageWarnings {
+				buildExcluded = append(buildExcluded, goBuildExcludedWarning(result.path, result.goBuildExcluded))
+			}
 			if result.hasPrecomputedImports {
 				precomputedImports[result.path] = result.precomputedImports
 			}
@@ -1580,6 +1624,9 @@ func streamSnapshotWithWorkerCount(ctx context.Context, repo, providerVersion st
 	if unmergedEvidenceEdges > 0 {
 		warnings = append(warnings, unmergedDataFlowEvidenceWarning(unmergedEvidenceEdges))
 	}
+	// In listing order, after the source warnings: the reducer consumes files in
+	// path order, so these are deterministic.
+	warnings = append(warnings, buildExcluded...)
 	if failures == nil {
 		failures = []PartialFailure{}
 	}
@@ -1930,6 +1977,7 @@ func prepareSource(ctx context.Context, repo string, options ProviderSnapshotOpt
 		maxReadBytes:     resolveMaxParseBytes(options.MaxParseBytes),
 		maxFiles:         options.MaxFiles,
 		trackRepoIgnored: options.trackRepoIgnored,
+		reportGitlinks:   options.CoverageWarnings,
 	})
 	if err != nil {
 		return sourceContext{}, err
@@ -13234,6 +13282,9 @@ type sourceOptions struct {
 	// trackRepoIgnored opts into building a real repoIgnoreLedger. See
 	// ProviderSnapshotOptions.trackRepoIgnored for why this defaults to off.
 	trackRepoIgnored bool
+	// reportGitlinks adds a W_SUBMODULE_NOT_READ warning per committed-tree
+	// gitlink. See ProviderSnapshotOptions.CoverageWarnings.
+	reportGitlinks bool
 }
 
 // openedSource is what openSource resolves: the file list, the per-file readers,
@@ -13284,7 +13335,7 @@ func openSource(ctx context.Context, repo, committedRevision string, options sou
 		// Regular files only. A tracked symlink is a blob whose content is its
 		// target path, so listing one as source hands that path to a parser as
 		// if it were code; the worktree branch below already refuses them.
-		paths, err := gitutil.ListRegularFiles(ctx, repo, committedRevision)
+		paths, gitlinks, err := gitutil.ListRegularFilesAndGitlinks(ctx, repo, committedRevision)
 		if err != nil {
 			return openedSource{}, err
 		}
@@ -13293,6 +13344,10 @@ func openSource(ctx context.Context, repo, committedRevision string, options sou
 			return openedSource{}, err
 		}
 		paths = filterVendoredPaths(paths, vendorRules)
+		var gitlinkWarnings []ProviderWarning
+		if options.reportGitlinks {
+			gitlinkWarnings = gitlinkNotReadWarnings(gitlinks, ignores, vendorRules)
+		}
 		// Every path in a committed-tree listing is tracked by construction, so
 		// anything the ignore rules drop here is source Git itself would show the
 		// reader. That is precisely the set worth disclosing. A nil ledger (every
@@ -13304,7 +13359,7 @@ func openSource(ctx context.Context, repo, committedRevision string, options sou
 		}
 		paths = filterIgnoredPaths(paths, ignores, ledger)
 		paths, capWarnings := capSourceFiles(paths, options.maxFiles)
-		warnings := capWarnings
+		warnings := append(capWarnings, gitlinkWarnings...)
 		treePathPrefix, err := gitutil.RepoPrefix(ctx, repo)
 		if err != nil {
 			return openedSource{}, err
@@ -20041,6 +20096,29 @@ func filterVendoredPaths(paths []string, ignores vendorIgnoreRules) []string {
 		filtered = append(filtered, rel)
 	}
 	return filtered
+}
+
+// gitlinkNotReadWarnings names each submodule entry the committed listing
+// skipped, so a consumer reading the snapshot cannot take an absent submodule
+// for an empty one. Gitlinks the ignore or vendored-path rules exclude were not
+// asked for and get no warning. Info severity: no file record was promised, so
+// completeness and health are unaffected.
+func gitlinkNotReadWarnings(gitlinks []gitutil.Gitlink, ignores ignoreMatcher, vendorRules vendorIgnoreRules) []ProviderWarning {
+	var warnings []ProviderWarning
+	for _, link := range gitlinks {
+		rel := filepath.ToSlash(link.Path)
+		if ignores.Ignored(rel, true) || vendoredPath(rel, vendorRules) {
+			continue
+		}
+		warnings = append(warnings, ProviderWarning{
+			Code:                 "W_SUBMODULE_NOT_READ",
+			Severity:             "info",
+			FilePath:             rel,
+			EffectOnCompleteness: "submodule (gitlink) entry is not read: no file, symbol or relation records exist for anything inside it",
+			Detail:               "gitlink pins commit " + link.Commit,
+		})
+	}
+	return warnings
 }
 
 func filterIgnoredPaths(paths []string, ignores ignoreMatcher, ledger *repoIgnoreLedger) []string {

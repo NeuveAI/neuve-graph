@@ -7,10 +7,12 @@ import (
 
 func TestParserIdentityRevisionsSnapshotAndCaches(t *testing.T) {
 	header := leanHeader(sourceContext{}, "same-release", profileSpec{})
-	if header.IdentityRevision != "4" {
+	// "5": `block` symbols are emitted for HCL only (Rust function bodies lost theirs).
+	if header.IdentityRevision != "5" {
 		t.Fatalf("identity=%q", header.IdentityRevision)
 	}
-	if !strings.HasSuffix(searchSnapshotCacheVersion, "-"+header.IdentityRevision) || !strings.HasSuffix(providerRecordsCacheVersion, "-"+header.IdentityRevision) {
+	if !strings.HasSuffix(searchSnapshotCacheVersion, "-"+header.IdentityRevision) || !strings.HasSuffix(providerRecordsCacheVersion, "-"+header.IdentityRevision) ||
+		!strings.HasSuffix(extractionCacheVersion, "-"+header.IdentityRevision) || !strings.HasSuffix(preparedGenerationVersion, "-"+header.IdentityRevision) {
 		t.Fatal("parser identity does not invalidate cached snapshots")
 	}
 }

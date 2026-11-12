@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -196,5 +198,40 @@ func TestWorktreeShowsASymlinkReplacedByARealFile(t *testing.T) {
 
 	if !listed()["link.go"] {
 		t.Fatal("a symlink replaced by a real file is invisible to a worktree query")
+	}
+}
+
+// TestCommittedGitlinksAreNamedNotRead: a submodule entry is still not read,
+// but each one in the committed tree is named with the commit it pins. Reason:
+// consumers show it as a coverage gap instead of reading an empty submodule.
+// Gitlinks the serving directory's ignore rules exclude were not asked for and
+// stay quiet; worktree mode keeps its existing silence (documented choice).
+func TestCommittedGitlinksAreNamedNotRead(t *testing.T) {
+	pinned := strings.Repeat("c", 40)
+	repo := coverageFixtureRepo(t, map[string]string{
+		"main.go":      "package demo\n\nfunc Main() {}\n",
+		".graphignore": "ignored/\n",
+	},
+		[]string{"update-index", "--add", "--cacheinfo", "160000," + pinned + ",deps/sub"},
+		[]string{"update-index", "--add", "--cacheinfo", "160000," + pinned + ",ignored/sub"},
+	)
+	plain := coverageSummary(t, repo, ProviderSnapshotOptions{})
+	named := coverageSummary(t, repo, ProviderSnapshotOptions{CoverageWarnings: true})
+	if got := coverageWarnings(plain, "W_SUBMODULE_NOT_READ"); len(got) != 0 {
+		t.Fatalf("warnings without CoverageWarnings: %#v", got)
+	}
+	got := coverageWarnings(named, "W_SUBMODULE_NOT_READ")
+	if len(got) != 1 || got[0].FilePath != "deps/sub" || got[0].Severity != "info" || !strings.Contains(got[0].Detail, pinned) {
+		t.Fatalf("gitlink warnings = %#v", got)
+	}
+	if !reflect.DeepEqual(plain.Stats, named.Stats) || !reflect.DeepEqual(plain.Completeness, named.Completeness) || !reflect.DeepEqual(plain.PartialFailures, named.PartialFailures) {
+		t.Fatalf("gitlink warning moved stats/completeness/health:\nplain=%#v\nnamed=%#v", plain.Stats, named.Stats)
+	}
+	if named.Stats.PartialFailures != 0 || named.Stats.CompletenessLevel != "ok" {
+		t.Fatalf("gitlink counted as a failure: %#v", named.Stats)
+	}
+	worktree := coverageSummary(t, repo, ProviderSnapshotOptions{Worktree: true, CoverageWarnings: true})
+	if got := coverageWarnings(worktree, "W_SUBMODULE_NOT_READ"); len(got) != 0 {
+		t.Fatalf("worktree mode now names gitlinks; update the documented choice: %#v", got)
 	}
 }

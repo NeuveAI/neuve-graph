@@ -253,7 +253,9 @@ func loadOrBuildSearchSnapshot(
 	disableCache bool,
 	preloadedFull *preloadedCompleteSnapshot,
 ) (ProviderSnapshot, bool, error) {
-	if options.PreparedCommit != "" {
+	// Both caches below are keyed on HEAD; an exact build target would be stored
+	// under the wrong commit.
+	if options.PreparedCommit != "" || options.committedTarget != "" {
 		return ProviderSnapshot{}, false, &PreparedSnapshotError{Reason: "incompatible-read-options"}
 	}
 	if options.Profile == "" {
@@ -474,7 +476,7 @@ func preindexProviderSnapshotWithPersistenceReader(
 	cacheDir string,
 	readPersisted func(cacheEntry) (cachedSearchSnapshot, error),
 ) (ProviderSnapshot, bool, error) {
-	if options.PreparedCommit != "" {
+	if options.PreparedCommit != "" || options.committedTarget != "" {
 		return ProviderSnapshot{}, false, &PreparedSnapshotError{Reason: "incompatible-read-options"}
 	}
 	if options.Worktree {

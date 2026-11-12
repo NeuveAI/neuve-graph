@@ -25,7 +25,9 @@ import (
 // v11 retires streams carrying the old diagnostic-count completeness status.
 // v12 retires omissions of source-proven named-declaration self calls.
 // v13 retires omissions of live-parse-proven Erlang named body self calls.
-const providerRecordsCacheVersion = "provider-records-v13-" + IdentityRevision
+// v14 retires summaries written before W_SUBMODULE_NOT_READ and
+// W_GO_BUILD_EXCLUDED named the source a stream did not read.
+const providerRecordsCacheVersion = "provider-records-v14-" + IdentityRevision
 
 // cachedProviderRecords is the on-disk envelope for a cached record stream. The
 // key alone is authoritative (sha256 over version+commit+tree+mode+profile+
@@ -96,6 +98,9 @@ func providerRecordsKeyForSchema(schemaVersion, absRepo, repositoryKey, provider
 	writeCacheKeyString(hash, "mode", mode)
 	writeCacheKeyString(hash, "profile", string(options.Profile))
 	writeCacheKeyString(hash, "max-parse-bytes", fmt.Sprintf("%d", options.MaxParseBytes))
+	// Coverage warnings change the stored summary, so a stream built with and
+	// one built without them never share an entry.
+	writeCacheKeyString(hash, "coverage-warnings", fmt.Sprintf("%t", options.CoverageWarnings))
 	// Same graph-shaping argument as searchSnapshotKey, resolved for the same reason: the env var
 	// behind the option has to reach the key too. This cache is the one that is ON BY DEFAULT, so
 	// the hole mattered more here.

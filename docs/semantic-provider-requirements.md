@@ -405,6 +405,13 @@ files dominating large-repo runs. Files above the cap still emit file records,
 but symbol parsing is skipped and an `E_FILE_TOO_LARGE` partial failure is
 reported.
 
+Listed source that is deliberately not read is named in the bulk stream
+summaries as info-severity warnings rather than partial failures, so it never
+moves completeness or health: `W_SUBMODULE_NOT_READ` for each committed-tree
+gitlink, with the pinned commit in `detail`, and `W_GO_BUILD_EXCLUDED` for each
+Go file outside the host's default build, which has no file record. See
+[snapshot format](snapshot-format.md#source-omission-warnings).
+
 ## Git Subprocess Configuration Boundary
 
 Every production Git subprocess must discard inherited repository-selection,

@@ -282,6 +282,8 @@ func TestProviderRecordsCacheHitAndMiss(t *testing.T) {
 		{"different tree", version, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", mode, opts},
 		{"different profile", version, tree, mode, ProviderSnapshotOptions{Profile: ProfileFast}},
 		{"different version", "other", tree, mode, opts},
+		// Coverage warnings change the stored summary, so they are part of the key.
+		{"coverage warnings", version, tree, mode, ProviderSnapshotOptions{Profile: ProfileFull, CoverageWarnings: true}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

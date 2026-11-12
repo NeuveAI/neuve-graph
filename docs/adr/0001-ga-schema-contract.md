@@ -116,12 +116,25 @@ as a need to refresh derived semantic data. History consumers must also migrate
 previously persisted entity deltas rather than merely append newly parsed ones.
 
 This is one global revision for parser identity rules across all languages.
-The value is a decimal revision encoded as a string, currently `"4"`. Consumers
+The value is a decimal revision encoded as a string, currently `"5"`. Consumers
 compare the complete opaque string for equality rather than relying on numeric
 ordering. The field name supplies its meaning; the value names no language or
 feature. A bump invalidates both snapshot and search
 cache namespaces even when the source tree and provider release are unchanged.
 It does not change the individual symbol-ID format.
+
+Revision `"5"` emits `block` symbols for HCL only. The block case read any
+grammar's `block` node as an HCL block, so a statement body whose named children
+included an identifier became a `block` symbol on its enclosing callable's lines;
+a Rust function body ending in an identifier was the common case. Those symbols
+and their `DEFINES`/`CONTAINS` relations are removed. A declaration nested in
+such a body (a Rust `fn` inside a function, say) is now lexically contained by
+the enclosing callable rather than by the phantom block, so its `container_id`
+and incoming `CONTAINS` move; its own ID does not. No other symbol is re-keyed
+and HCL blocks keep their IDs. Consumers upgrading from `"4"`
+must refresh derived snapshots and drop entity deltas for the removed `block`
+symbols. Every cache namespace carries the token and is invalidated by it. See
+[ADR 0010](0010-exact-commit-bulk-streams.md#identity-revision-5).
 
 Revision `"4"` adds statically named object-property callables and their named
 object containers using existing `method` and `variable` kinds. Their names
@@ -136,7 +149,7 @@ This does not promise identity stability across insertion of identical
 declarations in an anonymous scope.
 
 Consumers upgrading from revision `"3"` must refresh derived snapshots and
-recompute persisted entity deltas with revision `"4"`, preserving source commits,
+recompute persisted entity deltas with revision `"4"` (now `"5"`), preserving source commits,
 checkpoint/session provenance, and authored memory. Snapshot and record-cache
 namespaces are invalidated by the revision token. The frozen public schema is
 unchanged. The [static callable ownership contract](../snapshot-format.md#static-callable-ownership)

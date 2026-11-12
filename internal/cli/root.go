@@ -326,12 +326,28 @@ func runProviderRecords(ctx context.Context, opts Options, args []string, mode s
 		return err
 	}
 	options := sem.ProviderSnapshotOptions{
-		Outline:      flags.Outline,
-		NoNetwork:    flags.NoNetwork,
-		Worktree:     flags.Worktree,
-		IgnoreFiles:  flags.IgnoreFiles,
-		IncludeFiles: flags.IncludeFiles,
-		Profile:      profile,
+		Outline:          flags.Outline,
+		NoNetwork:        flags.NoNetwork,
+		Worktree:         flags.Worktree,
+		IgnoreFiles:      flags.IgnoreFiles,
+		IncludeFiles:     flags.IncludeFiles,
+		Profile:          profile,
+		CoverageWarnings: true,
+	}
+	// An exact --commit is resolved once, up front: the target must be a commit
+	// that resolves to itself, and the cache below is keyed on it rather than on
+	// HEAD. Failure is an error with nothing on stdout, never a HEAD fallback.
+	var exactCommit, exactTree string
+	if flags.Commit != "" {
+		validated, validationErr := sem.WithGitMetadataValidationForSetup(ctx, repo)
+		if validationErr != nil {
+			return fmt.Errorf("--commit %s: %w", flags.Commit, validationErr)
+		}
+		exactCommit, exactTree, err = sem.ResolveExactCommit(validated, repo, flags.Commit)
+		if err != nil {
+			return fmt.Errorf("--commit %s is not a commit object in this repository: %w", flags.Commit, err)
+		}
+		options = options.WithExactCommit(exactCommit)
 	}
 	if flags.Progress {
 		options.Progress = func(event sem.ProgressEvent) {
@@ -431,7 +447,8 @@ func runProviderRecords(ctx context.Context, opts Options, args []string, mode s
 	}
 
 	// Whole-graph dump (no targeted filter): serve from the committed-record
-	// cache when possible. The cache is keyed on the exact HEAD commit and tree,
+	// cache when possible. The cache is keyed on the exact commit and tree (HEAD's,
+	// or --commit's),
 	// the mode, and output-affecting options, so an unchanged HEAD skips the
 	// expensive re-index. It is deliberately bypassed for --worktree and, by
 	// returning above, for targeted queries.
@@ -449,7 +466,9 @@ func runProviderRecords(ctx context.Context, opts Options, args []string, mode s
 			useCache = false
 		}
 	}
-	if useCache {
+	if useCache && exactCommit != "" {
+		commit, tree = exactCommit, exactTree
+	} else if useCache {
 		if c, t, headErr := gitutil.HeadCommitAndTree(cacheContext, repo); headErr == nil && c != "" && t != "" {
 			commit = c
 			tree = t
@@ -672,6 +691,8 @@ type providerFlags struct {
 	// falls back to ENTIRE_PLUGIN_DATA_DIR; --no-cache disables it entirely.
 	CacheDir     string
 	DisableCache bool
+	// Commit is an exact commit OID to stream instead of HEAD (--commit).
+	Commit string
 }
 
 // idMatches reports whether a stable symbol ID matches a user-supplied selector:
@@ -723,8 +744,18 @@ func parseProfile(value string) (sem.Profile, error) {
 func parseProviderFlags(args []string) (providerFlags, []string, error) {
 	flags := providerFlags{Format: "ndjson"}
 	var rest []string
+	commitProvided := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "--commit":
+			i++
+			if i >= len(args) {
+				return flags, nil, errors.New("--commit requires a value")
+			}
+			if commitProvided {
+				return flags, nil, errors.New("--commit must be supplied once")
+			}
+			flags.Commit, commitProvided = args[i], true
 		case "--repo":
 			i++
 			if i >= len(args) {
@@ -795,6 +826,17 @@ func parseProviderFlags(args []string) (providerFlags, []string, error) {
 			}
 		default:
 			rest = append(rest, args[i])
+		}
+	}
+	// Refused here, before any Git process runs: a selector that is not an exact
+	// commit OID, or one paired with the working tree, must never fall back to
+	// HEAD or the worktree.
+	if commitProvided {
+		if !exactPreparedCommit(flags.Commit) {
+			return flags, nil, fmt.Errorf("--commit requires an exact lowercase 40- or 64-character commit OID, got %q", flags.Commit)
+		}
+		if flags.Worktree {
+			return flags, nil, errors.New("--commit cannot be combined with --worktree")
 		}
 	}
 	return flags, rest, nil

@@ -44,6 +44,31 @@ func goFileMatchesDefaultBuild(filePath, content string) bool {
 	return goFilenameMatchesDefaultBuild(filePath) && goBuildCommentSatisfied(content)
 }
 
+// goBuildExclusionReason says which rule left an excluded file out of the
+// default build, for the W_GO_BUILD_EXCLUDED detail.
+func goBuildExclusionReason(filePath string) string {
+	rule := "its build constraint"
+	if !goFilenameMatchesDefaultBuild(filePath) {
+		rule = "its file name suffix"
+	}
+	return "excluded from the default Go build for " + build.Default.GOOS + "/" + build.Default.GOARCH + " by " + rule
+}
+
+// goBuildExcludedWarning names a Go file dropped from the snapshot because it is
+// outside the host's default build. Info severity and a warning rather than a
+// partial failure: the exclusion is deliberate and does not count against
+// completeness or health, but a consumer must not read the file's absence as
+// "nothing there".
+func goBuildExcludedWarning(filePath, reason string) ProviderWarning {
+	return ProviderWarning{
+		Code:                 "W_GO_BUILD_EXCLUDED",
+		Severity:             "info",
+		FilePath:             filePath,
+		EffectOnCompleteness: "Go file outside the default build is not in the snapshot: it has no file record, symbols or relations",
+		Detail:               reason,
+	}
+}
+
 // goFilenameMatchesDefaultBuild applies the implicit _GOOS / _GOARCH /
 // _GOOS_GOARCH filename constraints (go/build's name-based rule).
 func goFilenameMatchesDefaultBuild(filePath string) bool {

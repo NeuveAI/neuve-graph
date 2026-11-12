@@ -22,6 +22,9 @@ type providerFileResult struct {
 	hasPrecomputedImports bool
 	parsed                bool
 	failures              []PartialFailure
+	// goBuildExcluded is non-empty when the file is Go source outside the
+	// host's default build and was dropped without a file record; it says why.
+	goBuildExcluded string
 }
 
 func defaultProviderWorkerCount() int {
@@ -184,6 +187,7 @@ func processProviderFileUncached(
 	}
 	language := langSpec.language
 	if language == "Go" && !goFileMatchesDefaultBuild(path, content) {
+		result.goBuildExcluded = goBuildExclusionReason(path)
 		return result
 	}
 	file := FileRecord{

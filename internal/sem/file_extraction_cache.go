@@ -11,7 +11,9 @@ import (
 	"sync"
 )
 
-const extractionCacheVersion = "file-extraction-v1-" + IdentityRevision
+// v2 records why a Go file was left out of the default build, so a reused
+// extraction can still report W_GO_BUILD_EXCLUDED.
+const extractionCacheVersion = "file-extraction-v2-" + IdentityRevision
 
 type cachedFileExtraction struct {
 	Key                   string                  `json:"key"`
@@ -25,6 +27,7 @@ type cachedFileExtraction struct {
 	HasPrecomputedImports bool                    `json:"imports_known"`
 	Parsed                bool                    `json:"parsed"`
 	Failures              []PartialFailure        `json:"failures,omitempty"`
+	GoBuildExcluded       string                  `json:"go_build_excluded,omitempty"`
 }
 
 type sealedFileExtraction struct {
@@ -129,7 +132,7 @@ func (cache *providerExtractionCache) process(ctx context.Context, sc sourceCont
 			cache.reused[path] = true
 		}
 		cache.mu.Unlock()
-		result := providerFileResult{index: index, path: path, symbols: snapshot.Symbols, language: facts.Language, precomputedImports: facts.PrecomputedImports, hasPrecomputedImports: facts.HasPrecomputedImports, parsed: facts.Parsed, failures: facts.Failures}
+		result := providerFileResult{index: index, path: path, symbols: snapshot.Symbols, language: facts.Language, precomputedImports: facts.PrecomputedImports, hasPrecomputedImports: facts.HasPrecomputedImports, parsed: facts.Parsed, failures: facts.Failures, goBuildExcluded: facts.GoBuildExcluded}
 		if len(snapshot.Files) != 0 {
 			result.file = &snapshot.Files[0]
 		}
@@ -151,7 +154,7 @@ func (cache *providerExtractionCache) process(ctx context.Context, sc sourceCont
 	if result.file != nil {
 		snapshot.Files = []FileRecord{*result.file}
 	}
-	facts := cachedFileExtraction{Key: key, Path: path, Blob: blob, File: result.file, Symbols: result.symbols, Internals: captureCachedSnapshotInternals(snapshot), Language: result.language, PrecomputedImports: result.precomputedImports, HasPrecomputedImports: result.hasPrecomputedImports, Parsed: result.parsed, Failures: result.failures}
+	facts := cachedFileExtraction{Key: key, Path: path, Blob: blob, File: result.file, Symbols: result.symbols, Internals: captureCachedSnapshotInternals(snapshot), Language: result.language, PrecomputedImports: result.precomputedImports, HasPrecomputedImports: result.hasPrecomputedImports, Parsed: result.parsed, Failures: result.failures, GoBuildExcluded: result.goBuildExcluded}
 	digest, err := extractionDigest(facts)
 	if err != nil {
 		return fail("artifact-unavailable", err)

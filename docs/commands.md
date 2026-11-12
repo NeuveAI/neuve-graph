@@ -85,8 +85,9 @@ other query commands use; details are in the
 
 ## Export
 
-Bulk NDJSON streams. These default to the **committed tree**; pass
-`--worktree` to stream the working tree instead.
+Bulk NDJSON streams. These default to the **committed tree** at HEAD; pass
+`--worktree` to stream the working tree instead, or `--commit <exact-commit-OID>`
+to build one exact commit from Git objects without a checkout, whatever HEAD is.
 
 | Command | What it does |
 | --- | --- |
@@ -94,6 +95,24 @@ Bulk NDJSON streams. These default to the **committed tree**; pass
 | `symbols` | Symbol records only. There is no name filter; grep the stream, or use `query`/`def` for a targeted lookup. |
 | `edges` | Relation records, filterable server-side with `--to`, `--from`, `--relation`. |
 | `snapshot-query` | Queries a saved compact snapshot without rebuilding the graph. |
+
+`--commit` takes a lowercase 40- or 64-character commit OID, once, and cannot
+be combined with `--worktree`. A short or uppercase id, a ref name, a tag
+object's id or an unknown object is an error with nothing on stdout; there is
+no fallback to HEAD or the working tree. It works with every format and with
+the `--to`/`--from`/`--relation` filters, and needs no prepared snapshot. The
+header's `commit` and `tree` are the target's. `.graphignore`, `--ignore-file`
+and `--include-file` still come from the serving directory; `.gitignore` files
+come from the target commit. Whole-stream output is cached per commit, so a
+second read of the same commit, mode, profile and policy is served from the
+records cache wherever HEAD has moved. Capability
+`optional_local_only_features.exact_commit_bulk_streams` feature-detects it;
+see [the exact-commit bulk stream contract](adr/0010-exact-commit-bulk-streams.md).
+
+The summaries of these streams name listed source that was not read:
+`W_SUBMODULE_NOT_READ` per committed-tree gitlink and `W_GO_BUILD_EXCLUDED`
+per Go file outside the host's default build (capability
+`source_omission_warnings`). See [snapshot format](snapshot-format.md#source-omission-warnings).
 
 Stream and record formats are specified in
 [snapshot format](snapshot-format.md).

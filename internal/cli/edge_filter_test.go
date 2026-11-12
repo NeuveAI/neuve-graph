@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -77,4 +79,40 @@ func TestWarnIfPartial(t *testing.T) {
 	// nil summary (stream produced none) must not panic.
 	b.Reset()
 	warnIfPartial(&b, false, nil)
+}
+
+// TestFilteredEdgesHonourExactCommit: the filtered path returns before any
+// cache code, so it has its own branch to get the target from. Reason: a
+// `--relation CALLS` read for an old commit must report that commit's calls,
+// not HEAD's.
+func TestFilteredEdgesHonourExactCommit(t *testing.T) {
+	repo, old, _ := exactCommitStreamFixture(t)
+	stream, err := runExactStream(t, "edges", "--repo", repo, "--commit", old, "--relation", "CALLS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := bytes.Split(bytes.TrimSpace(stream), []byte("\n"))
+	var header sem.SnapshotHeader
+	if err := json.Unmarshal(lines[0], &header); err != nil || header.Commit != old {
+		t.Fatalf("header commit=%q err=%v", header.Commit, err)
+	}
+	calls := 0
+	for _, line := range lines[1:] {
+		var record sem.RelationRecord
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Fatal(err)
+		}
+		if record.RecordType != "relation" {
+			continue
+		}
+		if record.Type != "CALLS" {
+			t.Fatalf("filter leaked %s", record.Type)
+		}
+		if strings.HasSuffix(record.FromID, ":caller") && strings.HasSuffix(record.ToID, ":legacyOnly") {
+			calls++
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("caller -> legacyOnly CALLS edges = %d in %s", calls, stream)
+	}
 }

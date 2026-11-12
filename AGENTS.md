@@ -92,8 +92,18 @@ entire graph impact --repo . --symbol NAME [--file path] [--depth 1|2] [--format
 Full stream of symbol records (stable `compound-v1` ID, kind, qualified name, source range, signature, language, container). This is a **bulk NDJSON stream of the whole repo**, filtered to the symbol record type — there is **no positional name argument** and no server-side name filter; grep the stream client-side, or prefer `query`/`neighbors` for a targeted single-symbol lookup.
 
 ```sh
-entire graph symbols --repo . --format ndjson [--worktree] [--outline]
+entire graph symbols --repo . --format ndjson [--worktree|--commit <exact-commit-OID>] [--outline]
 ```
+
+`--commit <exact-commit-OID>` streams that exact commit (lowercase 40 or 64 hex
+characters) from Git objects, with no checkout or worktree and whatever HEAD is;
+the header's `commit` and `tree` are the target's. It excludes `--worktree`, needs
+no preparation, and a target that is not a commit is an error with no output and
+no HEAD fallback. External `.graphignore` and `--ignore-file`/`--include-file`
+come from the serving directory. The same flag and rules apply to `edges` and
+`snapshot`. The summary's `W_SUBMODULE_NOT_READ` and `W_GO_BUILD_EXCLUDED`
+warnings name listed source that was not read. See
+[the exact-commit bulk stream contract](docs/adr/0010-exact-commit-bulk-streams.md).
 
 `--outline` adds one `file_outline` record per successfully tree-sitter-parsed
 file, with root named-child ranges and grammar types in `top_level`, import
@@ -118,8 +128,10 @@ committed reads bypass caches so outlines always describe the selected source.
 Full stream of relation records across all 30 types (`CALLS`, `IMPORTS`, `EXTENDS`, `HANDLES_ROUTE`, …), each tagged with resolution and confidence. The stream is whole-repo by default; `--to`, `--from`, and `--relation` filter it server-side. For one symbol's callers/callees, prefer `neighbors` because it annotates resolved definitions and call sites from source.
 
 ```sh
-entire graph edges --repo . --format ndjson [--worktree] [--to ID|NAME] [--from ID|NAME] [--relation TYPE[,TYPE...]]
+entire graph edges --repo . --format ndjson [--worktree|--commit <exact-commit-OID>] [--to ID|NAME] [--from ID|NAME] [--relation TYPE[,TYPE...]]
 ```
+
+`--commit` selects an exact commit as for `symbols`, including with the filters.
 
 **When:** you want every relation (bulk export / ingestion) or a filtered relation stream. For a targeted one-symbol question, use `neighbors`.
 
@@ -127,9 +139,14 @@ entire graph edges --repo . --format ndjson [--worktree] [--to ID|NAME] [--from 
 One header record, then file, external-endpoint, symbol, and relation records, streamed so memory stays bounded. Superset of `symbols` + `edges` + files.
 
 ```sh
-entire graph snapshot --repo . --format ndjson [--worktree]
+entire graph snapshot --repo . --format ndjson [--worktree|--commit <exact-commit-OID>]
+entire graph snapshot --repo . --format compact-ndjson --commit <exact-commit-OID> > graph.compact.ndjson
 entire graph snapshot --repo . --format scip > index.scip 2> index.scip.omissions.json
 ```
+
+`--commit` selects an exact commit as for `symbols`, in every format. Whole-graph
+output is cached per commit, mode, profile and policy, so a second read of one
+commit is a cache hit wherever HEAD is.
 
 The experimental `scip` format is a complete-snapshot binary projection for
 standard SCIP consumers. Native NDJSON remains the lossless default; SCIP

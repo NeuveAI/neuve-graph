@@ -99,6 +99,14 @@ is emitted before that so consumers can begin work immediately. The profile
 metadata is **header-only**: it is known up front and is therefore not
 repeated in the summary.
 
+**`commit` and `tree` name the source that was read.** By default that is
+HEAD's commit and root tree. With `--commit <exact-commit-OID>` they are the
+target commit and its tree, read from Git objects without a checkout; nothing
+in the stream (files, symbols, relations, `FILE_CHANGES_WITH` co-change
+history, TypeScript `tsconfig.json` aliases, nested `.gitignore` rules) comes
+from HEAD or the working tree. Both fields are empty for a `--worktree` stream.
+See [ADR 0010](adr/0010-exact-commit-bulk-streams.md).
+
 **`repo_key` is the symbol-ID namespace, not a repository identity.** Remote
 URLs are checked in the provider's established compatibility order: the last
 configured `remote.origin.url` is checked first, then every non-origin remote
@@ -155,6 +163,26 @@ recognize within a supported major schema version, and must not assume every
 line is a known type. A consumer that reads only the header and relations
 should skip `file`, `symbol`, `external`, and `summary` lines rather than
 erroring on them.
+
+## Source omission warnings
+
+The `snapshot`, `symbols` and `edges` summaries name source that the listing
+saw but the stream did not read, so a consumer does not read "no records" as
+"nothing there". Both are summary `warnings` with severity `info`, not
+`partial_failures`: they leave `stats.partial_failures`,
+`stats.completeness_level` and `completeness.health` unchanged.
+
+| Code | One warning per | `file_path` | `detail` |
+| --- | --- | --- | --- |
+| `W_SUBMODULE_NOT_READ` | Gitlink (mode 160000) in the committed tree that was read, unless the ignore or vendored-path rules exclude its path | The gitlink's path | `gitlink pins commit <OID>` |
+| `W_GO_BUILD_EXCLUDED` | Go file outside the host's default build (build constraint or `_GOOS`/`_GOARCH` file-name suffix); it has no file record, symbols or relations | The Go file's path | The host `GOOS/GOARCH` and which rule excluded it |
+
+A `--worktree` stream does not report gitlinks. Go exclusion depends on the
+host that built the snapshot, as it always has. Capability
+`optional_local_only_features.source_omission_warnings` feature-detects both
+codes: on an engine without it, an absent warning proves nothing. Interactive
+query surfaces (`query`, `neighbors`, `def`, `impact`) do not add these
+warnings to their diagnostics.
 
 ## Compact snapshot NDJSON v1
 

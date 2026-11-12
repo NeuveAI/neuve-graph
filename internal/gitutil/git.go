@@ -390,8 +390,22 @@ func readFileAtMost(name string, limit int) ([]byte, error) {
 // ListFiles is deliberately left alone: its other caller enumerates paths for
 // git log co-change, where a symlink costs nothing.
 func ListRegularFiles(ctx context.Context, repo, rev string) ([]string, error) {
+	files, _, err := ListRegularFilesAndGitlinks(ctx, repo, rev)
+	return files, err
+}
+
+// Gitlink is a submodule entry (mode 160000) in a committed tree: its path and
+// the commit it pins. The snapshot does not read into it.
+type Gitlink struct {
+	Path   string
+	Commit string
+}
+
+// ListRegularFilesAndGitlinks is ListRegularFiles plus the tree's gitlinks, from
+// the same single listing, so a caller can say which submodules it did not read.
+func ListRegularFilesAndGitlinks(ctx context.Context, repo, rev string) ([]string, []Gitlink, error) {
 	if err := validateTreeish(rev); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// --end-of-options so the revision can only be read as a revision. Git
 	// parses options anywhere ahead of it otherwise, and an option-shaped token
@@ -399,9 +413,10 @@ func ListRegularFiles(ctx context.Context, repo, rev string) ([]string, error) {
 	// listing at exit 0, which reads downstream as "this tree has no files".
 	out, err := run(ctx, repo, "git", "ls-tree", "-r", "-z", "--end-of-options", rev)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var files []string
+	var gitlinks []Gitlink
 	for _, entry := range strings.Split(out, "\x00") {
 		if entry == "" {
 			continue
@@ -412,8 +427,14 @@ func ListRegularFiles(ctx context.Context, repo, rev string) ([]string, error) {
 		if !found || path == "" {
 			continue
 		}
-		mode, _, found := strings.Cut(meta, " ")
+		mode, typeObject, found := strings.Cut(meta, " ")
 		if !found {
+			continue
+		}
+		if isGitlinkTreeMode(mode) {
+			if _, object, ok := strings.Cut(typeObject, " "); ok && object != "" {
+				gitlinks = append(gitlinks, Gitlink{Path: path, Commit: object})
+			}
 			continue
 		}
 		if !isRegularTreeMode(mode) {
@@ -421,7 +442,13 @@ func ListRegularFiles(ctx context.Context, repo, rev string) ([]string, error) {
 		}
 		files = append(files, path)
 	}
-	return files, nil
+	return files, gitlinks, nil
+}
+
+// isGitlinkTreeMode reports whether a `git ls-tree` mode is a gitlink (160000).
+func isGitlinkTreeMode(mode string) bool {
+	parsed, err := strconv.ParseUint(mode, 8, 32)
+	return err == nil && parsed&0o170000 == 0o160000
 }
 
 // isRegularTreeMode reports whether a `git ls-tree` mode is a regular file:

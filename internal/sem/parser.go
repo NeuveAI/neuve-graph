@@ -6356,6 +6356,13 @@ func entityFromNode(node *sitter.Node, src []byte, language, scope string) (Enti
 			name = qualify(scope, name)
 		}
 	case "block":
+		// HCL blocks only. Rust, Go, Java and other grammars name a statement
+		// body `block` too; reading one as an HCL block turned a Rust function
+		// body ending in an identifier into a `block` symbol on the function's
+		// own lines (identity revision 5 removed them).
+		if language != "HCL" {
+			return Entity{}, false
+		}
 		kind = "block"
 		name = hclBlockName(node, src)
 	case "attribute":

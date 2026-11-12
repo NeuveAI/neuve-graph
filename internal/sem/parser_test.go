@@ -3573,3 +3573,35 @@ func TestConversionOperatorWithAPlainTargetKeepsItsName(t *testing.T) {
 		}
 	}
 }
+
+// TestBlockSymbolsAreHCLOnly: the `block` symbol case read any grammar's
+// `block` node as an HCL block, so a Rust function body ending in an identifier
+// became a `block` symbol on the function's own lines. Reason: a consumer that
+// joins changed lines to symbols must find the function, not a phantom block,
+// while HCL blocks must keep their symbols.
+func TestBlockSymbolsAreHCLOnly(t *testing.T) {
+	rust, language := TreeSitterParser{}.Parse("lib.rs", "fn total(value: u32) -> u32 {\n    let doubled = value * 2;\n    doubled\n}\n")
+	if language != "Rust" {
+		t.Fatalf("language = %q", language)
+	}
+	sawFunction := false
+	for _, entity := range rust {
+		if entity.Kind == "block" {
+			t.Fatalf("Rust function body produced a block symbol: %#v", entity)
+		}
+		sawFunction = sawFunction || (entity.Kind == "function" && entity.Name == "total")
+	}
+	if !sawFunction {
+		t.Fatalf("Rust function missing: %#v", rust)
+	}
+	hcl, language := TreeSitterParser{}.Parse("main.tf", "resource \"aws_instance\" \"web\" {\n  ami = \"x\"\n}\n")
+	if language != "HCL" {
+		t.Fatalf("language = %q", language)
+	}
+	for _, entity := range hcl {
+		if entity.Kind == "block" && entity.Name == "resource.aws_instance.web" {
+			return
+		}
+	}
+	t.Fatalf("HCL block symbol missing: %#v", hcl)
+}
