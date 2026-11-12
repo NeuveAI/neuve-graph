@@ -167,8 +167,17 @@ func (index *importTargetIndex) classifyJS(importingPath, specifier string) (str
 	if specifier == "" || strings.HasPrefix(specifier, ".") || strings.HasPrefix(specifier, "/") {
 		return importTargetUnresolved, ""
 	}
-	if strings.HasPrefix(specifier, "node:") || strings.HasPrefix(specifier, "bun:") || nodeBuiltinModules[specifier] || specifier == "bun" {
+	// Exact names only: node:<core module> (or one of the node:-only modules),
+	// an unprefixed core module, and Bun's own modules. An unknown name under
+	// either prefix is unresolved, never builtin.
+	if name, prefixed := strings.CutPrefix(specifier, "node:"); prefixed && (nodeBuiltinModules[name] || nodePrefixOnlyModules[name]) {
 		return importTargetBuiltin, ""
+	}
+	if nodeBuiltinModules[specifier] || bunModules[specifier] {
+		return importTargetBuiltin, ""
+	}
+	if strings.HasPrefix(specifier, "node:") || strings.HasPrefix(specifier, "bun:") {
+		return importTargetUnresolved, ""
 	}
 	// A root tsconfig.json alias that did not resolve to a file is unresolved,
 	// never a package of the same name.
@@ -252,10 +261,11 @@ func (index *importTargetIndex) classifyGo(importingPath, specifier string) (str
 			}
 		}
 	}
-	first, _, _ := strings.Cut(specifier, "/")
-	// The go command reserves import paths whose first element has no dot for
-	// the standard library; "C" is cgo's pseudo-package.
-	if specifier == "C" || (first != "" && !strings.Contains(first, ".")) {
+	// "C" is cgo's pseudo-package. A standard-library path is builtin only when
+	// it names an importable package; internal/ and vendor/ standard packages
+	// cannot be imported from outside the standard library, so they, like any
+	// path not in the list, are unresolved.
+	if specifier == "C" || goStandardPackages[specifier] {
 		return importTargetBuiltin, ""
 	}
 	return importTargetUnresolved, ""
@@ -269,9 +279,21 @@ func (index *importTargetIndex) classifyPython(importingPath, specifier string) 
 	if specifier == "" || strings.HasPrefix(specifier, ".") {
 		return importTargetUnresolved, ""
 	}
-	top, _, _ := strings.Cut(specifier, ".")
+	top, _, dotted := strings.Cut(specifier, ".")
 	if pythonStdlibModules[top] {
-		return importTargetBuiltin, ""
+		// The relation's specifier for `from m import n` is "m.n", so a dotted
+		// name is builtin when it is a standard module or names something in
+		// one (its parent is a standard module); a name inside a module is not
+		// checked, in any language. A deeper path under no standard module is
+		// unresolved rather than taken on its top package's word.
+		parent := specifier
+		if i := strings.LastIndex(specifier, "."); i >= 0 {
+			parent = specifier[:i]
+		}
+		if !dotted || pythonStdlibSubmodules[specifier] || parent == top || pythonStdlibSubmodules[parent] {
+			return importTargetBuiltin, ""
+		}
+		return importTargetUnresolved, ""
 	}
 	name := normalizePythonDistribution(top)
 	if dir, found := nearestDir(importingPath, func(dir string) bool { return len(index.python[dir]) > 0 }); found {
@@ -443,6 +465,49 @@ var nodeBuiltinModules = setOf(
 	"worker_threads", "zlib",
 )
 
+// nodePrefixOnlyModules are Node core modules that exist only with the node:
+// prefix (Node 24).
+var nodePrefixOnlyModules = setOf("sea", "sqlite", "test", "test/reporters")
+
+// bunModules are Bun's own runtime modules (require("module").builtinModules of
+// Bun 1.4.4 that start with bun).
+var bunModules = setOf("bun", "bun:ffi", "bun:jsc", "bun:sqlite", "bun:test")
+
+// goStandardPackageList holds the importable standard-library packages: `go list
+// std` of Go 1.27.0 without internal/ and vendor/ paths, which code outside
+// the standard library cannot import. Sorted; TestGoStandardPackagesPinned
+// keeps it so.
+var goStandardPackageList = []string{
+	"archive/tar", "archive/zip", "bufio", "bytes", "cmp", "compress/bzip2", "compress/flate", "compress/gzip",
+	"compress/lzw", "compress/zlib", "container/heap", "container/list", "container/ring", "context", "crypto",
+	"crypto/aes", "crypto/cipher", "crypto/des", "crypto/dsa", "crypto/ecdh", "crypto/ecdsa", "crypto/ed25519",
+	"crypto/elliptic", "crypto/fips140", "crypto/hkdf", "crypto/hmac", "crypto/hpke", "crypto/md5",
+	"crypto/mldsa", "crypto/mlkem", "crypto/mlkem/mlkemtest", "crypto/pbkdf2", "crypto/rand", "crypto/rc4",
+	"crypto/rsa", "crypto/sha1", "crypto/sha256", "crypto/sha3", "crypto/sha512", "crypto/subtle", "crypto/tls",
+	"crypto/x509", "crypto/x509/pkix", "database/sql", "database/sql/driver", "debug/buildinfo", "debug/dwarf",
+	"debug/elf", "debug/gosym", "debug/macho", "debug/pe", "debug/plan9obj", "embed", "encoding",
+	"encoding/ascii85", "encoding/asn1", "encoding/base32", "encoding/base64", "encoding/binary",
+	"encoding/csv", "encoding/gob", "encoding/hex", "encoding/json", "encoding/json/jsontext",
+	"encoding/json/v2", "encoding/pem", "encoding/xml", "errors", "expvar", "flag", "fmt", "go/ast", "go/build",
+	"go/build/constraint", "go/constant", "go/doc", "go/doc/comment", "go/format", "go/importer", "go/parser",
+	"go/printer", "go/scanner", "go/token", "go/types", "go/version", "hash", "hash/adler32", "hash/crc32",
+	"hash/crc64", "hash/fnv", "hash/maphash", "html", "html/template", "image", "image/color",
+	"image/color/palette", "image/draw", "image/gif", "image/jpeg", "image/png", "index/suffixarray", "io",
+	"io/fs", "io/ioutil", "iter", "log", "log/slog", "log/syslog", "maps", "math", "math/big", "math/bits",
+	"math/cmplx", "math/rand", "math/rand/v2", "mime", "mime/multipart", "mime/quotedprintable", "net",
+	"net/http", "net/http/cgi", "net/http/cookiejar", "net/http/fcgi", "net/http/httptest",
+	"net/http/httptrace", "net/http/httputil", "net/http/pprof", "net/mail", "net/netip", "net/rpc",
+	"net/rpc/jsonrpc", "net/smtp", "net/textproto", "net/url", "os", "os/exec", "os/signal", "os/user", "path",
+	"path/filepath", "plugin", "reflect", "regexp", "regexp/syntax", "runtime", "runtime/cgo",
+	"runtime/coverage", "runtime/debug", "runtime/metrics", "runtime/pprof", "runtime/race", "runtime/trace",
+	"slices", "sort", "strconv", "strings", "structs", "sync", "sync/atomic", "syscall", "testing",
+	"testing/cryptotest", "testing/fstest", "testing/iotest", "testing/quick", "testing/slogtest",
+	"testing/synctest", "text/scanner", "text/tabwriter", "text/template", "text/template/parse", "time",
+	"time/tzdata", "unicode", "unicode/utf16", "unicode/utf8", "unique", "unsafe", "uuid", "weak",
+}
+
+var goStandardPackages = setOf(goStandardPackageList...)
+
 // pythonStdlibModules are the top-level standard-library modules
 // (sys.stdlib_module_names of CPython 3.14) plus those removed since 3.11
 // (PEP 594, distutils, imp, lib2to3), which older code still imports.
@@ -482,6 +547,103 @@ var pythonStdlibModules = setOf(
 	"aifc", "asynchat", "asyncore", "audioop", "cgi", "cgitb", "chunk", "crypt", "distutils", "imghdr", "imp",
 	"lib2to3", "mailcap", "msilib", "nis", "nntplib", "ossaudiodev", "pipes", "smtpd", "sndhdr", "spwd", "sunau",
 	"telnetlib", "uu", "xdrlib",
+)
+
+// pythonStdlibSubmodules are the standard library's dotted module names
+// (pkgutil.walk_packages over CPython 3.14's standard library, test packages
+// left out) plus the six aliases importing every standard module registers in
+// sys.modules (collections.abc, os.path, pyexpat.errors, pyexpat.model,
+// xml.parsers.expat.errors, xml.parsers.expat.model).
+var pythonStdlibSubmodules = setOf(
+	"_pyrepl.__main__", "_pyrepl._module_completer", "_pyrepl._threading_handler", "_pyrepl.base_eventqueue",
+	"_pyrepl.commands", "_pyrepl.completing_reader", "_pyrepl.console", "_pyrepl.fancy_termios",
+	"_pyrepl.historical_reader", "_pyrepl.input", "_pyrepl.keymap", "_pyrepl.main", "_pyrepl.pager",
+	"_pyrepl.reader", "_pyrepl.readline", "_pyrepl.simple_interact", "_pyrepl.terminfo", "_pyrepl.trace",
+	"_pyrepl.types", "_pyrepl.unix_console", "_pyrepl.unix_eventqueue", "_pyrepl.utils",
+	"_pyrepl.windows_console", "_pyrepl.windows_eventqueue", "asyncio.__main__", "asyncio.base_events",
+	"asyncio.base_futures", "asyncio.base_subprocess", "asyncio.base_tasks", "asyncio.constants",
+	"asyncio.coroutines", "asyncio.events", "asyncio.exceptions", "asyncio.format_helpers", "asyncio.futures",
+	"asyncio.graph", "asyncio.locks", "asyncio.log", "asyncio.mixins", "asyncio.proactor_events",
+	"asyncio.protocols", "asyncio.queues", "asyncio.runners", "asyncio.selector_events", "asyncio.sslproto",
+	"asyncio.staggered", "asyncio.streams", "asyncio.subprocess", "asyncio.taskgroups", "asyncio.tasks",
+	"asyncio.threads", "asyncio.timeouts", "asyncio.tools", "asyncio.transports", "asyncio.trsock",
+	"asyncio.unix_events", "asyncio.windows_events", "asyncio.windows_utils", "collections.abc",
+	"compression._common", "compression._common._streams", "compression.bz2", "compression.gzip",
+	"compression.lzma", "compression.zlib", "compression.zstd", "compression.zstd._zstdfile",
+	"concurrent.futures", "concurrent.futures._base", "concurrent.futures.interpreter",
+	"concurrent.futures.process", "concurrent.futures.thread", "concurrent.interpreters",
+	"concurrent.interpreters._crossinterp", "concurrent.interpreters._queues", "ctypes._aix", "ctypes._endian",
+	"ctypes._layout", "ctypes.macholib", "ctypes.macholib.dyld", "ctypes.macholib.dylib",
+	"ctypes.macholib.framework", "ctypes.util", "ctypes.wintypes", "curses.ascii", "curses.has_key",
+	"curses.panel", "curses.textpad", "dbm.dumb", "dbm.gnu", "dbm.ndbm", "dbm.sqlite3", "email._encoded_words",
+	"email._header_value_parser", "email._parseaddr", "email._policybase", "email.base64mime", "email.charset",
+	"email.contentmanager", "email.encoders", "email.errors", "email.feedparser", "email.generator",
+	"email.header", "email.headerregistry", "email.iterators", "email.message", "email.mime",
+	"email.mime.application", "email.mime.audio", "email.mime.base", "email.mime.image", "email.mime.message",
+	"email.mime.multipart", "email.mime.nonmultipart", "email.mime.text", "email.parser", "email.policy",
+	"email.quoprimime", "email.utils", "encodings._win_cp_codecs", "encodings.aliases", "encodings.ascii",
+	"encodings.base64_codec", "encodings.big5", "encodings.big5hkscs", "encodings.bz2_codec",
+	"encodings.charmap", "encodings.cp037", "encodings.cp1006", "encodings.cp1026", "encodings.cp1125",
+	"encodings.cp1140", "encodings.cp1250", "encodings.cp1251", "encodings.cp1252", "encodings.cp1253",
+	"encodings.cp1254", "encodings.cp1255", "encodings.cp1256", "encodings.cp1257", "encodings.cp1258",
+	"encodings.cp273", "encodings.cp424", "encodings.cp437", "encodings.cp500", "encodings.cp720",
+	"encodings.cp737", "encodings.cp775", "encodings.cp850", "encodings.cp852", "encodings.cp855",
+	"encodings.cp856", "encodings.cp857", "encodings.cp858", "encodings.cp860", "encodings.cp861",
+	"encodings.cp862", "encodings.cp863", "encodings.cp864", "encodings.cp865", "encodings.cp866",
+	"encodings.cp869", "encodings.cp874", "encodings.cp875", "encodings.cp932", "encodings.cp949",
+	"encodings.cp950", "encodings.euc_jis_2004", "encodings.euc_jisx0213", "encodings.euc_jp",
+	"encodings.euc_kr", "encodings.gb18030", "encodings.gb2312", "encodings.gbk", "encodings.hex_codec",
+	"encodings.hp_roman8", "encodings.hz", "encodings.idna", "encodings.iso2022_jp", "encodings.iso2022_jp_1",
+	"encodings.iso2022_jp_2", "encodings.iso2022_jp_2004", "encodings.iso2022_jp_3", "encodings.iso2022_jp_ext",
+	"encodings.iso2022_kr", "encodings.iso8859_1", "encodings.iso8859_10", "encodings.iso8859_11",
+	"encodings.iso8859_13", "encodings.iso8859_14", "encodings.iso8859_15", "encodings.iso8859_16",
+	"encodings.iso8859_2", "encodings.iso8859_3", "encodings.iso8859_4", "encodings.iso8859_5",
+	"encodings.iso8859_6", "encodings.iso8859_7", "encodings.iso8859_8", "encodings.iso8859_9",
+	"encodings.johab", "encodings.koi8_r", "encodings.koi8_t", "encodings.koi8_u", "encodings.kz1048",
+	"encodings.latin_1", "encodings.mac_arabic", "encodings.mac_croatian", "encodings.mac_cyrillic",
+	"encodings.mac_farsi", "encodings.mac_greek", "encodings.mac_iceland", "encodings.mac_latin2",
+	"encodings.mac_roman", "encodings.mac_romanian", "encodings.mac_turkish", "encodings.mbcs", "encodings.oem",
+	"encodings.palmos", "encodings.ptcp154", "encodings.punycode", "encodings.quopri_codec",
+	"encodings.raw_unicode_escape", "encodings.rot_13", "encodings.shift_jis", "encodings.shift_jis_2004",
+	"encodings.shift_jisx0213", "encodings.tis_620", "encodings.undefined", "encodings.unicode_escape",
+	"encodings.utf_16", "encodings.utf_16_be", "encodings.utf_16_le", "encodings.utf_32", "encodings.utf_32_be",
+	"encodings.utf_32_le", "encodings.utf_7", "encodings.utf_8", "encodings.utf_8_sig", "encodings.uu_codec",
+	"encodings.zlib_codec", "ensurepip.__main__", "ensurepip._uninstall", "html.entities", "html.parser",
+	"http.client", "http.cookiejar", "http.cookies", "http.server", "importlib._abc", "importlib._bootstrap",
+	"importlib._bootstrap_external", "importlib.abc", "importlib.machinery", "importlib.metadata",
+	"importlib.metadata._adapters", "importlib.metadata._collections", "importlib.metadata._functools",
+	"importlib.metadata._itertools", "importlib.metadata._meta", "importlib.metadata._text",
+	"importlib.metadata.diagnose", "importlib.readers", "importlib.resources", "importlib.resources._adapters",
+	"importlib.resources._common", "importlib.resources._functional", "importlib.resources._itertools",
+	"importlib.resources.abc", "importlib.resources.readers", "importlib.resources.simple", "importlib.simple",
+	"importlib.util", "json.__main__", "json.decoder", "json.encoder", "json.scanner", "json.tool",
+	"logging.config", "logging.handlers", "multiprocessing.connection", "multiprocessing.context",
+	"multiprocessing.dummy", "multiprocessing.dummy.connection", "multiprocessing.forkserver",
+	"multiprocessing.heap", "multiprocessing.managers", "multiprocessing.pool", "multiprocessing.popen_fork",
+	"multiprocessing.popen_forkserver", "multiprocessing.popen_spawn_posix",
+	"multiprocessing.popen_spawn_win32", "multiprocessing.process", "multiprocessing.queues",
+	"multiprocessing.reduction", "multiprocessing.resource_sharer", "multiprocessing.resource_tracker",
+	"multiprocessing.shared_memory", "multiprocessing.sharedctypes", "multiprocessing.spawn",
+	"multiprocessing.synchronize", "multiprocessing.util", "os.path", "pathlib._local", "pathlib._os",
+	"pathlib.types", "pydoc_data.module_docs", "pydoc_data.topics", "pyexpat.errors", "pyexpat.model",
+	"re._casefix", "re._compiler", "re._constants", "re._parser", "sqlite3.__main__", "sqlite3.dbapi2",
+	"sqlite3.dump", "string.templatelib", "sysconfig.__main__", "tomllib._parser", "tomllib._re",
+	"tomllib._types", "turtledemo.__main__", "turtledemo.bytedesign", "turtledemo.chaos", "turtledemo.clock",
+	"turtledemo.colormixer", "turtledemo.forest", "turtledemo.fractalcurves", "turtledemo.lindenmayer",
+	"turtledemo.minimal_hanoi", "turtledemo.nim", "turtledemo.paint", "turtledemo.peace", "turtledemo.penrose",
+	"turtledemo.planet_and_moon", "turtledemo.rosette", "turtledemo.round_dance", "turtledemo.sorting_animate",
+	"turtledemo.tree", "turtledemo.two_canvases", "turtledemo.yinyang", "unittest.__main__", "unittest._log",
+	"unittest.async_case", "unittest.case", "unittest.loader", "unittest.main", "unittest.mock",
+	"unittest.result", "unittest.runner", "unittest.signals", "unittest.suite", "unittest.util", "urllib.error",
+	"urllib.parse", "urllib.request", "urllib.response", "urllib.robotparser", "venv.__main__",
+	"wsgiref.handlers", "wsgiref.headers", "wsgiref.simple_server", "wsgiref.types", "wsgiref.util",
+	"wsgiref.validate", "xml.dom", "xml.dom.NodeFilter", "xml.dom.domreg", "xml.dom.expatbuilder",
+	"xml.dom.minicompat", "xml.dom.minidom", "xml.dom.pulldom", "xml.dom.xmlbuilder", "xml.etree",
+	"xml.etree.ElementInclude", "xml.etree.ElementPath", "xml.etree.ElementTree", "xml.etree.cElementTree",
+	"xml.parsers", "xml.parsers.expat", "xml.parsers.expat.errors", "xml.parsers.expat.model", "xml.sax",
+	"xml.sax._exceptions", "xml.sax.expatreader", "xml.sax.handler", "xml.sax.saxutils", "xml.sax.xmlreader",
+	"xmlrpc.client", "xmlrpc.server", "zipfile.__main__", "zipfile._path", "zipfile._path.glob",
+	"zoneinfo._common", "zoneinfo._tzpath", "zoneinfo._zoneinfo",
 )
 
 func setOf(values ...string) map[string]bool {

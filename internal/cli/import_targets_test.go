@@ -232,3 +232,32 @@ func TestImportTargetCapability(t *testing.T) {
 		t.Errorf("import target languages %v", got)
 	}
 }
+
+// A Python relative from-import is one statement in the tokens record, whose
+// specifier is the module as written ("."), while the snapshot classifies each
+// imported module (".helper"). A join on (file, specifier) therefore finds
+// nothing for it: the safe direction, pinned here so it is never silent.
+func TestPythonRelativeFromImportSpecifiersDiffer(t *testing.T) {
+	repo := t.TempDir()
+	git(t, repo, "init")
+	git(t, repo, "config", "user.name", "Graph test")
+	git(t, repo, "config", "user.email", "graph@example.com")
+	write(t, repo, "pkg/__init__.py", "")
+	write(t, repo, "pkg/helper.py", "def h():\n    return 1\n")
+	write(t, repo, "pkg/app.py", "from . import helper\n")
+	git(t, repo, "add", ".")
+	git(t, repo, "commit", "-m", "fixture")
+	commit := rev(t, repo, "HEAD")
+	records, _ := tokensStream(t, repo)
+	imports := records["pkg/app.py"].Imports
+	if len(imports) != 1 || imports[0].Specifier != "." || imports[0].Bindings[0].Imported != "helper" {
+		t.Fatalf("tokens record imports %#v", imports)
+	}
+	targets, _ := importTargets(t, runOutlineCLI(t, "snapshot", "--repo", repo, "--commit", commit, "--format", "ndjson", "--no-cache"))
+	if got := targets[[2]string{"pkg/app.py", ".helper"}]; got.kind != "import_target_file" || got.path != "pkg/helper.py" {
+		t.Errorf("relation entry for .helper: %v", got)
+	}
+	if _, ok := targets[[2]string{"pkg/app.py", "."}]; ok {
+		t.Error("the relation now uses the statement's specifier; update the docs and this test")
+	}
+}

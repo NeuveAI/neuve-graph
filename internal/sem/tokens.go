@@ -22,14 +22,18 @@ import (
 // Leaves are positional rows; see tokenLeaf* for the columns. No source text is
 // carried beyond identifier names and import specifiers and bindings.
 type FileTokensRecord struct {
-	RecordType      string   `json:"record_type"`
-	FilePath        string   `json:"file_path"`
-	Language        string   `json:"language"`
+	RecordType string `json:"record_type"`
+	FilePath   string `json:"file_path"`
+	Language   string `json:"language"`
+	// Status says whether the leaves were extracted: tokensExtracted, or why
+	// not (tokensLanguageNotCovered, tokensOverSizeLimit). The leaf fields and
+	// imports are present only when they were.
+	Status          string   `json:"status"`
 	HasErrors       bool     `json:"has_errors"`
-	IdentifierNames []string `json:"identifier_names"`
-	LeafTypes       []string `json:"leaf_types"`
-	Ancestors       []string `json:"ancestors"`
-	Leaves          [][8]int `json:"leaves"`
+	IdentifierNames []string `json:"identifier_names,omitzero"`
+	LeafTypes       []string `json:"leaf_types,omitzero"`
+	Ancestors       []string `json:"ancestors,omitzero"`
+	Leaves          [][8]int `json:"leaves,omitzero"`
 	ImportBindings  string   `json:"import_bindings"`
 	// Imports is [] for a covered language with no import statement and
 	// absent (nil) for a language whose bindings are not extracted.
@@ -70,66 +74,71 @@ const (
 	importBindingsNotExtracted = "not_extracted"
 )
 
+const (
+	tokensExtracted          = "extracted"
+	tokensLanguageNotCovered = "language_not_covered"
+	tokensOverSizeLimit      = "over_size_limit"
+)
+
+// tokensSourceByteLimit is the largest file, in bytes as given, whose leaves
+// are extracted, and tokensLeafLimit the most leaf rows one record carries.
+// Ordinary code runs to about 6 to 11 output bytes per source byte, but dense
+// tables (numbers, punctuation) reach 23, so bytes alone cannot bound the
+// output: a row encodes in at most about 45 bytes, and 100,000 rows with their
+// tables stay under a consumer's 8 MiB per-file cap by construction. A file
+// past either limit gets a record with tokensOverSizeLimit and nothing else;
+// its outline is unaffected.
+const (
+	tokensSourceByteLimit = 512 << 10
+	tokensLeafLimit       = 100_000
+)
+
 // tokenClasses is one language's leaf classification. A leaf is an identifier
 // when it is a named node whose type is listed and it does not lie under a
 // comment; it is a comment when it, or one of its ancestors, is a named node
 // whose type is listed under comments. Keywords are anonymous tokens in every
-// grammar listed here (SQL's keyword_* nodes are named and not listed), so
-// the tree, not the text, decides whether a contextual keyword is a name.
+// grammar listed here, so the tree, not the text, decides whether a contextual
+// keyword is a name.
+//
+// content lists the node types whose own text (bytes between their children
+// with no node of their own) is program content, such as a string literal's
+// characters: every such byte is a row, whitespace included. Own text of any
+// other node that is all whitespace is layout and has no row.
 type tokenClasses struct {
 	identifiers []string
 	comments    []string
+	content     []string
 }
 
 // tokenClassTable is the one table that classifies leaves, keyed by the
-// language label the outline reports. docs/tokens.md mirrors it and
-// TestTokenClassificationDocMirrorsTable keeps the two equal. Every language
-// Graph parses with tree-sitter has an entry; TestTokenClassTableCoversTreeSitterLanguages
-// fails when a parsed language is added without one.
+// language label the outline reports. docs/snapshot-format.md mirrors it and
+// TestTokenClassificationDocMirrorsTable keeps the two equal.
+//
+// A language is listed only once TestFileTokensLiteralWhitespaceIsContent
+// proves, for each of its string-like forms, that a whitespace change inside
+// the literal changes the leaves while layout outside it does not. Every other
+// language gets a record with tokensLanguageNotCovered.
 var tokenClassTable = map[string]tokenClasses{
-	"Bash":             {identifiers: []string{"variable_name"}, comments: []string{"comment"}},
-	"C":                {identifiers: []string{"field_identifier", "identifier", "statement_identifier", "type_identifier"}, comments: []string{"comment"}},
-	"C#":               {identifiers: []string{"identifier"}, comments: []string{"comment"}},
-	"C++":              {identifiers: []string{"field_identifier", "identifier", "namespace_identifier", "statement_identifier", "type_identifier"}, comments: []string{"comment"}},
-	"CUE":              {identifiers: []string{"identifier", "package_identifier"}, comments: []string{"comment"}},
-	"Clojure":          {identifiers: []string{"sym_name", "sym_ns"}, comments: []string{"comment"}},
-	"ClojureScript":    {identifiers: []string{"sym_name", "sym_ns"}, comments: []string{"comment"}},
-	"Dart":             {identifiers: []string{"identifier", "identifier_dollar_escaped", "type_identifier"}, comments: []string{"comment", "documentation_comment"}},
-	"Elixir":           {identifiers: []string{"alias", "identifier"}, comments: []string{"comment"}},
-	"Erlang":           {identifiers: []string{"atom", "var"}, comments: []string{"comment"}},
-	"F#":               {identifiers: []string{"identifier"}, comments: []string{"block_comment", "block_comment_content", "line_comment"}},
-	"Go":               {identifiers: []string{"blank_identifier", "field_identifier", "identifier", "label_name", "package_identifier", "type_identifier"}, comments: []string{"comment"}},
-	"HCL":              {identifiers: []string{"identifier"}, comments: []string{"comment"}},
-	"Haskell":          {identifiers: []string{"constructor", "field_name", "label", "module_id", "name", "variable"}, comments: []string{"comment"}},
-	"Java":             {identifiers: []string{"identifier", "type_identifier"}, comments: []string{"block_comment", "line_comment"}},
-	"JavaScript":       {identifiers: []string{"identifier", "private_property_identifier", "property_identifier", "shorthand_property_identifier", "shorthand_property_identifier_pattern", "statement_identifier", "type_identifier"}, comments: []string{"comment", "html_comment"}},
-	"Julia":            {identifiers: []string{"identifier", "macro_identifier"}, comments: []string{"block_comment", "line_comment"}},
-	"Kotlin":           {identifiers: []string{"interpolated_identifier", "simple_identifier", "type_identifier"}, comments: []string{"line_comment", "multiline_comment"}},
-	"Lua":              {identifiers: []string{"identifier"}, comments: []string{"comment"}},
-	"OCaml":            {identifiers: []string{"class_name", "class_type_name", "constructor_name", "field_name", "instance_variable_name", "label_name", "method_name", "module_name", "module_type_name", "type_constructor", "type_variable", "value_name"}, comments: []string{"comment"}},
-	"Objective-C":      {identifiers: []string{"field_identifier", "identifier", "method_identifier", "statement_identifier", "type_identifier"}, comments: []string{"comment"}},
-	"PHP":              {identifiers: []string{"name"}, comments: []string{"comment"}},
-	"Perl":             {identifiers: []string{"identifier", "varname"}, comments: []string{"comment"}},
-	"Protocol Buffers": {identifiers: []string{"identifier"}, comments: []string{"comment"}},
-	"Python":           {identifiers: []string{"identifier"}, comments: []string{"comment"}},
-	"R":                {identifiers: []string{"identifier"}, comments: []string{"comment"}},
-	"Ruby":             {identifiers: []string{"class_variable", "constant", "global_variable", "hash_key_symbol", "identifier", "instance_variable"}, comments: []string{"comment"}},
-	"Rust":             {identifiers: []string{"field_identifier", "identifier", "metavariable", "shorthand_field_identifier", "type_identifier"}, comments: []string{"block_comment", "doc_comment", "inner_doc_comment_marker", "line_comment", "outer_doc_comment_marker"}},
-	"SQL":              {identifiers: []string{"identifier"}, comments: []string{"comment", "marginalia"}},
-	"Scala":            {identifiers: []string{"identifier", "operator_identifier", "type_identifier"}, comments: []string{"block_comment", "comment"}},
-	"Swift":            {identifiers: []string{"simple_identifier", "type_identifier"}, comments: []string{"comment", "multiline_comment"}},
-	"TypeScript":       {identifiers: []string{"identifier", "private_property_identifier", "property_identifier", "shorthand_property_identifier", "shorthand_property_identifier_pattern", "statement_identifier", "type_identifier"}, comments: []string{"comment", "html_comment"}},
-	"YAML":             {comments: []string{"comment"}},
-	"Zig":              {identifiers: []string{"identifier"}, comments: []string{"comment"}},
-	"Zsh":              {identifiers: []string{"variable_name"}, comments: []string{"comment"}},
+	"C":          {identifiers: []string{"field_identifier", "identifier", "statement_identifier", "type_identifier"}, comments: []string{"comment"}, content: []string{"char_literal", "string_literal"}},
+	"C#":         {identifiers: []string{"identifier"}, comments: []string{"comment"}, content: []string{"character_literal", "interpolated_string_expression", "raw_string_literal", "string_literal", "verbatim_string_literal"}},
+	"Elixir":     {identifiers: []string{"alias", "identifier"}, comments: []string{"comment"}, content: []string{"charlist", "sigil", "string"}},
+	"Java":       {identifiers: []string{"identifier", "type_identifier"}, comments: []string{"block_comment", "line_comment"}, content: []string{"character_literal", "string_literal"}},
+	"Kotlin":     {identifiers: []string{"interpolated_identifier", "simple_identifier", "type_identifier"}, comments: []string{"line_comment", "multiline_comment"}, content: []string{"character_literal", "string_literal"}},
+	"PHP":        {identifiers: []string{"name"}, comments: []string{"comment"}, content: []string{"encapsed_string", "heredoc", "heredoc_body", "nowdoc", "nowdoc_body", "string"}},
+	"Ruby":       {identifiers: []string{"class_variable", "constant", "global_variable", "hash_key_symbol", "identifier", "instance_variable"}, comments: []string{"comment"}, content: []string{"character", "delimited_symbol", "heredoc_body", "regex", "string"}},
+	"Go":         {identifiers: []string{"blank_identifier", "field_identifier", "identifier", "label_name", "package_identifier", "type_identifier"}, comments: []string{"comment"}, content: []string{"interpreted_string_literal", "raw_string_literal", "rune_literal"}},
+	"JavaScript": {identifiers: []string{"identifier", "private_property_identifier", "property_identifier", "shorthand_property_identifier", "shorthand_property_identifier_pattern", "statement_identifier", "type_identifier"}, comments: []string{"comment", "html_comment"}, content: []string{"jsx_text", "regex", "string", "template_string"}},
+	"Python":     {identifiers: []string{"identifier"}, comments: []string{"comment"}, content: []string{"string"}},
+	"Rust":       {identifiers: []string{"field_identifier", "identifier", "metavariable", "shorthand_field_identifier", "type_identifier"}, comments: []string{"block_comment", "doc_comment", "inner_doc_comment_marker", "line_comment", "outer_doc_comment_marker"}, content: []string{"char_literal", "raw_string_literal", "string_literal"}},
+	"TypeScript": {identifiers: []string{"identifier", "private_property_identifier", "property_identifier", "shorthand_property_identifier", "shorthand_property_identifier_pattern", "statement_identifier", "type_identifier"}, comments: []string{"comment", "html_comment"}, content: []string{"jsx_text", "regex", "string", "template_string"}},
 }
 
 // importBindingLanguages are the languages whose import statements the tokens
 // record extracts. Every other language reports importBindingsNotExtracted.
 var importBindingLanguages = []string{"Go", "JavaScript", "Python", "TypeScript"}
 
-// TokenLanguages lists the languages the tokens read covers: those Graph parses
-// with tree-sitter, which are exactly the classification table's keys.
+// TokenLanguages lists the languages the tokens read covers: the
+// classification table's keys, each proven by the literal-whitespace test.
 func TokenLanguages() []string {
 	languages := make([]string, 0, len(tokenClassTable))
 	for language := range tokenClassTable {
@@ -193,19 +202,33 @@ type tokenFrame struct {
 	chainEnd int // length of the encoded ancestor chain including this node
 	hash     int // ancestors-table index of the chain ending at this node, -1 until needed
 	comment  bool
+	content  bool // the node's own text is content, whitespace included
 	err      bool
 }
 
 // extractFileTokens walks the whole tree once. Every leaf becomes a row, and
-// any non-whitespace text a node owns between its children becomes a row typed
-// with that node, so the rows tile the file.
+// text a node owns between its children becomes a row typed with that node
+// (all-whitespace text only inside a content node), so the rows tile the file.
 func extractFileTokens(path, language string, root *sitter.Node, view tokenSourceView) FileTokensRecord {
 	record := FileTokensRecord{
 		RecordType: "file_tokens", FilePath: path, Language: language,
-		HasErrors: root.HasError(), IdentifierNames: []string{}, LeafTypes: []string{},
-		Ancestors: []string{}, Leaves: [][8]int{}, ImportBindings: importBindingsNotExtracted,
+		HasErrors: root.HasError(), ImportBindings: importBindingsNotExtracted,
 	}
-	classes := tokenClassTable[language]
+	classes, covered := tokenClassTable[language]
+	switch {
+	case !covered:
+		record.Status = tokensLanguageNotCovered
+		return record
+	case len(view.file) > tokensSourceByteLimit:
+		record.Status = tokensOverSizeLimit
+		return record
+	}
+	record.Status = tokensExtracted
+	record.IdentifierNames, record.LeafTypes, record.Ancestors, record.Leaves = []string{}, []string{}, []string{}, [][8]int{}
+	contentTypes := map[string]bool{}
+	for _, typ := range classes.content {
+		contentTypes[typ] = true
+	}
 	identifierTypes := map[string]bool{}
 	for _, typ := range classes.identifiers {
 		identifierTypes[typ] = true
@@ -263,20 +286,22 @@ func extractFileTokens(path, language string, root *sitter.Node, view tokenSourc
 		}
 		rows = append(rows, tokenRow{typ: internType(typ), start: start, end: end, flags: flags, ancestors: frame.hash, opens: opens})
 	}
-	// ownText emits the non-whitespace text of [from, to) owned by the node on
-	// top of the stack, trimmed, as one row typed with that node.
+	// ownText emits the text of [from, to) owned by the node on top of the
+	// stack as one row typed with that node, covering exactly those bytes. A
+	// gap that is all whitespace is content inside a content node and layout
+	// (no row) anywhere else. A byte-order mark at byte 0 is never a row.
 	ownText := func(from, to int) {
+		if from == 0 && bytes.HasPrefix(view.parsed, utf8BOM) && bytes.HasPrefix(view.file, utf8BOM) {
+			from = len(utf8BOM)
+		}
 		if from >= to || to > len(view.parsed) {
 			return
 		}
-		segment := view.parsed[from:to]
-		trimmed := bytes.TrimLeftFunc(segment, unicode.IsSpace)
-		if len(trimmed) == 0 {
+		top := len(stack) - 1
+		if !stack[top].content && len(bytes.TrimLeftFunc(view.parsed[from:to], unicode.IsSpace)) == 0 {
 			return
 		}
-		start := from + len(segment) - len(trimmed)
-		end := start + len(bytes.TrimRightFunc(trimmed, unicode.IsSpace))
-		top := len(stack) - 1
+		start, end := from, to
 		frame := stack[top]
 		flags := 0
 		if frame.node.IsNamed() {
@@ -300,6 +325,7 @@ func extractFileTokens(path, language string, root *sitter.Node, view tokenSourc
 		stack = append(stack, tokenFrame{
 			node: node, pos: pos, end: end, chainEnd: appendChain(node), hash: -1,
 			comment: parentComment || (node.IsNamed() && commentTypes[node.Type()]),
+			content: node.IsNamed() && contentTypes[node.Type()],
 			err:     parentErr || node.IsError(),
 		})
 	}
@@ -386,6 +412,12 @@ func extractFileTokens(path, language string, root *sitter.Node, view tokenSourc
 		}
 	}
 
+	if len(rows) > tokensLeafLimit {
+		return FileTokensRecord{
+			RecordType: record.RecordType, FilePath: path, Language: language, Status: tokensOverSizeLimit,
+			HasErrors: record.HasErrors, ImportBindings: importBindingsNotExtracted,
+		}
+	}
 	rows = mapTokenRows(rows, view)
 	rows, rewritten := mergeRewrittenTokenRows(rows, view, internType)
 	lineStarts := []int{0}

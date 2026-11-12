@@ -187,14 +187,27 @@ warnings to their diagnostics.
 ## File tokens records
 
 `symbols --outline --tokens` adds one `file_tokens` record right after each
-`file_outline` record (here for `const x = 1;\n`). A file with no outline (inventory-only, a parse error,
-over the size limit, minified, depth exceeded) has no tokens record either; its
-partial failure says why. A tree that holds an `ERROR` or missing node gets no
-outline today, so `has_errors` is false on every record this build emits; the
-field and the leaf `error` flag are kept for the contract.
+`file_outline` record (here for `const x = 1;\n`). A file with no outline
+(inventory-only, a parse error, over the parse size limit, minified, depth
+exceeded) has no tokens record either; its partial failure says why. A tree
+that holds an `ERROR` or missing node gets no outline today, so `has_errors` is
+false on every record this build emits; the field and the leaf `error` flag are
+kept for the contract.
+
+`status` says whether the leaves were extracted. `extracted`: every field
+below is present. `language_not_covered`: the language is not declared in
+`feature_languages.symbols_outline_tokens` (see the table below); the record
+has `record_type`, `file_path`, `language`, `status`, `has_errors` and
+`import_bindings: "not_extracted"` and nothing else. `over_size_limit`: the
+file is larger than 524,288 bytes (512 KiB) as given, or its tree has more than
+100,000 leaf rows; the same fields only, and the file's `file_outline` record is
+unchanged. Ordinary code runs to about 6 to 11 output bytes per source byte, but
+dense tables reach 23, so the row limit is what bounds a record: with at most
+about 45 bytes a row it stays under a consumer's 8 MiB per-file cap, and the
+byte limit bounds the read's memory.
 
 ```json
-{"record_type":"file_tokens","file_path":"a.ts","language":"TypeScript","has_errors":false,
+{"record_type":"file_tokens","file_path":"a.ts","language":"TypeScript","status":"extracted","has_errors":false,
  "identifier_names":["x"],"leaf_types":["const","identifier","=","number",";"],
  "ancestors":["3b361d34bcd674d7","5fa142ba74908a4f","75261478695a6d99"],
  "leaves":[[0,0,5,1,1,0,1,2],[1,6,7,1,1,9,2,1],[2,8,9,1,1,0,2,0],[3,10,11,1,1,8,2,0],[4,11,12,1,1,0,1,0]],
@@ -215,18 +228,23 @@ first row this is. Equal types, texts, ancestors and opens over a run of rows
 mean the same piece of tree; `return` before a line break differs from
 `return x` in ancestors, not tokens.
 
-Text a node owns between its children with no node of its own becomes a row
-typed with that node, whose parent is that node, trimmed of surrounding
-whitespace. With that rule the rows tile the file: only whitespace (Unicode
-White_Space, and a byte-order mark at byte 0) lies outside them. Strings and
-templates are one row per fragment as the grammar gives them, neither
-identifier nor comment.
+Text a node owns between its children with no node of its own becomes one row
+typed with that node, whose parent is that node, covering exactly those bytes
+(never trimmed). Inside a content node (a string, raw string, char, template,
+heredoc body or similar, listed per language below) every such byte is a row,
+whitespace included, so `" "` and `""` differ; for any other node an
+all-whitespace gap is layout and has no row. Code a literal holds (a template
+substitution, an interpolation) follows the layout rule again. With that rule
+the rows tile the file: every byte is in at most one row, a byte in no row is
+whitespace outside every content node, and every literal byte is in a row. A
+byte-order mark at byte 0 is never a row. Strings and templates are one row per
+fragment as the grammar gives them, neither identifier nor comment.
 
 Some languages are parsed through a same-length rewritten view of the file
 (masks for constructs the grammar rejects). Where the view's bytes differ from
 the file's, the rows over that span become one row of type `""` flagged
 rewritten and error; identifier names inside it come from a second parse of
-the file as given. Protocol Buffers' synthetic `syntax` line is never a row.
+the file as given.
 
 `identifier_names` is the sorted set of texts of every identifier row. A leaf
 is an identifier when it is a named node of a listed type and lies under no
@@ -236,43 +254,31 @@ named and not listed), so a contextual keyword used as a keyword is never an
 identifier and one used as a name is. Python docstrings are strings. A JSX
 `{/* x */}` gives a comment row; its braces are punctuation rows.
 
-| Language | Identifier leaf types | Comment node types |
-| --- | --- | --- |
-| Bash | `variable_name` | `comment` |
-| C | `field_identifier`, `identifier`, `statement_identifier`, `type_identifier` | `comment` |
-| C# | `identifier` | `comment` |
-| C++ | `field_identifier`, `identifier`, `namespace_identifier`, `statement_identifier`, `type_identifier` | `comment` |
-| CUE | `identifier`, `package_identifier` | `comment` |
-| Clojure | `sym_name`, `sym_ns` | `comment` |
-| ClojureScript | `sym_name`, `sym_ns` | `comment` |
-| Dart | `identifier`, `identifier_dollar_escaped`, `type_identifier` | `comment`, `documentation_comment` |
-| Elixir | `alias`, `identifier` | `comment` |
-| Erlang | `atom`, `var` | `comment` |
-| F# | `identifier` | `block_comment`, `block_comment_content`, `line_comment` |
-| Go | `blank_identifier`, `field_identifier`, `identifier`, `label_name`, `package_identifier`, `type_identifier` | `comment` |
-| HCL | `identifier` | `comment` |
-| Haskell | `constructor`, `field_name`, `label`, `module_id`, `name`, `variable` | `comment` |
-| Java | `identifier`, `type_identifier` | `block_comment`, `line_comment` |
-| JavaScript | `identifier`, `private_property_identifier`, `property_identifier`, `shorthand_property_identifier`, `shorthand_property_identifier_pattern`, `statement_identifier`, `type_identifier` | `comment`, `html_comment` |
-| Julia | `identifier`, `macro_identifier` | `block_comment`, `line_comment` |
-| Kotlin | `interpolated_identifier`, `simple_identifier`, `type_identifier` | `line_comment`, `multiline_comment` |
-| Lua | `identifier` | `comment` |
-| OCaml | `class_name`, `class_type_name`, `constructor_name`, `field_name`, `instance_variable_name`, `label_name`, `method_name`, `module_name`, `module_type_name`, `type_constructor`, `type_variable`, `value_name` | `comment` |
-| Objective-C | `field_identifier`, `identifier`, `method_identifier`, `statement_identifier`, `type_identifier` | `comment` |
-| PHP | `name` | `comment` |
-| Perl | `identifier`, `varname` | `comment` |
-| Protocol Buffers | `identifier` | `comment` |
-| Python | `identifier` | `comment` |
-| R | `identifier` | `comment` |
-| Ruby | `class_variable`, `constant`, `global_variable`, `hash_key_symbol`, `identifier`, `instance_variable` | `comment` |
-| Rust | `field_identifier`, `identifier`, `metavariable`, `shorthand_field_identifier`, `type_identifier` | `block_comment`, `doc_comment`, `inner_doc_comment_marker`, `line_comment`, `outer_doc_comment_marker` |
-| SQL | `identifier` | `comment`, `marginalia` |
-| Scala | `identifier`, `operator_identifier`, `type_identifier` | `block_comment`, `comment` |
-| Swift | `simple_identifier`, `type_identifier` | `comment`, `multiline_comment` |
-| TypeScript | `identifier`, `private_property_identifier`, `property_identifier`, `shorthand_property_identifier`, `shorthand_property_identifier_pattern`, `statement_identifier`, `type_identifier` | `comment`, `html_comment` |
-| YAML | none | `comment` |
-| Zig | `identifier` | `comment` |
-| Zsh | `variable_name` | `comment` |
+A language is declared only when a test proves, for each of its string-like
+forms (every quote style, raw and multi-line forms, heredocs, templates, byte
+and char literals), that a whitespace change inside the literal changes the
+non-comment leaves (count, type, text, ancestors, opens), the all-whitespace
+case included, while layout outside literals does not. These are the declared
+languages; every other parsed language says `language_not_covered`. Lua and
+Swift were tried and fail the layout half (their grammars fold or read spacing
+around `=` as part of a token). The Go grammar makes the line break that ends
+a statement a token, so moving Go statements across lines can read as a token
+change: the safe direction.
+
+| Language | Identifier leaf types | Comment node types | Content node types |
+| --- | --- | --- | --- |
+| C | `field_identifier`, `identifier`, `statement_identifier`, `type_identifier` | `comment` | `char_literal`, `string_literal` |
+| C# | `identifier` | `comment` | `character_literal`, `interpolated_string_expression`, `raw_string_literal`, `string_literal`, `verbatim_string_literal` |
+| Elixir | `alias`, `identifier` | `comment` | `charlist`, `sigil`, `string` |
+| Go | `blank_identifier`, `field_identifier`, `identifier`, `label_name`, `package_identifier`, `type_identifier` | `comment` | `interpreted_string_literal`, `raw_string_literal`, `rune_literal` |
+| Java | `identifier`, `type_identifier` | `block_comment`, `line_comment` | `character_literal`, `string_literal` |
+| JavaScript | `identifier`, `private_property_identifier`, `property_identifier`, `shorthand_property_identifier`, `shorthand_property_identifier_pattern`, `statement_identifier`, `type_identifier` | `comment`, `html_comment` | `jsx_text`, `regex`, `string`, `template_string` |
+| Kotlin | `interpolated_identifier`, `simple_identifier`, `type_identifier` | `line_comment`, `multiline_comment` | `character_literal`, `string_literal` |
+| PHP | `name` | `comment` | `encapsed_string`, `heredoc`, `heredoc_body`, `nowdoc`, `nowdoc_body`, `string` |
+| Python | `identifier` | `comment` | `string` |
+| Ruby | `class_variable`, `constant`, `global_variable`, `hash_key_symbol`, `identifier`, `instance_variable` | `comment` | `character`, `delimited_symbol`, `heredoc_body`, `regex`, `string` |
+| Rust | `field_identifier`, `identifier`, `metavariable`, `shorthand_field_identifier`, `type_identifier` | `block_comment`, `doc_comment`, `inner_doc_comment_marker`, `line_comment`, `outer_doc_comment_marker` | `char_literal`, `raw_string_literal`, `string_literal` |
+| TypeScript | `identifier`, `private_property_identifier`, `property_identifier`, `shorthand_property_identifier`, `shorthand_property_identifier_pattern`, `statement_identifier`, `type_identifier` | `comment`, `html_comment` | `jsx_text`, `regex`, `string`, `template_string` |
 
 `import_bindings` is `extracted` for TypeScript, JavaScript, Go and Python, with
 `imports` listing one object per imported specifier: `start_line`, `end_line`,
@@ -285,8 +291,11 @@ TypeScript `import x = require("y")`. `type_only` is set by `import type`,
 `import typeof` and per-specifier `type`. Go's grouped `import (...)` gives one
 object per spec; Python's `import a, b` gives one per module. Re-exports
 (`export … from`), `import x = A.B` aliases, dynamic `import()` and `require()`
-calls are not import statements. Every other language says `not_extracted` and
-has no `imports` field. Capabilities `optional_local_only_features` keys
+calls are not import statements. The `specifier` is the text as written; for a
+Python relative `from` import (`from . import x`) it is `.`, while the
+`IMPORTS` relation classifies each imported module (`.x`), so a join of the two
+on (file, specifier) finds nothing for such a statement. Every other language
+says `not_extracted` and has no `imports` field. Capabilities `optional_local_only_features` keys
 `symbols_outline_tokens` and `symbols_outline_import_bindings`, with their
 languages in `feature_languages`, declare both.
 
@@ -316,9 +325,9 @@ snapshots (`query`, `neighbors`, `impact`, `def`) do not carry the entries.
 
 | Language | Declared | Builtin | Otherwise |
 | --- | --- | --- | --- |
-| TypeScript, JavaScript | The package (`@scope/name` or first segment) is in `dependencies`, `devDependencies`, `peerDependencies` or `optionalDependencies` of the nearest `package.json` at or above the file, or its `@types/` package is; or it is the `name` of a `package.json` in the tree | `node:` and `bun:` specifiers, Node's unprefixed core modules, and `bun` | Unresolved, including a root `tsconfig.json` alias with no target file and an alias from any other `tsconfig.json`, which the engine does not follow |
-| Go | Within the module path of the nearest `go.mod`, or of a module it requires | `C`, and paths whose first element has no dot | Unresolved |
-| Python | The top-level module equals, under PEP 503 normalization, a distribution in the nearest directory's `pyproject.toml` (`[project]` dependencies and optional dependencies, `[dependency-groups]`, Poetry tables) or `requirements*.txt`, or the project's own name | The standard library (CPython 3.14's module names plus those removed since 3.11) | Relative: unresolved; bare: not classified, since a distribution's import name need not be its own name |
+| TypeScript, JavaScript | The package (`@scope/name` or first segment) is in `dependencies`, `devDependencies`, `peerDependencies` or `optionalDependencies` of the nearest `package.json` at or above the file, or its `@types/` package is; or it is the `name` of a `package.json` in the tree | Exact names only: Node 24's core modules with or without `node:` (and the `node:`-only `sea`, `sqlite`, `test`, `test/reporters`), and Bun's `bun`, `bun:ffi`, `bun:jsc`, `bun:sqlite`, `bun:test`; an unknown name under `node:` or `bun:` is unresolved | Unresolved, including a root `tsconfig.json` alias with no target file and an alias from any other `tsconfig.json`, which the engine does not follow |
+| Go | Within the module path of the nearest `go.mod`, or of a module it requires | `C` (cgo), and the importable standard-library packages of Go 1.27.0 (`go list std` without `internal/` and `vendor/` paths, which code outside the standard library cannot import) | Unresolved, including a typo of a standard package and standard `internal/` or `vendor/` paths |
+| Python | The top-level module equals, under PEP 503 normalization, a distribution in the nearest directory's `pyproject.toml` (`[project]` dependencies and optional dependencies, `[dependency-groups]`, Poetry tables) or `requirements*.txt`, or the project's own name | A standard top-level module (CPython 3.14's names plus those removed since 3.11), or a dotted name that is a CPython 3.14 standard module (aliases such as `os.path` and `collections.abc` included) or whose parent is one (the relation's specifier for `from pathlib import Path` is `pathlib.Path`; names inside a module are not checked) | Relative, or a dotted path under no standard module (`os.nothing.deeper`): unresolved; bare: not classified, since a distribution's import name need not be its own name |
 | Any other | | | A file target says `import_target_file`; any other target is not classified |
 
 Packages of a nested Go module resolve to files only for the root `go.mod`'s

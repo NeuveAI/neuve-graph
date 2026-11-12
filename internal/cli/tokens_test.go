@@ -523,30 +523,41 @@ func TestSymbolsTokensFlagAndCapabilities(t *testing.T) {
 		t.Errorf("import binding languages %v", got)
 	}
 	tokenLanguages := capabilities.FeatureLanguages["symbols_outline_tokens"]
-	for _, language := range []string{"Go", "JavaScript", "Python", "Rust", "TypeScript", "YAML"} {
+	for _, language := range []string{"Go", "JavaScript", "Python", "Rust", "TypeScript"} {
 		if !slices.Contains(tokenLanguages, language) {
 			t.Errorf("token languages miss %s: %v", language, tokenLanguages)
 		}
 	}
-	for _, language := range []string{"JSON", "Groovy", "Markdown"} {
+	// No tree (JSON, Groovy, Markdown), or a tree but no literal-whitespace
+	// proof (YAML, Lua, Swift, Bash): not declared.
+	for _, language := range []string{"JSON", "Groovy", "Markdown", "YAML", "Lua", "Swift", "Bash"} {
 		if slices.Contains(tokenLanguages, language) {
-			t.Errorf("token languages claim %s, which has no tree", language)
+			t.Errorf("token languages claim %s", language)
 		}
 	}
 }
 
-// Every language that produced a tokens record in this fixture is declared.
+// A record carries leaves exactly when its language is declared; an outlined
+// file in an undeclared language says language_not_covered and carries none.
 func TestSymbolsTokensDeclaredLanguagesMatchOutput(t *testing.T) {
 	repo := t.TempDir()
-	sources := map[string]string{"a.rb": "def f; end\n", "b.java": "class B {}\n", "c.yaml": "a: 1\n", "d.json": "{}\n"}
+	sources := map[string]string{"a.rb": "def f; end\n", "b.java": "class B {}\n", "c.yaml": "a: 1\n", "d.json": "{}\n", "e.lua": "local v = 1\n"}
 	for path, content := range sources {
 		write(t, repo, path, content)
 	}
 	records, _ := tokensStream(t, repo)
 	declared := sem.TokenLanguages()
 	for path, record := range records {
-		if !slices.Contains(declared, record.Language) {
-			t.Errorf("%s: %s produced tokens but is not declared", path, record.Language)
+		if slices.Contains(declared, record.Language) != (record.Status == "extracted") {
+			t.Errorf("%s: %s declared %v but status %q", path, record.Language, slices.Contains(declared, record.Language), record.Status)
+		}
+		if record.Status != "extracted" && (record.Status != "language_not_covered" || record.Leaves != nil || record.IdentifierNames != nil || record.Imports != nil) {
+			t.Errorf("%s: undeclared record %#v", path, record)
+		}
+	}
+	for _, path := range []string{"c.yaml", "e.lua"} {
+		if records[path].Status != "language_not_covered" {
+			t.Errorf("%s: status %q", path, records[path].Status)
 		}
 	}
 	if _, ok := records["d.json"]; ok {
@@ -554,5 +565,94 @@ func TestSymbolsTokensDeclaredLanguagesMatchOutput(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(repo, "d.json")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The leaves have a size limit in the engine: a file up to 512 KiB and 100,000
+// leaves is extracted, one byte or leaf more gets a record that says
+// over_size_limit with no leaves, names or imports, and its outline is the
+// same either way.
+func TestSymbolsTokensSizeLimit(t *testing.T) {
+	const limit = 512 << 10
+	build := func(size int) string {
+		var source strings.Builder
+		source.WriteString("import { x } from './x';\n")
+		for i := 0; source.Len() < size-64; i++ {
+			source.WriteString("export const value" + strings.Repeat("a", 8) + "_" + string(rune('a'+i%26)) + " = x;\n")
+		}
+		source.WriteString("// ")
+		source.WriteString(strings.Repeat("p", size-source.Len()-1))
+		source.WriteString("\n")
+		if source.Len() != size {
+			t.Fatalf("built %d bytes, want %d", source.Len(), size)
+		}
+		return source.String()
+	}
+	repo := t.TempDir()
+	write(t, repo, "at.ts", build(limit))
+	write(t, repo, "over.ts", build(limit+1))
+	// Dense tables can pass the byte limit and still be too large: 100,000
+	// leaves is the row limit. One number and its comma per line (a single long
+	// line would read as minified and get no outline) are two leaves per three
+	// bytes; the declaration adds seven more.
+	dense := func(numbers int) string {
+		return "const t = [\n" + strings.Repeat("1,\n", numbers) + "];\n"
+	}
+	write(t, repo, "dense-at.ts", dense(49_997))
+	write(t, repo, "dense-over.ts", dense(50_100))
+	records, _ := tokensStream(t, repo)
+	if got := records["dense-at.ts"]; got.Status != "extracted" || len(got.Leaves) > 100_000 {
+		t.Errorf("dense file under the leaf limit: status %q, %d leaves", got.Status, len(got.Leaves))
+	}
+	if got := records["dense-over.ts"]; got.Status != "over_size_limit" || got.Leaves != nil {
+		t.Errorf("dense file over the leaf limit: status %q, %d leaves", got.Status, len(got.Leaves))
+	}
+	at, over := records["at.ts"], records["over.ts"]
+	if at.Status != "extracted" || len(at.Leaves) == 0 || len(at.Imports) != 1 {
+		t.Errorf("at the limit: status %q, %d leaves, %d imports", at.Status, len(at.Leaves), len(at.Imports))
+	}
+	if over.Status != "over_size_limit" || over.Leaves != nil || over.LeafTypes != nil || over.Ancestors != nil || over.IdentifierNames != nil || over.Imports != nil || over.ImportBindings != "not_extracted" {
+		t.Errorf("over the limit: %#v", over)
+	}
+	plain := runOutlineCLI(t, "symbols", "--repo", repo, "--worktree", "--profile", "syntax-only", "--outline")
+	withTokens := runOutlineCLI(t, "symbols", "--repo", repo, "--worktree", "--profile", "syntax-only", "--outline", "--tokens")
+	if !bytes.Contains(plain, []byte(`"file_path":"over.ts"`)) {
+		t.Fatal("the over-limit file lost its outline")
+	}
+	var kept bytes.Buffer
+	for _, line := range bytes.SplitAfter(withTokens, []byte("\n")) {
+		if !bytes.HasPrefix(line, []byte(`{"record_type":"file_tokens"`)) {
+			kept.Write(line)
+		}
+	}
+	if !bytes.Equal(kept.Bytes(), plain) {
+		t.Error("the size limit changed the outline stream")
+	}
+}
+
+// A byte-order mark at byte 0 is never a row, in any declared language, and
+// the rows after it still tile the file.
+func TestSymbolsTokensByteOrderMarkIsNoRow(t *testing.T) {
+	repo := t.TempDir()
+	files := map[string]string{"a.go": "\uFEFFpackage p\n", "a.ts": "\uFEFFconst v = 1;\n", "a.py": "\uFEFFv = 1\n"}
+	for path, content := range files {
+		write(t, repo, path, content)
+	}
+	records, _ := tokensStream(t, repo)
+	for path, content := range files {
+		record, ok := records[path]
+		if !ok || record.Status != "extracted" || len(record.Leaves) == 0 {
+			t.Fatalf("%s: %#v", path, record)
+		}
+		if first := record.Leaves[0]; first[1] < len("\uFEFF") {
+			t.Errorf("%s: first row %v covers the byte-order mark", path, first)
+		}
+		pos := len("\uFEFF")
+		for _, row := range record.Leaves {
+			if !onlySpace([]byte(content[pos:row[1]])) {
+				t.Fatalf("%s: %q not covered", path, content[pos:row[1]])
+			}
+			pos = row[2]
+		}
 	}
 }

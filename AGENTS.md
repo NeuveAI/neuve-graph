@@ -128,7 +128,10 @@ byte and line span, identifier/comment/error flags, an ancestor-chain hash and
 how many ancestors begin at the leaf), the file's distinct identifier names,
 and, for TypeScript, JavaScript, Go and Python, its import statements with their
 bindings. No source text is sent beyond names and specifiers. A file with no
-outline has no tokens record. See
+outline has no tokens record. Leaves are extracted only for the languages
+`feature_languages.symbols_outline_tokens` declares and for files up to 512 KiB
+and 100,000 leaves;
+any other outlined file gets a record whose `status` says why. See
 [the tokens record](docs/snapshot-format.md#file-tokens-records).
 
 **When:** you need the complete definition inventory (e.g. ingesting into a store), not a single lookup.

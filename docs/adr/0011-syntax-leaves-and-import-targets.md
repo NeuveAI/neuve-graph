@@ -17,6 +17,12 @@ The import classification is an extra `Evidence` entry rather than a new relatio
 
 Manifests are read from the snapshot's tree through its content reader, so `--commit` classifies against that commit. Interactive and search snapshots do not classify, so their caches and answers are unchanged; the records cache version moves to `provider-records-v15` so cached streams gain the entries.
 
+## Coverage follows proof
+
+A gap a node owns between its children is a row exactly as written. Inside a content node (string, raw string, char, template, heredoc body) an all-whitespace gap is a row too; elsewhere it is layout. A language is declared, and gets leaves, only when a test proves for each of its string-like forms that a whitespace change inside the literal changes the leaves while layout outside does not. Undeclared languages, files over 512 KiB and trees over 100,000 leaves get a record whose `status` says why and that carries no leaves.
+
+Builtin import targets come from exact pinned lists (Go 1.27.0's importable standard packages, Node 24's and Bun 1.4.4's modules, CPython 3.14's modules and dotted submodules), never from a prefix or a pattern, because the consumer treats builtin as resolved.
+
 ## Limits
 
 A tree with an error node gets no outline and so no tokens record. TypeScript aliases come from the root `tsconfig.json` only; an alias the engine cannot follow is `import_target_unresolved`, never a declared package. A nested Go module's packages do not resolve to files, so they read as declared by the nested `go.mod`. A Python name no manifest declares by identity is not classified. The declared package's name is not carried; it is the specifier's package part, or for Go the required module that prefixes it.
