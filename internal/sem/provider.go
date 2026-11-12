@@ -780,7 +780,9 @@ func Capabilities() CapabilityReport {
 			"symbols_outline_import_bindings":         ImportBindingLanguages(),
 			"import_target_classification":            ImportTargetLanguages(),
 			// Every import statement a file's tokens record extracts has an
-			// import-target entry on an IMPORTS relation of that file.
+			// import-target entry on an IMPORTS relation of that file, except
+			// a statement whose specifier is empty (Go's `import ""`), which
+			// names nothing (withTreeImports).
 			"import_targets_cover_statements": ImportBindingLanguages(),
 		},
 		FeaturesRequiringNetworkAccess: map[string]bool{
@@ -5444,7 +5446,11 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 				imports = importsFor(file.Path, content)
 			}
 		}
+		scannedImports := len(imports)
 		imports = withTreeImports(imports, file.treeImports)
+		// The resolvers and the classifier dispatch on the file's extension;
+		// importPath gives a script routed by its shebang its language's.
+		importPath := importDispatchPath(file)
 		fromID := fileID(repoKey, file.Path)
 		// With classification on, a file's IMPORTS relations are held until its
 		// import list is done, so a specifier that reaches a target an earlier
@@ -5460,7 +5466,7 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 			}
 			target := Evidence{Kind: importTargetFile, FilePath: resolvedPath, Detail: imported}
 			if resolvedPath == "" {
-				kind, manifest := importTargetIdx.classify(file.Path, imported)
+				kind, manifest := importTargetIdx.classify(importPath, imported)
 				target = Evidence{Kind: kind, FilePath: manifest, Detail: imported}
 			}
 			if at, held := heldByTarget[relation.ToID]; held {
@@ -5478,8 +5484,8 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 			heldBySpecifier[imported] = len(heldImports)
 			heldImports = append(heldImports, relation)
 		}
-		for _, imported := range imports {
-			if resolved, ok := resolveLocalImport(file.Path, imported, knownFiles); ok {
+		for index, imported := range imports {
+			if resolved, ok := resolveLocalImport(importPath, imported, knownFiles); ok {
 				emitImport(RelationRecord{
 					RecordType:    "relation",
 					FromID:        fromID,
@@ -5499,7 +5505,7 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 				}, imported, resolved)
 				continue
 			}
-			if resolved, ok := manifestImports.resolve(file.Path, imported); ok {
+			if resolved, ok := manifestImports.resolve(importPath, imported); ok {
 				emitImport(RelationRecord{
 					RecordType:    "relation",
 					FromID:        fromID,
@@ -5520,8 +5526,12 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 				continue
 			}
 			warningCodes := []string{}
-			if isRelativeImportSpec(file.Path, imported) {
+			if isRelativeImportSpec(importPath, imported) {
 				warningCodes = []string{"UNRESOLVED_RELATIVE_IMPORT"}
+			}
+			reason := "import declaration matched by language-specific scanner"
+			if index >= scannedImports {
+				reason = treeImportReason
 			}
 			emitImport(RelationRecord{
 				RecordType:    "relation",
@@ -5529,7 +5539,7 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 				ToID:          externalID("import", imported),
 				Type:          "IMPORTS",
 				Confidence:    0.8,
-				Reason:        "import declaration matched by language-specific scanner",
+				Reason:        reason,
 				RelationScope: "external",
 				Resolution:    "name_only",
 				TargetKind:    "external",
@@ -5541,7 +5551,7 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 				WarningCodes: warningCodes,
 			}, imported, "")
 		}
-		if importTargetIdx != nil && strings.EqualFold(filepath.Ext(file.Path), ".py") && len(heldImports) > 0 {
+		if importTargetIdx != nil && file.Language == "Python" && len(heldImports) > 0 {
 			// `from . import x` is scanned as ".x" alone. Give the module the
 			// statement names (".") an entry of its own, on the relation of its
 			// first imported name, so every specifier as written in a statement
@@ -5560,7 +5570,7 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 					continue
 				}
 				entry := Evidence{Kind: importTargetUnresolved, Detail: module}
-				if resolved, ok := resolveLocalImport(file.Path, module, knownFiles); ok {
+				if resolved, ok := resolveLocalImport(importPath, module, knownFiles); ok {
 					entry = Evidence{Kind: importTargetFile, FilePath: resolved, Detail: module}
 				}
 				heldImports[at].Evidence = append(heldImports[at].Evidence, entry)
@@ -23326,14 +23336,20 @@ func importsFor(path, content string) []string {
 // withTreeImports is a file's import list for its IMPORTS relations: the
 // scanner's list as it is, followed by each specifier the tree's import
 // statements give that the list does not already hold, in statement order.
-// The scanner also reads forms that are not import statements (require(),
-// dynamic import(), export … from), so nothing it finds is dropped.
+// The scanner also reads forms that are not import statements (require() and
+// dynamic import()), so nothing it finds is dropped.
 //
 // A Python `from` import gives what the scanner would give for it: the module,
 // plus `m.n` for each name n of an absolute module without a dot; a bare
 // relative module (`.`, `..`) gives `.n` for each name instead, and its own
-// entry rides on the first of those (pythonRelativeModuleEntries), or, with
+// entry rides on the first of those (pythonRelativeModuleStatements), or, with
 // no names (`from . import *`), it is a specifier itself.
+//
+// A statement whose specifier is empty (Go's `import ""`) names nothing and
+// adds nothing, so it has no relation and no entry: the one stated exception
+// to import_targets_cover_statements. The TypeScript and JavaScript tokens
+// records list no statement with an empty specifier, and Python's grammar
+// gives none.
 func withTreeImports(scanned []string, statements []treeImportStatement) []string {
 	if len(statements) == 0 {
 		return scanned
@@ -23376,6 +23392,26 @@ func withTreeImports(scanned []string, statements []treeImportStatement) []strin
 		return scanned
 	}
 	return out
+}
+
+// treeImportReason is the reason of an external IMPORTS relation whose
+// specifier only the syntax tree gave; the scanner's keep theirs.
+const treeImportReason = "import statement read from the syntax tree"
+
+// importDispatchPath is the path the import resolvers and the classifier read
+// a file's extension from, so they go by its language. A script routed to its
+// language by its shebang (`bin/tool`, `tool.cgi`) has no extension they know;
+// it reads as its language's own extension in the same directory. Every other
+// file is its own path.
+func importDispatchPath(file FileRecord) string {
+	extension, covered := map[string]string{"Go": ".go", "JavaScript": ".js", "Python": ".py", "TypeScript": ".ts"}[file.Language]
+	if !covered {
+		return file.Path
+	}
+	if spec, ok := languageForPath(file.Path); ok && spec.language == file.Language {
+		return file.Path
+	}
+	return file.Path + extension
 }
 
 // pythonRelativeModuleStatements lists, as (module, first name) pairs, the

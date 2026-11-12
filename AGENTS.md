@@ -148,8 +148,9 @@ entire graph edges --repo . --format ndjson [--worktree|--commit <exact-commit-O
 Every `IMPORTS` relation in `edges` and `snapshot` carries one `import_target_*`
 evidence entry per specifier: a file in the tree, a declared package (with the
 manifest), a builtin, unresolved, or not classified. Every import statement a
-`file_tokens` record extracts has one, since the relations add the syntax
-tree's import statements to the import scanner's. See
+`file_tokens` record extracts has one, except a statement whose specifier is
+empty, since the relations add the syntax tree's import statements to the
+import scanner's. See
 [import targets](docs/snapshot-format.md#import-targets).
 
 **When:** you want every relation (bulk export / ingestion) or a filtered relation stream. For a targeted one-symbol question, use `neighbors`.

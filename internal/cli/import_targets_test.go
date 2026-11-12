@@ -391,6 +391,19 @@ func treeImportFixture(t *testing.T) (repo, commit string) {
 		"py/top/inner/__init__.py": "",
 		"py/top/inner/deep.py":     "from .. pkg import y\n",
 		"rust/lib.rs":              "use std::fmt;\nfn main() {}\n",
+		// Statements only the tree reads: the scanner skips a `from` after
+		// `if True:`, so `.` gets its entry from the tree's statement.
+		"py/pkg/inline.py": "if True: from . import x\n",
+		// Scripts routed to their language by a shebang, with no extension.
+		"bin/__init__.py": "",
+		"bin/helper.py":   "H = 1\n",
+		"bin/tool":        "#!/usr/bin/env python3\nfrom . import helper\nimport os\n",
+		"bin/lib.js":      "export const lib = 1;\n",
+		"bin/run":         "#!/usr/bin/env node\nimport {\n  lib,\n} from \"./lib.js\";\nimport fs from \"node:fs\";\n",
+		// An empty specifier names nothing: Go lists the statement, TypeScript
+		// and JavaScript do not.
+		"svc/empty.go": "package svc\n\nimport \"\"\nimport \"fmt\"\n\nvar _ = fmt.Sprint\n",
+		"web/empty.ts": "import \"\";\nimport e from \"\";\nimport r = require(\"\");\nimport ok from \"./a\";\n",
 	}
 	for path, content := range files {
 		write(t, repo, path, content)
@@ -398,6 +411,12 @@ func treeImportFixture(t *testing.T) (repo, commit string) {
 	git(t, repo, "add", ".")
 	git(t, repo, "commit", "-m", "fixture")
 	return repo, rev(t, repo, "HEAD")
+}
+
+// statedException reports whether a statement may lack an entry under
+// import_targets_cover_statements: only one whose specifier is empty.
+func statedException(statement sem.ImportStatementRecord) bool {
+	return statement.Specifier == ""
 }
 
 // tokensAt reads the tokens records of one exact commit.
@@ -443,6 +462,16 @@ func TestTreeImportFormsHaveRelationsAndEntries(t *testing.T) {
 		{"py/top/inner/deep.py", "..pkg"}: {file, "py/top/pkg.py"},      // `from .. pkg import y`
 		{"rust/lib.rs", "std::fmt"}:       {"import_target_not_classified", ""},
 		{"web/bad.ts", "./a"}:             {file, "web/a.ts"},
+		{"py/pkg/inline.py", ".x"}:        {file, "py/pkg/x.py"},
+		{"py/pkg/inline.py", "."}:         {file, "py/pkg/__init__.py"}, // a statement only the tree reads
+		// Shebang scripts resolve and classify by their language.
+		{"bin/tool", ".helper"}: {file, "bin/helper.py"},
+		{"bin/tool", "."}:       {file, "bin/__init__.py"},
+		{"bin/tool", "os"}:      {builtin, ""},
+		{"bin/run", "./lib.js"}: {file, "bin/lib.js"},
+		{"bin/run", "node:fs"}:  {builtin, ""},
+		{"svc/empty.go", "fmt"}: {builtin, ""},
+		{"web/empty.ts", "./a"}: {file, "web/a.ts"},
 	}
 	for _, profile := range []string{"full", "fast"} {
 		targets, _ := importTargets(t, runOutlineCLI(t, "snapshot", "--repo", repo, "--commit", commit, "--format", "ndjson", "--profile", profile, "--no-cache"))
@@ -456,8 +485,46 @@ func TestTreeImportFormsHaveRelationsAndEntries(t *testing.T) {
 			t.Errorf("%s: a file with a parse error got a tree import: %v", profile, got)
 		}
 	}
-	if _, ok := tokensAt(t, repo, commit)["web/bad.ts"]; ok {
+	records := tokensAt(t, repo, commit)
+	if _, ok := records["web/bad.ts"]; ok {
 		t.Error("fixture: web/bad.ts must have no tokens record")
+	}
+	for _, path := range []string{"bin/tool", "bin/run", "py/pkg/inline.py"} {
+		if records[path].ImportBindings != "extracted" || len(records[path].Imports) == 0 {
+			t.Errorf("fixture: %s must have an extracted tokens record with statements: %+v", path, records[path])
+		}
+	}
+}
+
+// The one stated exception to import_targets_cover_statements: a statement
+// whose specifier is empty names nothing, so no relation carries an entry for
+// it. Go lists such a statement; the TypeScript and JavaScript records list
+// none. Reason: the promise names this exception, so it is pinned exactly.
+func TestEmptySpecifierIsTheStatedException(t *testing.T) {
+	repo, commit := treeImportFixture(t)
+	records := tokensAt(t, repo, commit)
+	goRecord, tsRecord := records["svc/empty.go"], records["web/empty.ts"]
+	if goRecord.ImportBindings != "extracted" || tsRecord.ImportBindings != "extracted" {
+		t.Fatalf("fixture: records %+v %+v", goRecord, tsRecord)
+	}
+	var goSpecifiers, tsSpecifiers []string
+	for _, statement := range goRecord.Imports {
+		goSpecifiers = append(goSpecifiers, statement.Specifier)
+	}
+	for _, statement := range tsRecord.Imports {
+		tsSpecifiers = append(tsSpecifiers, statement.Specifier)
+	}
+	if !reflect.DeepEqual(goSpecifiers, []string{"", "fmt"}) || !reflect.DeepEqual(tsSpecifiers, []string{"./a"}) {
+		t.Fatalf("statements: Go %q, TypeScript %q", goSpecifiers, tsSpecifiers)
+	}
+	targets, _ := importTargets(t, runOutlineCLI(t, "snapshot", "--repo", repo, "--commit", commit, "--format", "ndjson", "--no-cache"))
+	for _, path := range []string{"svc/empty.go", "web/empty.ts"} {
+		if got, ok := targets[[2]string{path, ""}]; ok {
+			t.Errorf("%s: the empty specifier has an entry %v", path, got)
+		}
+	}
+	if _, ok := targets[[2]string{"svc/empty.go", "fmt"}]; !ok {
+		t.Error("svc/empty.go: the other statement lost its entry")
 	}
 }
 
@@ -469,25 +536,32 @@ func TestTreeImportFormsHaveRelationsAndEntries(t *testing.T) {
 func TestEveryExtractedImportStatementHasAnEntry(t *testing.T) {
 	treeRepo, treeCommit := treeImportFixture(t)
 	targetRepo, targetCommit := importTargetFixture(t)
-	for _, fixture := range []struct{ repo, commit string }{{treeRepo, treeCommit}, {targetRepo, targetCommit}} {
+	for _, fixture := range []struct {
+		repo, commit string
+		floor        int
+	}{{treeRepo, treeCommit, 15}, {targetRepo, targetCommit, 5}} {
 		records := tokensAt(t, fixture.repo, fixture.commit)
 		extracted := 0
+		for _, record := range records {
+			if record.ImportBindings == "extracted" && len(record.Imports) > 0 {
+				extracted++
+			}
+		}
+		if extracted < fixture.floor {
+			t.Fatalf("only %d extracted tokens records with statements: the property was not exercised", extracted)
+		}
 		for _, profile := range []string{"full", "fast"} {
 			targets, _ := importTargets(t, runOutlineCLI(t, "snapshot", "--repo", fixture.repo, "--commit", fixture.commit, "--format", "ndjson", "--profile", profile, "--no-cache"))
 			for path, record := range records {
 				if record.ImportBindings != "extracted" {
 					continue
 				}
-				extracted++
 				for _, statement := range record.Imports {
-					if _, ok := targets[[2]string{path, statement.Specifier}]; !ok {
+					if _, ok := targets[[2]string{path, statement.Specifier}]; !ok && !statedException(statement) {
 						t.Errorf("%s: %s line %d: statement specifier %q has no import-target entry", profile, path, statement.StartLine, statement.Specifier)
 					}
 				}
 			}
-		}
-		if extracted < 8 {
-			t.Fatalf("only %d extracted tokens records: the property was not exercised", extracted)
 		}
 	}
 }
@@ -507,6 +581,7 @@ func TestTreeImportsFollowTheScannersOnceEach(t *testing.T) {
 	var order []string
 	pairs := map[[2]string]int{}
 	entries := map[[2]string]int{}
+	reasons := map[string]string{}
 	for _, line := range bytes.Split(bytes.TrimSpace(first), []byte("\n")) {
 		var record sem.RelationRecord
 		if err := json.Unmarshal(line, &record); err != nil {
@@ -517,6 +592,9 @@ func TestTreeImportsFollowTheScannersOnceEach(t *testing.T) {
 		}
 		from := record.FromID[strings.LastIndex(record.FromID, ":file:")+len(":file:"):]
 		pairs[[2]string{from, record.ToID}]++
+		if from == "py/multi.py" {
+			reasons[record.ToID] = record.Reason
+		}
 		for _, evidence := range record.Evidence {
 			if strings.HasPrefix(evidence.Kind, "import_target_") {
 				entries[[2]string{from, evidence.Detail}]++
@@ -550,6 +628,14 @@ func TestTreeImportsFollowTheScannersOnceEach(t *testing.T) {
 		if entries[key] != 1 {
 			t.Errorf("%s %q: %d entries, want 1", key[0], key[1], entries[key])
 		}
+	}
+	// The scanner's relation keeps its reason; the one only the tree read
+	// says so.
+	if got := reasons["external:import:os"]; got != "import declaration matched by language-specific scanner" {
+		t.Errorf("py/multi.py os (scanner): reason %q", got)
+	}
+	if got := reasons["external:import:json"]; got != "import statement read from the syntax tree" {
+		t.Errorf("py/multi.py json (tree): reason %q", got)
 	}
 }
 

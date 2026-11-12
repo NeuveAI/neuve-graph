@@ -108,8 +108,8 @@ same schema-version decision.
 `graph version --json`, and the persisted diff/checkpoint Result payload.
 Schema `1.2` adds this optional field to the `1.1` contract; its presence does
 not change the stable-ID format or require a major bump. It identifies parser
-rules that affect existing symbol
-IDs or entity-history keys; it does not replace `schema_version` or
+rules that affect existing symbol IDs or entity-history keys, or which
+relations a snapshot of the same commit holds; it does not replace `schema_version` or
 `stable_id_version`. Its absence means legacy parser rules. Consumers comparing
 stored and current revisions must treat inequality (including missing/present)
 as a need to refresh derived semantic data. History consumers must also migrate

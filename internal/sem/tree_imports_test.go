@@ -13,6 +13,8 @@ import (
 // order is what keeps the old relations first and the bytes deterministic.
 func TestWithTreeImportsKeepsTheScannerListFirst(t *testing.T) {
 	scanned := []string{"./a", "./z"}
+	// The empty specifier (Go's `import ""`) is the stated exception of
+	// import_targets_cover_statements: it names nothing and adds nothing.
 	statements := []treeImportStatement{
 		{Specifier: "./z"}, {Specifier: "./m"}, {Specifier: "./b"}, {Specifier: "./m"}, {Specifier: ""},
 	}
@@ -42,6 +44,29 @@ func TestWithTreeImportsKeepsTheScannerListFirst(t *testing.T) {
 	})
 	if want := []string{"os", "json", "os.path", "m", "m.a", "m.b", "p.q", ".x", "..", ".pkg", "w"}; !reflect.DeepEqual(python, want) {
 		t.Fatalf("python union %v, want %v", python, want)
+	}
+}
+
+// Import resolution and classification go by the file's language: a script
+// routed by its shebang reads as its language's extension, every other file
+// as itself. Reason: the resolvers dispatch on the extension, and a shebang
+// script has none they know.
+func TestImportDispatchPathGoesByLanguage(t *testing.T) {
+	cases := map[[2]string]string{
+		{"bin/tool", "Python"}:    "bin/tool.py",
+		{"bin/run", "JavaScript"}: "bin/run.js",
+		{"tool.cgi", "Python"}:    "tool.cgi.py",
+		{"a/b.py", "Python"}:      "a/b.py",
+		{"a/b.jsx", "JavaScript"}: "a/b.jsx",
+		{"a/b.tsx", "TypeScript"}: "a/b.tsx",
+		{"a/b.go", "Go"}:          "a/b.go",
+		{"bin/script", "Bash"}:    "bin/script",
+		{"lib.rs", "Rust"}:        "lib.rs",
+	}
+	for input, want := range cases {
+		if got := importDispatchPath(FileRecord{Path: input[0], Language: input[1]}); got != want {
+			t.Errorf("%s (%s): %q, want %q", input[0], input[1], got, want)
+		}
 	}
 }
 
