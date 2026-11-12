@@ -19,9 +19,9 @@ Manifests are read from the snapshot's tree through its content reader, so `--co
 
 ## Coverage follows proof
 
-A gap a node owns between its children is a row exactly as written. Inside a content node (string, raw string, char, template, heredoc body) an all-whitespace gap is a row too; elsewhere it is layout. A language is declared, and gets leaves, only when a test proves for each of its string-like forms that a whitespace change inside the literal changes the leaves while layout outside does not. Undeclared languages, files over 512 KiB and trees over 100,000 leaves get a record whose `status` says why and that carries no leaves.
+A gap a node owns between its children is a row exactly as written. Inside a content node (string, raw string, char, template, heredoc body) an all-whitespace gap is a row too, and so is every gap of every node inside it, interpolations and format clauses included; only a language proven to treat interpolation whitespace as layout (TypeScript, JavaScript) is exempt. Elsewhere an all-whitespace gap is layout. A language is declared, and gets leaves, only when a test proves for each of its string-like forms that a whitespace change inside the literal changes the leaves while layout outside does not. Undeclared languages, files over 512 KiB and trees over 100,000 leaves get a record whose `status` says why and that carries no leaves.
 
-Builtin import targets come from exact pinned lists (Go 1.27.0's importable standard packages, Node 24's and Bun 1.4.4's modules, CPython 3.14's modules and dotted submodules), never from a prefix or a pattern, because the consumer treats builtin as resolved.
+Builtin import targets come from exact pinned lists (Go 1.27.0's importable standard packages, Node 24's and Bun 1.4.4's modules, CPython 3.14's modules and dotted submodules), never from a prefix, a parent or a pattern, because the consumer treats builtin as resolved. Every specifier as written in an import statement has an entry; for a Python relative `from` import the engine adds one for the module (`.`).
 
 ## Limits
 

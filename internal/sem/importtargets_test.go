@@ -67,11 +67,20 @@ func TestImportTargetBuiltinsAreExact(t *testing.T) {
 		{"a.py", "os.path", importTargetBuiltin},
 		{"a.py", "collections.abc", importTargetBuiltin},
 		{"a.py", "xml.etree.ElementTree", importTargetBuiltin},
-		{"a.py", "pathlib.Path", importTargetBuiltin},         // from pathlib import Path
-		{"a.py", "os.nothing", importTargetBuiltin},           // a name in os: names inside modules are not checked
-		{"a.py", "os.nothing.deeper", importTargetUnresolved}, // under no standard module
-		{"a.py", "xml.nothing.deeper", importTargetUnresolved},
-		{"a.py", "xml.etree.ElementTree.Element", importTargetBuiltin},
+		// A dotted name is builtin only when it is itself a standard module.
+		{"a.py", "os.pathh", importTargetUnresolved},
+		{"a.py", "email.mim", importTargetUnresolved},
+		{"a.py", "xml.etre", importTargetUnresolved},
+		{"a.py", "json.decodr", importTargetUnresolved},
+		{"a.py", "email.mime", importTargetBuiltin},
+		{"a.py", "json.decoder", importTargetBuiltin},
+		// `from pathlib import Path` and `from os import getcwd` are scanned
+		// as module.name, which is no module: unresolved. The statement's
+		// own module ("pathlib", "os") has its own builtin entry.
+		{"a.py", "pathlib.Path", importTargetUnresolved},
+		{"a.py", "os.getcwd", importTargetUnresolved},
+		{"a.py", "xml.etree.ElementTree.Element", importTargetUnresolved},
+		{"main.go", "syscall/js", importTargetBuiltin}, // standard under GOOS=js
 	}
 	for _, tc := range cases {
 		if got, _ := index.classify(tc.file, tc.specifier); got != tc.want {

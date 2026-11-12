@@ -5437,6 +5437,7 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 		// instead of being dropped as a duplicate.
 		var heldImports []RelationRecord
 		heldByTarget := map[string]int{}
+		heldBySpecifier := map[string]int{}
 		emitImport := func(relation RelationRecord, imported, resolvedPath string) {
 			if importTargetIdx == nil {
 				emit(relation)
@@ -5448,6 +5449,7 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 				target = Evidence{Kind: kind, FilePath: manifest, Detail: imported}
 			}
 			if at, held := heldByTarget[relation.ToID]; held {
+				heldBySpecifier[imported] = at
 				for _, existing := range heldImports[at].Evidence {
 					if existing == target {
 						return
@@ -5458,6 +5460,7 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 			}
 			relation.Evidence = append(relation.Evidence, target)
 			heldByTarget[relation.ToID] = len(heldImports)
+			heldBySpecifier[imported] = len(heldImports)
 			heldImports = append(heldImports, relation)
 		}
 		for _, imported := range imports {
@@ -5522,6 +5525,36 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 				}},
 				WarningCodes: warningCodes,
 			}, imported, "")
+		}
+		if importTargetIdx != nil && strings.EqualFold(filepath.Ext(file.Path), ".py") && len(heldImports) > 0 {
+			// `from . import x` is scanned as ".x" alone. Give the module the
+			// statement names (".") an entry of its own, on the relation of its
+			// first imported name, so every specifier as written in a statement
+			// has an entry.
+			if !contentRead {
+				content, _ = readContent(file.Path)
+				contentRead = true
+			}
+			for _, statement := range pythonFromImportStatements(content) {
+				module := statement.module
+				if module == "" || strings.Trim(module, ".") != "" || len(statement.items) == 0 {
+					continue
+				}
+				if _, has := heldBySpecifier[module]; has {
+					continue
+				}
+				name, _ := parsePythonImportItem(statement.items[0])
+				at, ok := heldBySpecifier[pythonFromImportModuleSpec(module, name)]
+				if !ok {
+					continue
+				}
+				entry := Evidence{Kind: importTargetUnresolved, Detail: module}
+				if resolved, ok := resolveLocalImport(file.Path, module, knownFiles); ok {
+					entry = Evidence{Kind: importTargetFile, FilePath: resolved, Detail: module}
+				}
+				heldImports[at].Evidence = append(heldImports[at].Evidence, entry)
+				heldBySpecifier[module] = at
+			}
 		}
 		for _, relation := range heldImports {
 			emit(relation)

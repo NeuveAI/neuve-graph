@@ -170,6 +170,9 @@ var (
 // here is not declared. Lua and Swift were tried and are not declared: Lua's
 // grammar folds the whitespace before `=` into that token, and Swift reads
 // spacing around `=` as a token change, so layout cannot be told from tokens.
+// PHP is not declared: whitespace-only text outside its tags is output with no
+// node. Kotlin is not declared: its grammar parses `a\n- b` and `f\n(a)` as one
+// expression, though a Kotlin line break ends the statement there.
 func TestFileTokensLiteralWhitespaceIsContent(t *testing.T) {
 	cases := map[string]struct {
 		path, file, layout string
@@ -231,15 +234,6 @@ func TestFileTokensLiteralWhitespaceIsContent(t *testing.T) {
 			{"symbol", `:"%s"`, oneLineWhitespace}, {"regex", `/x%sy/`, [][2]string{{"", " "}, {" ", "  "}}},
 			{"heredoc", "<<~EOS\n%s\nEOS", multiLineWhitespace},
 		}},
-		"PHP": {"a.php", "<?php\n$v = %s;\n", "<?php\n$v   =\n    %s ;\n", []literalForm{
-			{"single", `'%s'`, multiLineWhitespace}, {"double", `"%s"`, multiLineWhitespace},
-			{"interpolated", `"%s$x%s"`, oneLineWhitespace},
-			{"heredoc", "<<<EOT\nx%s\nEOT", multiLineWhitespace}, {"nowdoc", "<<<'EOT'\nx%s\nEOT", multiLineWhitespace},
-		}},
-		"Kotlin": {"a.kt", "val v = %s\n", "val   v   =   %s\n", []literalForm{
-			{"string", `"%s"`, oneLineWhitespace}, {"template", `"%s${x}%s"`, oneLineWhitespace},
-			{"raw", "\"\"\"%s\"\"\"", multiLineWhitespace}, {"char", "'%s'", charWhitespace},
-		}},
 		"Elixir": {"a.ex", "v = %s\n", "v   =   %s\n", []literalForm{
 			{"string", `"%s"`, multiLineWhitespace}, {"interpolated", `"%s#{x}%s"`, oneLineWhitespace},
 			{"charlist", `'%s'`, multiLineWhitespace}, {"heredoc", "\"\"\"\n%s\n\"\"\"", multiLineWhitespace},
@@ -247,6 +241,61 @@ func TestFileTokensLiteralWhitespaceIsContent(t *testing.T) {
 		}},
 	} {
 		cases[name] = tc
+	}
+	// Interpolations: whitespace inside one is content unless the language is
+	// on the layout list, where each pair below must read as no change and a
+	// literal inside the interpolation still as a change. Off the list, every
+	// pair must read as a change, the printed ones first: Python's `=` form
+	// and format specifiers, C#'s alignment and format clauses.
+	interpolations := map[string]struct {
+		path, file string
+		change     [][2]string
+		layout     [][2]string
+	}{
+		"TypeScript": {"a.ts", "const v = %s;\n", [][2]string{{"`${\" \"}`", "`${\"\"}`"}, {"`${f(\"a b\")}`", "`${f(\"a  b\")}`"}},
+			[][2]string{{"`${x}`", "`${ x }`"}, {"`${a+b}`", "`${a + b}`"}, {"`${f(a,b)}`", "`${f( a, b )}`"}, {"`${x}`", "`${\n  x\n}`"}}},
+		"JavaScript": {"a.js", "const v = %s;\n", [][2]string{{"`${\" \"}`", "`${\"\"}`"}},
+			[][2]string{{"`${x}`", "`${ x }`"}, {"`${a+b}`", "`${a + b}`"}}},
+		"Python": {"a.py", "v = %s\n", [][2]string{
+			{`f"{x=}"`, `f"{x = }"`}, {`f"{x=}"`, `f"{x= }"`}, {`f"{x=:>4}"`, `f"{x = :>4}"`}, {`f"{x:{w}}"`, `f"{x:{w} }"`},
+			{`f"{x:>4}"`, `f"{x: >4}"`}, {`f"{x}"`, `f"{ x }"`}, {`f"{x!r}"`, `f"{x !r}"`},
+		}, nil},
+		"C#": {"a.cs", "class A {\n  object v = %s;\n}\n", [][2]string{
+			{`$"{x,10}"`, `$"{x, 10}"`}, {`$"{x,10}"`, `$"{x ,10}"`}, {`$"{x:F2}"`, `$"{x: F2}"`}, {`$"{x:F2}"`, `$"{x:F2 }"`},
+			{`$"{x,10:F2}"`, `$"{x,10: F2}"`}, {`$"{x}"`, `$"{ x }"`},
+		}, nil},
+		"Ruby":   {"a.rb", "v = %s\n", [][2]string{{`"#{x}"`, `"#{ x }"`}, {`"#{a+b}"`, `"#{a + b}"`}}, nil},
+		"Elixir": {"a.ex", "v = %s\n", [][2]string{{`"#{x}"`, `"#{ x }"`}, {`"#{a+b}"`, `"#{a + b}"`}}, nil},
+	}
+	for name, tc := range interpolations {
+		language := tokenLanguageFor(t, tc.path)
+		t.Run(name+" interpolation", func(t *testing.T) {
+			for _, pair := range tc.change {
+				if consumerNoTokenChange(t, tc.path, fmt.Sprintf(tc.file, pair[0]), fmt.Sprintf(tc.file, pair[1])) {
+					t.Errorf("%s -> %s: whitespace that matters inside an interpolation read as no token change", pair[0], pair[1])
+				}
+			}
+			for _, pair := range tc.layout {
+				if !consumerNoTokenChange(t, tc.path, fmt.Sprintf(tc.file, pair[0]), fmt.Sprintf(tc.file, pair[1])) {
+					t.Errorf("%s -> %s: layout inside an interpolation read as a token change", pair[0], pair[1])
+				}
+			}
+			if layout := tokenClassTable[language].interpolationLayout; layout != (len(tc.layout) > 0) {
+				t.Errorf("%s: interpolationLayout %v without matching layout pairs", language, layout)
+			}
+		})
+	}
+	for language, classes := range tokenClassTable {
+		if !classes.interpolationLayout {
+			continue
+		}
+		found := false
+		for _, tc := range interpolations {
+			found = found || tokenLanguageFor(t, tc.path) == language && len(tc.layout) > 0
+		}
+		if !found {
+			t.Errorf("%s treats interpolation whitespace as layout without the pairs that prove it", language)
+		}
 	}
 	languages := map[string]bool{}
 	for name, tc := range cases {
@@ -317,8 +366,8 @@ func TestFileTokensUndeclaredLanguage(t *testing.T) {
 
 // The rows tile the file: every byte is in at most one row, every byte in no
 // row is whitespace outside every content node, and every byte between a
-// content node's start and end is in a row, except inside code it holds (a
-// substitution or interpolation), which follows the ordinary layout rule. One fixture per declared language,
+// content node's start and end is in a row, interpolations included, except in
+// the languages whose interpolation whitespace is proven layout. One fixture per declared language,
 // with all-whitespace and whitespace-edged literals of each form.
 func TestFileTokensTileContentNodes(t *testing.T) {
 	fixtures := map[string]string{
@@ -326,14 +375,12 @@ func TestFileTokensTileContentNodes(t *testing.T) {
 		"a.tsx":  "const e = <b c=\" \">  {x}  </b>;\n",
 		"a.js":   "const a = \" \";\nconst t = `\n  two\n`;\n",
 		"a.go":   "package p\n\nvar a, b, c, d = \" \", \"x \\n \", `\n  `, ' '\n",
-		"a.py":   "a = \" \"\nb = '''\n  '''\nc = f\" {x} \"\n",
+		"a.py":   "a = \" \"\nb = '''\n  '''\nc = f\" { x = :>4} \"\n",
 		"a.rs":   "fn f() { let a = (r\"  \", r#\" \"#, \" \", b\"  \", ' ', br\" \"); }\n",
 		"a.c":    "void f(void) { g(\" \", ' ', L\"  \"); }\n",
 		"A.java": "class A { String a = \" \"; String b = \"\"\"\n   \"\"\"; char c = ' '; }\n",
-		"a.cs":   "class A { string a = \" \", b = @\"  \", c = $\" {x} \"; char d = ' '; }\n",
-		"a.rb":   "a = \" \"\nb = %q(  )\nc = <<~EOS\n  \nEOS\n",
-		"a.php":  "<?php\n$a = ' ';\n$b = \" $x \";\n$c = <<<EOT\n  \nEOT;\n",
-		"a.kt":   "val a = \" \"\nval b = \"\"\"  \"\"\"\n",
+		"a.cs":   "class A { string a = \" \", b = @\"  \", c = $\" { x ,10: F2} \"; char d = ' '; }\n",
+		"a.rb":   "a = \" \"\nb = %q(  )\nc = <<~EOS\n  \nEOS\nd = \" #{ x } \"\n",
 		"a.ex":   "a = \" \"\nb = ' '\nc = ~s(  )\n",
 	}
 	for path, source := range fixtures {
@@ -371,10 +418,10 @@ func TestFileTokensTileContentNodes(t *testing.T) {
 				for b := node.StartByte(); b < node.EndByte(); b++ {
 					content[b] = true
 				}
-				// A child with children of its own is code inside the literal
-				// (a template substitution, an interpolation): its whitespace is
-				// layout, and any literal inside it is checked on its own.
-				for i := 0; i < int(node.ChildCount()); i++ {
+				// Only where interpolation whitespace is proven layout is a child
+				// with children of its own (a template substitution) exempt; any
+				// literal inside it is checked on its own.
+				for i := 0; i < int(node.ChildCount()) && tokenClassTable[language].interpolationLayout; i++ {
 					if child := node.Child(i); child.ChildCount() > 0 {
 						for b := child.StartByte(); b < child.EndByte(); b++ {
 							content[b] = false

@@ -281,16 +281,12 @@ func (index *importTargetIndex) classifyPython(importingPath, specifier string) 
 	}
 	top, _, dotted := strings.Cut(specifier, ".")
 	if pythonStdlibModules[top] {
-		// The relation's specifier for `from m import n` is "m.n", so a dotted
-		// name is builtin when it is a standard module or names something in
-		// one (its parent is a standard module); a name inside a module is not
-		// checked, in any language. A deeper path under no standard module is
-		// unresolved rather than taken on its top package's word.
-		parent := specifier
-		if i := strings.LastIndex(specifier, "."); i >= 0 {
-			parent = specifier[:i]
-		}
-		if !dotted || pythonStdlibSubmodules[specifier] || parent == top || pythonStdlibSubmodules[parent] {
+		// A dotted name is builtin only when it is itself a listed standard
+		// module or alias. Any other dotted name under a standard package is
+		// unresolved, a mistyped submodule as much as `from os import getcwd`,
+		// whose relation specifier is "os.getcwd"; that statement's own
+		// module, "os", has an entry of its own.
+		if !dotted || pythonStdlibSubmodules[specifier] {
 			return importTargetBuiltin, ""
 		}
 		return importTargetUnresolved, ""
@@ -475,8 +471,9 @@ var bunModules = setOf("bun", "bun:ffi", "bun:jsc", "bun:sqlite", "bun:test")
 
 // goStandardPackageList holds the importable standard-library packages: `go list
 // std` of Go 1.27.0 without internal/ and vendor/ paths, which code outside
-// the standard library cannot import. Sorted; TestGoStandardPackagesPinned
-// keeps it so.
+// the standard library cannot import, plus syscall/js, importable under
+// GOOS=js: across every `go tool dist list` target it is the one package the
+// host's list lacks. Sorted; TestGoStandardPackagesPinned keeps it so.
 var goStandardPackageList = []string{
 	"archive/tar", "archive/zip", "bufio", "bytes", "cmp", "compress/bzip2", "compress/flate", "compress/gzip",
 	"compress/lzw", "compress/zlib", "container/heap", "container/list", "container/ring", "context", "crypto",
@@ -500,7 +497,7 @@ var goStandardPackageList = []string{
 	"net/rpc/jsonrpc", "net/smtp", "net/textproto", "net/url", "os", "os/exec", "os/signal", "os/user", "path",
 	"path/filepath", "plugin", "reflect", "regexp", "regexp/syntax", "runtime", "runtime/cgo",
 	"runtime/coverage", "runtime/debug", "runtime/metrics", "runtime/pprof", "runtime/race", "runtime/trace",
-	"slices", "sort", "strconv", "strings", "structs", "sync", "sync/atomic", "syscall", "testing",
+	"slices", "sort", "strconv", "strings", "structs", "sync", "sync/atomic", "syscall", "syscall/js", "testing",
 	"testing/cryptotest", "testing/fstest", "testing/iotest", "testing/quick", "testing/slogtest",
 	"testing/synctest", "text/scanner", "text/tabwriter", "text/template", "text/template/parse", "time",
 	"time/tzdata", "unicode", "unicode/utf16", "unicode/utf8", "unique", "unsafe", "uuid", "weak",

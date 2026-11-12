@@ -102,12 +102,19 @@ const (
 //
 // content lists the node types whose own text (bytes between their children
 // with no node of their own) is program content, such as a string literal's
-// characters: every such byte is a row, whitespace included. Own text of any
-// other node that is all whitespace is layout and has no row.
+// characters: every such byte is a row, whitespace included, and so is every
+// byte of every node inside one (its interpolations and format clauses), unless
+// interpolationLayout is set. Own text of any other node that is all
+// whitespace is layout and has no row.
+//
+// interpolationLayout is set only for a language whose interpolations are
+// plain expressions, so whitespace inside them never changes the value, and
+// only with the test pairs that show it (TestFileTokensLiteralWhitespaceIsContent).
 type tokenClasses struct {
-	identifiers []string
-	comments    []string
-	content     []string
+	identifiers         []string
+	comments            []string
+	content             []string
+	interpolationLayout bool
 }
 
 // tokenClassTable is the one table that classifies leaves, keyed by the
@@ -123,14 +130,12 @@ var tokenClassTable = map[string]tokenClasses{
 	"C#":         {identifiers: []string{"identifier"}, comments: []string{"comment"}, content: []string{"character_literal", "interpolated_string_expression", "raw_string_literal", "string_literal", "verbatim_string_literal"}},
 	"Elixir":     {identifiers: []string{"alias", "identifier"}, comments: []string{"comment"}, content: []string{"charlist", "sigil", "string"}},
 	"Java":       {identifiers: []string{"identifier", "type_identifier"}, comments: []string{"block_comment", "line_comment"}, content: []string{"character_literal", "string_literal"}},
-	"Kotlin":     {identifiers: []string{"interpolated_identifier", "simple_identifier", "type_identifier"}, comments: []string{"line_comment", "multiline_comment"}, content: []string{"character_literal", "string_literal"}},
-	"PHP":        {identifiers: []string{"name"}, comments: []string{"comment"}, content: []string{"encapsed_string", "heredoc", "heredoc_body", "nowdoc", "nowdoc_body", "string"}},
 	"Ruby":       {identifiers: []string{"class_variable", "constant", "global_variable", "hash_key_symbol", "identifier", "instance_variable"}, comments: []string{"comment"}, content: []string{"character", "delimited_symbol", "heredoc_body", "regex", "string"}},
 	"Go":         {identifiers: []string{"blank_identifier", "field_identifier", "identifier", "label_name", "package_identifier", "type_identifier"}, comments: []string{"comment"}, content: []string{"interpreted_string_literal", "raw_string_literal", "rune_literal"}},
-	"JavaScript": {identifiers: []string{"identifier", "private_property_identifier", "property_identifier", "shorthand_property_identifier", "shorthand_property_identifier_pattern", "statement_identifier", "type_identifier"}, comments: []string{"comment", "html_comment"}, content: []string{"jsx_text", "regex", "string", "template_string"}},
+	"JavaScript": {identifiers: []string{"identifier", "private_property_identifier", "property_identifier", "shorthand_property_identifier", "shorthand_property_identifier_pattern", "statement_identifier", "type_identifier"}, comments: []string{"comment", "html_comment"}, content: []string{"jsx_text", "regex", "string", "template_string"}, interpolationLayout: true},
 	"Python":     {identifiers: []string{"identifier"}, comments: []string{"comment"}, content: []string{"string"}},
 	"Rust":       {identifiers: []string{"field_identifier", "identifier", "metavariable", "shorthand_field_identifier", "type_identifier"}, comments: []string{"block_comment", "doc_comment", "inner_doc_comment_marker", "line_comment", "outer_doc_comment_marker"}, content: []string{"char_literal", "raw_string_literal", "string_literal"}},
-	"TypeScript": {identifiers: []string{"identifier", "private_property_identifier", "property_identifier", "shorthand_property_identifier", "shorthand_property_identifier_pattern", "statement_identifier", "type_identifier"}, comments: []string{"comment", "html_comment"}, content: []string{"jsx_text", "regex", "string", "template_string"}},
+	"TypeScript": {identifiers: []string{"identifier", "private_property_identifier", "property_identifier", "shorthand_property_identifier", "shorthand_property_identifier_pattern", "statement_identifier", "type_identifier"}, comments: []string{"comment", "html_comment"}, content: []string{"jsx_text", "regex", "string", "template_string"}, interpolationLayout: true},
 }
 
 // importBindingLanguages are the languages whose import statements the tokens
@@ -318,14 +323,16 @@ func extractFileTokens(path, language string, root *sitter.Node, view tokenSourc
 		emit(top, frame.node.Type(), start, end, flags)
 	}
 	push := func(node *sitter.Node, pos, end int) {
-		parentComment, parentErr := false, false
+		parentComment, parentErr, parentContent := false, false, false
 		if len(stack) > 0 {
-			parentComment, parentErr = stack[len(stack)-1].comment, stack[len(stack)-1].err
+			parent := stack[len(stack)-1]
+			parentComment, parentErr = parent.comment, parent.err
+			parentContent = parent.content && !classes.interpolationLayout
 		}
 		stack = append(stack, tokenFrame{
 			node: node, pos: pos, end: end, chainEnd: appendChain(node), hash: -1,
 			comment: parentComment || (node.IsNamed() && commentTypes[node.Type()]),
-			content: node.IsNamed() && contentTypes[node.Type()],
+			content: parentContent || node.IsNamed() && contentTypes[node.Type()],
 			err:     parentErr || node.IsError(),
 		})
 	}

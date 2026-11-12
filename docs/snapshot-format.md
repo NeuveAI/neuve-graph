@@ -232,10 +232,14 @@ Text a node owns between its children with no node of its own becomes one row
 typed with that node, whose parent is that node, covering exactly those bytes
 (never trimmed). Inside a content node (a string, raw string, char, template,
 heredoc body or similar, listed per language below) every such byte is a row,
-whitespace included, so `" "` and `""` differ; for any other node an
-all-whitespace gap is layout and has no row. Code a literal holds (a template
-substitution, an interpolation) follows the layout rule again. With that rule
-the rows tile the file: every byte is in at most one row, a byte in no row is
+whitespace included, so `" "` and `""` differ, and so is every byte of every
+node inside it: interpolations and format clauses are content too (Python's
+`f"{x = }"` prints the spaces, C#'s `{x,10:F2}` alignment and format carry
+them). Only TypeScript and JavaScript, whose template substitutions are plain
+expressions, treat whitespace inside `${…}` as layout, each with the test pairs
+that show it; a literal inside a substitution is still content. For any other
+node an all-whitespace gap is layout and has no row. With that rule the rows
+tile the file: every byte is in at most one row, a byte in no row is
 whitespace outside every content node, and every literal byte is in a row. A
 byte-order mark at byte 0 is never a row. Strings and templates are one row per
 fragment as the grammar gives them, neither identifier nor comment.
@@ -261,7 +265,32 @@ non-comment leaves (count, type, text, ancestors, opens), the all-whitespace
 case included, while layout outside literals does not. These are the declared
 languages; every other parsed language says `language_not_covered`. Lua and
 Swift were tried and fail the layout half (their grammars fold or read spacing
-around `=` as part of a token). The Go grammar makes the line break that ends
+around `=` as part of a token). PHP is not declared: whitespace-only text
+outside its tags is output and has no node. Kotlin is not declared: its grammar
+parses `a` newline `- b` and `f` newline `(a)` as one expression, though a
+Kotlin line break ends the statement there.
+
+Whitespace outside literals, per declared language, as the consumer's rule
+reads it (any "change" answer is the safe direction):
+
+| Language | Checked | Reads as |
+| --- | --- | --- |
+| Python | Re-indent that changes nesting; consistent re-indent of a whole block; blank lines; a backslash line continuation | Change; no change (same meaning); no change; change |
+| TypeScript, JavaScript | JSX text between expressions, added or reflowed; a line break inside an expression; `return` before a line break | Change; no change (no ASI there); change |
+| Go | A blank line between statements | Change (the statement-ending line break is a token) |
+| C | `#define A(x)` against `#define A (x)`; spacing in a macro body; a backslash continuation; spacing in `#include < >` | Change in each |
+| Ruby | `foo -1` against `foo - 1`; `foo[1]` against `foo [1]`; `a` newline `- b`; a leading-dot chain; `%w(a b)` spacing; text after `__END__`; heredoc terminator indent | Change; change; change; no change (same meaning); no change (same value); change; change |
+| Elixir | `a -1` against `a - 1`; `a` newline `- b`; `f` newline `(a)` | Change in each |
+| Java | Text block indentation | Change |
+| C# | A line break inside an expression; spacing in `#if` | No change (insignificant); change |
+| Rust | Spacing inside a macro call (`stringify!(a b)`) | No change (tokens are what the macro sees) |
+
+Two kinds of meaning remain outside the rule in every language: a comment can
+carry meaning (Go `//go:build`, `//go:embed` and the cgo preamble, where
+`// go:build` with a space is no directive; Ruby's
+`# frozen_string_literal:` magic comment; TypeScript `// @ts-ignore` and
+`/// <reference>`), and line or column introspection (`line!()`,
+`column!()`, `__LINE__`, stack traces) changes value with layout. The Go grammar makes the line break that ends
 a statement a token, so moving Go statements across lines can read as a token
 change: the safe direction.
 
@@ -273,8 +302,6 @@ change: the safe direction.
 | Go | `blank_identifier`, `field_identifier`, `identifier`, `label_name`, `package_identifier`, `type_identifier` | `comment` | `interpreted_string_literal`, `raw_string_literal`, `rune_literal` |
 | Java | `identifier`, `type_identifier` | `block_comment`, `line_comment` | `character_literal`, `string_literal` |
 | JavaScript | `identifier`, `private_property_identifier`, `property_identifier`, `shorthand_property_identifier`, `shorthand_property_identifier_pattern`, `statement_identifier`, `type_identifier` | `comment`, `html_comment` | `jsx_text`, `regex`, `string`, `template_string` |
-| Kotlin | `interpolated_identifier`, `simple_identifier`, `type_identifier` | `line_comment`, `multiline_comment` | `character_literal`, `string_literal` |
-| PHP | `name` | `comment` | `encapsed_string`, `heredoc`, `heredoc_body`, `nowdoc`, `nowdoc_body`, `string` |
 | Python | `identifier` | `comment` | `string` |
 | Ruby | `class_variable`, `constant`, `global_variable`, `hash_key_symbol`, `identifier`, `instance_variable` | `comment` | `character`, `delimited_symbol`, `heredoc_body`, `regex`, `string` |
 | Rust | `field_identifier`, `identifier`, `metavariable`, `shorthand_field_identifier`, `type_identifier` | `block_comment`, `doc_comment`, `inner_doc_comment_marker`, `line_comment`, `outer_doc_comment_marker` | `char_literal`, `raw_string_literal`, `string_literal` |
@@ -291,10 +318,10 @@ TypeScript `import x = require("y")`. `type_only` is set by `import type`,
 `import typeof` and per-specifier `type`. Go's grouped `import (...)` gives one
 object per spec; Python's `import a, b` gives one per module. Re-exports
 (`export … from`), `import x = A.B` aliases, dynamic `import()` and `require()`
-calls are not import statements. The `specifier` is the text as written; for a
-Python relative `from` import (`from . import x`) it is `.`, while the
-`IMPORTS` relation classifies each imported module (`.x`), so a join of the two
-on (file, specifier) finds nothing for such a statement. Every other language
+calls are not import statements. The `specifier` is the text as written, and
+each one has an import target entry on the `IMPORTS` relations: Python's
+scanner reads `from m import n` as `m` and `m.n`, and `from . import x` as
+`.x`, so the engine adds an entry for `.` itself. Every other language
 says `not_extracted` and has no `imports` field. Capabilities `optional_local_only_features` keys
 `symbols_outline_tokens` and `symbols_outline_import_bindings`, with their
 languages in `feature_languages`, declare both.
@@ -314,7 +341,11 @@ saying where that specifier resolves in the snapshot's own tree:
 | `import_target_not_classified` | (none) | Graph does not classify this specifier |
 
 `detail` is the specifier as the import scanner read it, and the entries carry
-no lines. All entries on one relation share one kind. Several entries appear
+no lines. Each entry classifies its own `detail`. All entries on one relation
+share one kind, except that the entry for a Python relative `from` module
+(`.`, `..`) rides on the relation of its first imported name and has its own
+kind (`import_target_file` for the package's `__init__.py`, else
+`import_target_unresolved`). Several entries appear
 only when several specifiers of one file reach one file (`./util` and
 `./util.ts`); the relation, which keeps its first specifier's
 `import_statement` evidence as before, lists each. The `fast` profile, which
@@ -326,8 +357,8 @@ snapshots (`query`, `neighbors`, `impact`, `def`) do not carry the entries.
 | Language | Declared | Builtin | Otherwise |
 | --- | --- | --- | --- |
 | TypeScript, JavaScript | The package (`@scope/name` or first segment) is in `dependencies`, `devDependencies`, `peerDependencies` or `optionalDependencies` of the nearest `package.json` at or above the file, or its `@types/` package is; or it is the `name` of a `package.json` in the tree | Exact names only: Node 24's core modules with or without `node:` (and the `node:`-only `sea`, `sqlite`, `test`, `test/reporters`), and Bun's `bun`, `bun:ffi`, `bun:jsc`, `bun:sqlite`, `bun:test`; an unknown name under `node:` or `bun:` is unresolved | Unresolved, including a root `tsconfig.json` alias with no target file and an alias from any other `tsconfig.json`, which the engine does not follow |
-| Go | Within the module path of the nearest `go.mod`, or of a module it requires | `C` (cgo), and the importable standard-library packages of Go 1.27.0 (`go list std` without `internal/` and `vendor/` paths, which code outside the standard library cannot import) | Unresolved, including a typo of a standard package and standard `internal/` or `vendor/` paths |
-| Python | The top-level module equals, under PEP 503 normalization, a distribution in the nearest directory's `pyproject.toml` (`[project]` dependencies and optional dependencies, `[dependency-groups]`, Poetry tables) or `requirements*.txt`, or the project's own name | A standard top-level module (CPython 3.14's names plus those removed since 3.11), or a dotted name that is a CPython 3.14 standard module (aliases such as `os.path` and `collections.abc` included) or whose parent is one (the relation's specifier for `from pathlib import Path` is `pathlib.Path`; names inside a module are not checked) | Relative, or a dotted path under no standard module (`os.nothing.deeper`): unresolved; bare: not classified, since a distribution's import name need not be its own name |
+| Go | Within the module path of the nearest `go.mod`, or of a module it requires | `C` (cgo), and the importable standard-library packages of Go 1.27.0 (`go list std` without `internal/` and `vendor/` paths, which code outside the standard library cannot import, plus `syscall/js`, the one package `go list std` lists only under a build constraint across every `go tool dist list` target) | Unresolved, including a typo of a standard package and standard `internal/` or `vendor/` paths |
+| Python | The top-level module equals, under PEP 503 normalization, a distribution in the nearest directory's `pyproject.toml` (`[project]` dependencies and optional dependencies, `[dependency-groups]`, Poetry tables) or `requirements*.txt`, or the project's own name | A standard top-level module (CPython 3.14's names plus those removed since 3.11), or a dotted name that is itself a CPython 3.14 standard module (aliases such as `os.path` and `collections.abc` included) | Relative, or a dotted name that is no standard module, a mistyped submodule (`os.pathh`) as much as `pathlib.Path` from `from pathlib import Path` (that statement's own `pathlib` entry is builtin): unresolved; bare: not classified, since a distribution's import name need not be its own name |
 | Any other | | | A file target says `import_target_file`; any other target is not classified |
 
 Packages of a nested Go module resolve to files only for the root `go.mod`'s

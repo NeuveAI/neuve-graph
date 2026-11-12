@@ -528,9 +528,9 @@ func TestSymbolsTokensFlagAndCapabilities(t *testing.T) {
 			t.Errorf("token languages miss %s: %v", language, tokenLanguages)
 		}
 	}
-	// No tree (JSON, Groovy, Markdown), or a tree but no literal-whitespace
-	// proof (YAML, Lua, Swift, Bash): not declared.
-	for _, language := range []string{"JSON", "Groovy", "Markdown", "YAML", "Lua", "Swift", "Bash"} {
+	// No tree (JSON, Groovy, Markdown), or a tree but no whitespace proof
+	// (YAML, Lua, Swift, Bash) or a disproof (PHP, Kotlin): not declared.
+	for _, language := range []string{"JSON", "Groovy", "Markdown", "YAML", "Lua", "Swift", "Bash", "PHP", "Kotlin"} {
 		if slices.Contains(tokenLanguages, language) {
 			t.Errorf("token languages claim %s", language)
 		}

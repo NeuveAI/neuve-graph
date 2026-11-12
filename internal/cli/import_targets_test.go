@@ -91,7 +91,9 @@ func importTargets(t *testing.T, output []byte) (map[[2]string]importTarget, int
 			}
 			targets[[2]string{from, evidence.Detail}] = importTarget{evidence.Kind, evidence.FilePath}
 		}
-		if len(kinds) != 1 {
+		// One class per relation, except that a Python relative from-import's
+		// own module (".", "..") rides on the relation of its first name.
+		if len(kinds) != 1 && !(strings.HasSuffix(from, ".py") && len(kinds) == 2) {
 			t.Errorf("%s -> %s: %d classifications, want exactly one", from, record.ToID, len(kinds))
 		}
 	}
@@ -233,31 +235,51 @@ func TestImportTargetCapability(t *testing.T) {
 	}
 }
 
-// A Python relative from-import is one statement in the tokens record, whose
-// specifier is the module as written ("."), while the snapshot classifies each
-// imported module (".helper"). A join on (file, specifier) therefore finds
-// nothing for it: the safe direction, pinned here so it is never silent.
-func TestPythonRelativeFromImportSpecifiersDiffer(t *testing.T) {
+// Every specifier as written in a Python import statement has an entry, so a
+// consumer joining the tokens record's statement specifier with the snapshot
+// finds it. `from . import helper` is scanned as ".helper"; the module "."
+// gets an entry of its own. `from os import getcwd` is scanned as "os" and
+// "os.getcwd"; "os" is builtin, "os.getcwd" names no module and is
+// unresolved, and `from os import path` gives "os.path", a module, builtin.
+func TestPythonFromImportModuleHasItsOwnEntry(t *testing.T) {
 	repo := t.TempDir()
 	git(t, repo, "init")
 	git(t, repo, "config", "user.name", "Graph test")
 	git(t, repo, "config", "user.email", "graph@example.com")
 	write(t, repo, "pkg/__init__.py", "")
 	write(t, repo, "pkg/helper.py", "def h():\n    return 1\n")
-	write(t, repo, "pkg/app.py", "from . import helper\n")
+	write(t, repo, "pkg/app.py", "from . import helper\nfrom os import getcwd\nfrom os import path\nimport os.pathh\n")
+	write(t, repo, "solo/app.py", "from . import gone\n")
 	git(t, repo, "add", ".")
 	git(t, repo, "commit", "-m", "fixture")
 	commit := rev(t, repo, "HEAD")
 	records, _ := tokensStream(t, repo)
-	imports := records["pkg/app.py"].Imports
-	if len(imports) != 1 || imports[0].Specifier != "." || imports[0].Bindings[0].Imported != "helper" {
-		t.Fatalf("tokens record imports %#v", imports)
+	statements := map[string]bool{}
+	for _, statement := range records["pkg/app.py"].Imports {
+		statements[statement.Specifier] = true
+	}
+	if !reflect.DeepEqual(statements, map[string]bool{".": true, "os": true, "os.pathh": true}) {
+		t.Fatalf("tokens record statements %v", statements)
 	}
 	targets, _ := importTargets(t, runOutlineCLI(t, "snapshot", "--repo", repo, "--commit", commit, "--format", "ndjson", "--no-cache"))
-	if got := targets[[2]string{"pkg/app.py", ".helper"}]; got.kind != "import_target_file" || got.path != "pkg/helper.py" {
-		t.Errorf("relation entry for .helper: %v", got)
+	want := map[[2]string]importTarget{
+		{"pkg/app.py", "."}:         {"import_target_file", "pkg/__init__.py"},
+		{"pkg/app.py", ".helper"}:   {"import_target_file", "pkg/helper.py"},
+		{"pkg/app.py", "os"}:        {"import_target_builtin", ""},
+		{"pkg/app.py", "os.getcwd"}: {"import_target_unresolved", ""},
+		{"pkg/app.py", "os.path"}:   {"import_target_builtin", ""},
+		{"pkg/app.py", "os.pathh"}:  {"import_target_unresolved", ""}, // a mistyped standard submodule
+		{"solo/app.py", "."}:        {"import_target_unresolved", ""}, // no __init__.py
+		{"solo/app.py", ".gone"}:    {"import_target_unresolved", ""},
 	}
-	if _, ok := targets[[2]string{"pkg/app.py", "."}]; ok {
-		t.Error("the relation now uses the statement's specifier; update the docs and this test")
+	for key, expected := range want {
+		if targets[key] != expected {
+			t.Errorf("%s %q: %v, want %v", key[0], key[1], targets[key], expected)
+		}
+	}
+	for specifier := range statements {
+		if _, ok := targets[[2]string{"pkg/app.py", specifier}]; !ok {
+			t.Errorf("statement specifier %q has no entry", specifier)
+		}
 	}
 }
