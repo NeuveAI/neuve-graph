@@ -92,7 +92,7 @@ entire graph impact --repo . --symbol NAME [--file path] [--depth 1|2] [--format
 Full stream of symbol records (stable `compound-v1` ID, kind, qualified name, source range, signature, language, container). This is a **bulk NDJSON stream of the whole repo**, filtered to the symbol record type — there is **no positional name argument** and no server-side name filter; grep the stream client-side, or prefer `query`/`neighbors` for a targeted single-symbol lookup.
 
 ```sh
-entire graph symbols --repo . --format ndjson [--worktree|--commit <exact-commit-OID>] [--outline]
+entire graph symbols --repo . --format ndjson [--worktree|--commit <exact-commit-OID>] [--outline [--tokens]]
 ```
 
 `--commit <exact-commit-OID>` streams that exact commit (lowercase 40 or 64 hex
@@ -122,6 +122,18 @@ range, grammar type, import classification, path and language fields.
 Inventory-only and failed parses have no outline. All profiles support the flag;
 committed reads bypass caches so outlines always describe the selected source.
 
+`--tokens`, valid only with `--outline`, adds one `file_tokens` record after
+each outline: every leaf of the file's syntax tree as positional rows (type,
+byte and line span, identifier/comment/error flags, an ancestor-chain hash and
+how many ancestors begin at the leaf), the file's distinct identifier names,
+and, for TypeScript, JavaScript, Go and Python, its import statements with their
+bindings. No source text is sent beyond names and specifiers. A file with no
+outline has no tokens record. Leaves are extracted only for the languages
+`feature_languages.symbols_outline_tokens` declares and for files up to 512 KiB
+and 100,000 leaves;
+any other outlined file gets a record whose `status` says why. See
+[the tokens record](docs/snapshot-format.md#file-tokens-records).
+
 **When:** you need the complete definition inventory (e.g. ingesting into a store), not a single lookup.
 
 ### 🔗 edges — *relations*
@@ -132,6 +144,11 @@ entire graph edges --repo . --format ndjson [--worktree|--commit <exact-commit-O
 ```
 
 `--commit` selects an exact commit as for `symbols`, including with the filters.
+
+Every `IMPORTS` relation in `edges` and `snapshot` carries one `import_target_*`
+evidence entry per specifier: a file in the tree, a declared package (with the
+manifest), a builtin, unresolved, or not classified. See
+[import targets](docs/snapshot-format.md#import-targets).
 
 **When:** you want every relation (bulk export / ingestion) or a filtered relation stream. For a targeted one-symbol question, use `neighbors`.
 

@@ -434,6 +434,10 @@ type CapabilityReport struct {
 	OptionalLocalOnlyFeatures       map[string]bool     `json:"optional_local_only_features"`
 	FeaturesRequiringNetworkAccess  map[string]bool     `json:"features_requiring_network_access"`
 	IncrementalPreparationProfiles  []string            `json:"incremental_preparation_profiles"`
+	// FeatureLanguages names, per optional feature that covers only some
+	// languages, the languages it covers. A language absent from a list is
+	// "not available" for that feature by declaration.
+	FeatureLanguages map[string][]string `json:"feature_languages"`
 }
 
 type ProviderSnapshot struct {
@@ -447,6 +451,12 @@ type ProviderSnapshot struct {
 type ProviderSnapshotOptions struct {
 	// Outline emits uncached file outlines from the extraction tree.
 	Outline bool
+	// Tokens, with Outline, adds one file_tokens record after each outline.
+	Tokens bool
+	// ClassifyImports adds one import target evidence entry per specifier to
+	// every IMPORTS relation. The snapshot, symbols and edges commands set it;
+	// interactive and search snapshots do not.
+	ClassifyImports bool
 	// PreparedCommit is an exact commit selector for retained reads only.
 	// Ordinary builders cannot use it to prepare or silently rebuild a source.
 	PreparedCommit     string
@@ -582,6 +592,7 @@ const (
 // profileSpec describes what a profile emits and how deeply it resolves.
 type profileSpec struct {
 	outline         bool
+	tokens          bool
 	name            Profile
 	relations       map[string]bool
 	includeEvidence bool
@@ -731,24 +742,36 @@ func Capabilities() CapabilityReport {
 		IncrementalPreparationProfiles:  []string{"syntax-only"},
 		HeuristicRelationTypes:          []string{"HANDLES_ROUTE", "HTTP_CALLS", "EMITS", "LISTENS_ON", "HANDLES_TOOL", "SIMILAR_TO", "TESTS"},
 		OptionalLocalOnlyFeatures: map[string]bool{
-			"stable_symbol_ids":              true,
-			"semantic_diff":                  true,
-			"ndjson_snapshot":                true,
-			"symbols_outline":                true,
-			"compact_snapshot_ndjson_v1":     true,
-			"scip_snapshot_experimental":     true,
-			"hybrid_source_search":           true,
-			"near_clone_detection":           true,
-			"git_cochange_edges":             true,
-			"durable_preindex":               true,
-			"prepared_snapshot_query":        true,
-			"exact_commit_prepared_read":     true,
-			"exact_commit_bulk_streams":      true,
-			"source_omission_warnings":       true,
-			"incremental_syntax_preparation": true,
-			"incremental_preparation_plan":   true,
-			"focused_neighbors":              true,
-			"neighbor_frontier_summary":      true,
+			"stable_symbol_ids":                       true,
+			"semantic_diff":                           true,
+			"ndjson_snapshot":                         true,
+			"symbols_outline":                         true,
+			"symbols_outline_tokens":                  true,
+			"symbols_outline_token_directives":        true,
+			"symbols_outline_indentation_significant": true,
+			"symbols_outline_import_bindings":         true,
+			"import_target_classification":            true,
+			"compact_snapshot_ndjson_v1":              true,
+			"scip_snapshot_experimental":              true,
+			"hybrid_source_search":                    true,
+			"near_clone_detection":                    true,
+			"git_cochange_edges":                      true,
+			"durable_preindex":                        true,
+			"prepared_snapshot_query":                 true,
+			"exact_commit_prepared_read":              true,
+			"exact_commit_bulk_streams":               true,
+			"source_omission_warnings":                true,
+			"incremental_syntax_preparation":          true,
+			"incremental_preparation_plan":            true,
+			"focused_neighbors":                       true,
+			"neighbor_frontier_summary":               true,
+		},
+		FeatureLanguages: map[string][]string{
+			"symbols_outline_tokens":                  TokenLanguages(),
+			"symbols_outline_token_directives":        DirectiveLanguages(),
+			"symbols_outline_indentation_significant": IndentationSignificantLanguages(),
+			"symbols_outline_import_bindings":         ImportBindingLanguages(),
+			"import_target_classification":            ImportTargetLanguages(),
 		},
 		FeaturesRequiringNetworkAccess: map[string]bool{
 			"grammar_download":  false,
@@ -1401,6 +1424,7 @@ func streamSnapshotWithWorkerCount(ctx context.Context, repo, providerVersion st
 	}
 
 	spec.outline = options.Outline
+	spec.tokens = options.Outline && options.Tokens
 
 	// Phase 1: workers independently read, classify, and parse files. Only this
 	// reducer mutates graph indexes or calls emit, and it consumes the original
@@ -1430,6 +1454,11 @@ func streamSnapshotWithWorkerCount(ctx context.Context, repo, providerVersion st
 			}
 			if result.outline != nil {
 				if err := emit(*result.outline); err != nil {
+					return err
+				}
+			}
+			if result.tokens != nil {
+				if err := emit(*result.tokens); err != nil {
 					return err
 				}
 			}
@@ -1516,7 +1545,9 @@ func streamSnapshotWithWorkerCount(ctx context.Context, repo, providerVersion st
 			return
 		}
 		if !spec.includeEvidence {
-			r.Evidence = nil
+			// Import target classification is part of the IMPORTS relation's
+			// answer, not provenance, so it stays at every profile.
+			r.Evidence = importTargetEvidenceOnly(r.Evidence)
 		}
 		if r.WarningCodes == nil {
 			r.WarningCodes = []string{}
@@ -1570,13 +1601,17 @@ func streamSnapshotWithWorkerCount(ctx context.Context, repo, providerVersion st
 			symbolsByID, filesByID = recordIndexes(files, recordsByFile)
 		}
 		var relationFailures []PartialFailure
+		var importTargets *importTargetListing
+		if options.ClassifyImports {
+			importTargets = &importTargetListing{Paths: sc.paths}
+		}
 		forEachRelation(ctx, sc.key, files, recordsByFile, sc.read, precomputedImports, spec, workers, func() bool {
 			return emitErr != nil || ctx.Err() != nil
 		}, func(r RelationRecord) {
 			emitRelation(r, symbolsByID, filesByID)
 		}, func(failure PartialFailure) {
 			relationFailures = append(relationFailures, failure)
-		})
+		}, importTargets)
 		// A file can fail in both phases with the same code (a parse budget
 		// blown in the entity pass usually blows the relation-phase scope parse
 		// too): report one record per code+file, exactly as the cache-derived
@@ -4706,7 +4741,7 @@ func buildRelations(repoKey string, files []FileRecord, recordsByFile map[string
 	var relations []RelationRecord
 	forEachRelation(context.Background(), repoKey, files, recordsByFile, readContent, nil, resolveProfile(ProfileFull), defaultProviderWorkerCount(), nil, func(r RelationRecord) {
 		relations = append(relations, r)
-	}, nil)
+	}, nil, nil)
 	relations = dedupeRelations(relations)
 	sort.Slice(relations, func(i, j int) bool {
 		left := relations[i].Type + relations[i].FromID + relations[i].ToID
@@ -4881,7 +4916,12 @@ type httpCallEntry struct {
 // by returning, exactly as the sequential loop did.
 var errRelationScanStopped = errors.New("relation scan stopped")
 
-func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, recordsByFile map[string][]SymbolRecord, readContent contentReader, precomputedImports map[string][]string, spec profileSpec, workers int, shouldStop func() bool, emit func(RelationRecord), recordFailure func(PartialFailure)) {
+// importTargetListing, when non-nil, asks forEachRelation to classify every
+// IMPORTS relation's specifiers against the manifests among Paths (the
+// snapshot's whole listing). Only provider record streams pass one.
+type importTargetListing struct{ Paths []string }
+
+func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, recordsByFile map[string][]SymbolRecord, readContent contentReader, precomputedImports map[string][]string, spec profileSpec, workers int, shouldStop func() bool, emit func(RelationRecord), recordFailure func(PartialFailure), importTargets *importTargetListing) {
 	structuralWorkCounts.resolutions.Add(1)
 	if spec.name == ProfileSyntaxOnly {
 		emitStructuralRelations(repoKey, files, recordsByFile, emit)
@@ -5277,6 +5317,10 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 		}
 	}
 	manifestImports := buildManifestImportResolver(files, readContent)
+	var importTargetIdx *importTargetIndex
+	if importTargets != nil && spec.emits("IMPORTS") {
+		importTargetIdx = newImportTargetIndex(importTargets.Paths, readContent, manifestImports.tsPathMappings)
+	}
 	// Import blocks of files OTHER than the one being scanned, which the Go
 	// interface-implementation hop needs to decide package qualifiers across the
 	// declaring files. Lazy and memoised: only files that actually reach a
@@ -5391,9 +5435,41 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 			}
 		}
 		fromID := fileID(repoKey, file.Path)
+		// With classification on, a file's IMPORTS relations are held until its
+		// import list is done, so a specifier that reaches a target an earlier
+		// specifier already reached adds its classification to that relation
+		// instead of being dropped as a duplicate.
+		var heldImports []RelationRecord
+		heldByTarget := map[string]int{}
+		heldBySpecifier := map[string]int{}
+		emitImport := func(relation RelationRecord, imported, resolvedPath string) {
+			if importTargetIdx == nil {
+				emit(relation)
+				return
+			}
+			target := Evidence{Kind: importTargetFile, FilePath: resolvedPath, Detail: imported}
+			if resolvedPath == "" {
+				kind, manifest := importTargetIdx.classify(file.Path, imported)
+				target = Evidence{Kind: kind, FilePath: manifest, Detail: imported}
+			}
+			if at, held := heldByTarget[relation.ToID]; held {
+				heldBySpecifier[imported] = at
+				for _, existing := range heldImports[at].Evidence {
+					if existing == target {
+						return
+					}
+				}
+				heldImports[at].Evidence = append(heldImports[at].Evidence, target)
+				return
+			}
+			relation.Evidence = append(relation.Evidence, target)
+			heldByTarget[relation.ToID] = len(heldImports)
+			heldBySpecifier[imported] = len(heldImports)
+			heldImports = append(heldImports, relation)
+		}
 		for _, imported := range imports {
 			if resolved, ok := resolveLocalImport(file.Path, imported, knownFiles); ok {
-				emit(RelationRecord{
+				emitImport(RelationRecord{
 					RecordType:    "relation",
 					FromID:        fromID,
 					ToID:          fileID(repoKey, resolved),
@@ -5409,11 +5485,11 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 						Detail:   imported,
 					}},
 					WarningCodes: []string{},
-				})
+				}, imported, resolved)
 				continue
 			}
 			if resolved, ok := manifestImports.resolve(file.Path, imported); ok {
-				emit(RelationRecord{
+				emitImport(RelationRecord{
 					RecordType:    "relation",
 					FromID:        fromID,
 					ToID:          fileID(repoKey, resolved.Path),
@@ -5429,14 +5505,14 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 						Detail:   imported,
 					}},
 					WarningCodes: []string{},
-				})
+				}, imported, resolved.Path)
 				continue
 			}
 			warningCodes := []string{}
 			if isRelativeImportSpec(file.Path, imported) {
 				warningCodes = []string{"UNRESOLVED_RELATIVE_IMPORT"}
 			}
-			emit(RelationRecord{
+			emitImport(RelationRecord{
 				RecordType:    "relation",
 				FromID:        fromID,
 				ToID:          externalID("import", imported),
@@ -5452,7 +5528,40 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 					Detail:   imported,
 				}},
 				WarningCodes: warningCodes,
-			})
+			}, imported, "")
+		}
+		if importTargetIdx != nil && strings.EqualFold(filepath.Ext(file.Path), ".py") && len(heldImports) > 0 {
+			// `from . import x` is scanned as ".x" alone. Give the module the
+			// statement names (".") an entry of its own, on the relation of its
+			// first imported name, so every specifier as written in a statement
+			// has an entry.
+			if !contentRead {
+				content, _ = readContent(file.Path)
+				contentRead = true
+			}
+			for _, statement := range pythonFromImportStatements(content) {
+				module := statement.module
+				if module == "" || strings.Trim(module, ".") != "" || len(statement.items) == 0 {
+					continue
+				}
+				if _, has := heldBySpecifier[module]; has {
+					continue
+				}
+				name, _ := parsePythonImportItem(statement.items[0])
+				at, ok := heldBySpecifier[pythonFromImportModuleSpec(module, name)]
+				if !ok {
+					continue
+				}
+				entry := Evidence{Kind: importTargetUnresolved, Detail: module}
+				if resolved, ok := resolveLocalImport(file.Path, module, knownFiles); ok {
+					entry = Evidence{Kind: importTargetFile, FilePath: resolved, Detail: module}
+				}
+				heldImports[at].Evidence = append(heldImports[at].Evidence, entry)
+				heldBySpecifier[module] = at
+			}
+		}
+		for _, relation := range heldImports {
+			emit(relation)
 		}
 		importsByName := importedNamesFor(file.Path, content)
 		importsByName = resolvedImportedNameModules(file.Path, importsByName, manifestImports, knownFiles, readContent, jsModules)
@@ -20380,7 +20489,7 @@ func importCapableExtension(ext string) bool {
 func isRelativeImportSpec(importingPath, spec string) bool {
 	switch strings.ToLower(filepath.Ext(importingPath)) {
 	case ".js", ".jsx", ".ts", ".tsx":
-		return strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../")
+		return spec == "." || spec == ".." || strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../")
 	case ".py":
 		return strings.HasPrefix(spec, ".")
 	default:
@@ -20443,6 +20552,14 @@ func resolveReadableLocalImport(importingPath, spec string, readContent contentR
 }
 
 func jsLocalImportCandidates(importingPath, spec string) []string {
+	// "." and ".." name the directory itself, as "./" and "../" do, so they
+	// take the same directory-index candidates.
+	switch spec {
+	case ".":
+		spec = "./"
+	case "..":
+		spec = "../"
+	}
 	if !strings.HasPrefix(spec, "./") && !strings.HasPrefix(spec, "../") {
 		return nil
 	}

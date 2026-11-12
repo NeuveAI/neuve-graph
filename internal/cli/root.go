@@ -299,6 +299,9 @@ func runProviderRecords(ctx context.Context, opts Options, args []string, mode s
 	if flags.Outline && mode != "symbols" {
 		return errors.New("--outline is only valid for symbols")
 	}
+	if flags.Tokens && !flags.Outline {
+		return errors.New("--tokens requires --outline")
+	}
 	filterActive := flags.To != "" || flags.From != "" || len(flags.Relation) > 0
 	compact := flags.Format == "compact-ndjson"
 	scip := flags.Format == "scip"
@@ -327,6 +330,8 @@ func runProviderRecords(ctx context.Context, opts Options, args []string, mode s
 	}
 	options := sem.ProviderSnapshotOptions{
 		Outline:          flags.Outline,
+		Tokens:           flags.Tokens,
+		ClassifyImports:  true,
 		NoNetwork:        flags.NoNetwork,
 		Worktree:         flags.Worktree,
 		IgnoreFiles:      flags.IgnoreFiles,
@@ -640,7 +645,7 @@ func includeRecord(mode string, record any) bool {
 	switch record.(type) {
 	case sem.FileRecord, sem.ExternalRecord:
 		return mode == "snapshot"
-	case sem.FileOutlineRecord:
+	case sem.FileOutlineRecord, sem.FileTokensRecord:
 		return mode == "symbols"
 	case sem.SymbolRecord:
 		return mode == "snapshot" || mode == "symbols"
@@ -670,6 +675,7 @@ type commonFlags struct {
 
 type providerFlags struct {
 	Outline      bool
+	Tokens       bool
 	Repo         string
 	Format       string
 	Profile      string
@@ -776,6 +782,8 @@ func parseProviderFlags(args []string) (providerFlags, []string, error) {
 			flags.Profile = args[i]
 		case "--outline":
 			flags.Outline = true
+		case "--tokens":
+			flags.Tokens = true
 		case "--no-network":
 			flags.NoNetwork = true
 		case "--worktree":

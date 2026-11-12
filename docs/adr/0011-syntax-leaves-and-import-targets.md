@@ -1,0 +1,36 @@
+# Syntax leaves, import bindings and import targets
+
+Status: provider increment implemented with focused native tests. Downstream client integration and independent review remain separate gates.
+
+## Decision
+
+Neuve's review decides three rules from code alone (a change that alters no token, a change that touches only imports, families of sections with one pattern), and language analysis lives in Graph. Graph therefore gives:
+
+- `symbols --outline --tokens`: one opt-in `file_tokens` record after each `file_outline`, from the same tree. It holds every leaf of the tree as positional rows, the file's identifier names and, for TypeScript, JavaScript, Go and Python, its import statements with their bindings. The record shape and the per-language classification table are in [the snapshot format](../snapshot-format.md#file-tokens-records).
+- On every `IMPORTS` relation of `snapshot` and `edges`: one evidence entry per specifier, `import_target_file`, `import_target_declared_package`, `import_target_builtin`, `import_target_unresolved` or `import_target_not_classified` ([import targets](../snapshot-format.md#import-targets)).
+
+## Why these shapes
+
+The tokens record is opt-in and uncached like the outline, so without `--tokens` no stream changes. Rows are positional integers with per-file tables of types and ancestor hashes because a file has roughly one leaf per four source bytes; the record still runs to about six to eight bytes per source byte.
+
+The import classification is an extra `Evidence` entry rather than a new relation field. An entry has the same five fields as every other, so compact v1 relation and evidence arities hold, a v1 reader decodes it, the schema stays `1.3` and the header does not change. A new relation field would have needed a thirteenth compact column and a schema minor. The entries are classification, not provenance, so the `fast` profile keeps them while dropping other evidence. A second specifier that reaches a file an earlier one reached used to be dropped as a duplicate relation; its entry now joins the first relation, so no specifier is lost and the relation count does not move.
+
+Manifests are read from the snapshot's tree through its content reader, so `--commit` classifies against that commit. Interactive and search snapshots do not classify, so their caches and answers are unchanged; the records cache version moves to `provider-records-v15` so cached streams gain the entries.
+
+## Coverage follows proof
+
+A gap a node owns between its children is a row exactly as written. Inside a content node (string, raw string, char, template, heredoc body) an all-whitespace gap is a row too, and so is every gap of every node inside it, interpolations and format clauses included; only a language proven to treat interpolation whitespace as layout (TypeScript, JavaScript) is exempt. Elsewhere an all-whitespace gap is layout. A language is declared, and gets leaves, only when a test proves for each of its string-like forms that a whitespace change inside the literal changes the leaves while layout outside does not. Undeclared languages, files over 512 KiB and trees over 100,000 leaves get a record whose `status` says why and that carries no leaves.
+
+Builtin import targets come from exact pinned lists (Go 1.27.0's importable standard packages, Node 24's and Bun 1.4.4's modules, CPython 3.14's modules and dotted submodules), never from a prefix, a parent or a pattern, because the consumer treats builtin as resolved. Every specifier as written in an import statement has an entry; for a Python relative `from` import the engine adds one for the module (`.`).
+
+## Comments that carry meaning
+
+A comment a compiler or tool reads is still a comment; its leaves add the `directive` flag (bit 32), set from a best-effort per-language list of known directives and, for every other comment, from a shape rule that flags anything that does not read as plain prose. The flag is over-inclusive and not complete: an unflagged comment may still be read by a tool. The flag is additive (readers ignore unknown bits), so no version moves. A consumer that skips comments compares directive leaves by text instead.
+
+## What the leaves do and do not establish
+
+Equal leaves mean the same tokens in the same tree-sitter tree, not the same behaviour. The compiler's grammar can differ from the tree's after a line break (TypeScript `abstract`, `using`, `interface`; JavaScript `async`), and position matters for some comments (a directive that must start its line, the cgo preamble touching `import "C"`, a coding cookie's line, a shebang at byte 0) and for tab indentation. Python's leading whitespace is syntax the tree does not check (an inconsistent dedent parses cleanly); the engine declares it under `symbols_outline_indentation_significant` instead of checking indentation. The engine does not add per-language whitespace rules for these; it gives exact positions, and a consumer deciding "layout only" also compares the stretches between compared leaves, comments left out of the comparison included: a line feed anywhere in a stretch, inside a block comment too, makes it a line break (in TypeScript and Go a block comment spanning a line ends a `return` statement, though the leaves are equal); tabs, carriage returns and the stretches around directive comments must be byte-identical. Source text the program reads (`Function.prototype.toString()`, `inspect.getsource()`) and observable positions change with layout; a blank line or a comment line before a Ruby leading-dot chain is an unconfirmed risk. The stretch's line-break test counts line feeds; a comment whose text is not printable text and plain layout only (valid UTF-8 of categories L, M, N, P, S plus space, tab, line feed and carriage return), a C comment holding a trigraph, and a Java comment holding a Unicode escape, are flagged directive so they are compared by text. Comment changes always need a reading.
+
+## Limits
+
+A tree with an error node gets no outline and so no tokens record. TypeScript aliases come from the root `tsconfig.json` only; an alias the engine cannot follow is `import_target_unresolved`, never a declared package. A nested Go module's packages do not resolve to files, so they read as declared by the nested `go.mod`. A Python name no manifest declares by identity is not classified. The declared package's name is not carried; it is the specifier's package part, or for Go the required module that prefixes it.

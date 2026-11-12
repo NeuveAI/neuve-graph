@@ -92,8 +92,8 @@ to build one exact commit from Git objects without a checkout, whatever HEAD is.
 | Command | What it does |
 | --- | --- |
 | `snapshot` | The whole graph: header, files, externals, symbols, relations, summary. Also supports `--format compact-ndjson` and the experimental `--format scip`. |
-| `symbols` | Symbol records only. There is no name filter; grep the stream, or use `query`/`def` for a targeted lookup. |
-| `edges` | Relation records, filterable server-side with `--to`, `--from`, `--relation`. |
+| `symbols` | Symbol records only. There is no name filter; grep the stream, or use `query`/`def` for a targeted lookup. `--outline` adds per-file syntax outlines; `--outline --tokens` adds each file's syntax-tree leaves, identifier names and import bindings ([tokens record](snapshot-format.md#file-tokens-records)). |
+| `edges` | Relation records, filterable server-side with `--to`, `--from`, `--relation`. `IMPORTS` relations carry [import targets](snapshot-format.md#import-targets). |
 | `snapshot-query` | Queries a saved compact snapshot without rebuilding the graph. |
 
 `--commit` takes a lowercase 40- or 64-character commit OID, once, and cannot

@@ -12,6 +12,7 @@ import (
 // provider without changing the scheduling contract.
 type providerFileResult struct {
 	outline               *FileOutlineRecord
+	tokens                *FileTokensRecord
 	err                   error
 	index                 int
 	path                  string
@@ -228,8 +229,8 @@ func processProviderFileUncached(
 		return result
 	}
 
-	entities, parsedLanguage, parseStatus, outline := parseWithOutline(spec, langSpec, path, content)
-	result.outline = outline
+	entities, parsedLanguage, parseStatus, outline, tokens := parseWithOutlineTokens(spec, langSpec, path, content)
+	result.outline, result.tokens = outline, tokens
 	if parsedLanguage == "" {
 		result.failures = append(result.failures, PartialFailure{
 			Code:                 "E_UNSUPPORTED_LANGUAGE",
