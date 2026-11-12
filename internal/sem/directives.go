@@ -12,7 +12,7 @@ import (
 // change. Two layers decide it, and over-flagging is the safe direction:
 //
 //  1. directiveMarkers: known directives per language, matched anywhere in the
-//     comment's text, so every spelling a tool accepts is covered.
+//     comment's text: a best-effort list, not complete.
 //  2. commentLooksLikeProse: any other comment is a directive unless its body
 //     has the shape of plain prose.
 //

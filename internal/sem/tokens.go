@@ -480,7 +480,7 @@ func extractFileTokens(path, language string, root *sitter.Node, view tokenSourc
 	sort.Strings(record.IdentifierNames)
 	if importBindingsCovered(language) {
 		record.ImportBindings = importBindingsExtracted
-		record.Imports = extractImportStatements(language, importNodes, view, lineStarts)
+		record.Imports = extractImportStatements(language, importNodes, view, lineStarts, record.Leaves)
 		if record.Imports == nil {
 			record.Imports = []ImportStatementRecord{}
 		}
@@ -644,7 +644,7 @@ func importNode(language, typ string) bool {
 	return false
 }
 
-func extractImportStatements(language string, nodes []*sitter.Node, view tokenSourceView, lineStarts []int) []ImportStatementRecord {
+func extractImportStatements(language string, nodes []*sitter.Node, view tokenSourceView, lineStarts []int, leaves [][8]int) []ImportStatementRecord {
 	var out []ImportStatementRecord
 	text := func(node *sitter.Node) string {
 		if node == nil || node.IsNull() {
@@ -655,14 +655,6 @@ func extractImportStatements(language string, nodes []*sitter.Node, view tokenSo
 			return ""
 		}
 		return string(view.file[start:end])
-	}
-	lines := func(node *sitter.Node) (int, int) {
-		start := outlineSourceLine(lineStarts, int(node.StartByte()))
-		end := start
-		if node.EndByte() > node.StartByte() {
-			end = outlineSourceLine(lineStarts, int(node.EndByte())-1)
-		}
-		return start, end
 	}
 	for _, node := range nodes {
 		// The statement is the grammar's import statement node. For Go it is
@@ -676,8 +668,28 @@ func extractImportStatements(language string, nodes []*sitter.Node, view tokenSo
 				span = parent
 			}
 		}
-		startLine, endLine := lines(span)
+		// The range runs from the start of the node's first non-comment leaf
+		// to the end of its last, so a leading or trailing comment the grammar
+		// puts inside the node is outside; a comment in the middle stays in.
 		startByte, endByte := int(span.StartByte()), int(span.EndByte())
+		first, last := -1, -1
+		for i := sort.Search(len(leaves), func(i int) bool { return leaves[i][1] >= startByte }); i < len(leaves) && leaves[i][2] <= endByte; i++ {
+			if leaves[i][5]&tokenFlagComment != 0 || leaves[i][1] == leaves[i][2] {
+				continue
+			}
+			if first < 0 {
+				first = i
+			}
+			last = i
+		}
+		if first >= 0 {
+			startByte, endByte = leaves[first][1], leaves[last][2]
+		}
+		startLine := outlineSourceLine(lineStarts, startByte)
+		endLine := startLine
+		if endByte > startByte {
+			endLine = outlineSourceLine(lineStarts, endByte-1)
+		}
 		switch language {
 		case "TypeScript", "JavaScript":
 			if statement, ok := jsImportStatement(node, text); ok {

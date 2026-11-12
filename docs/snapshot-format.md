@@ -391,11 +391,15 @@ TypeScript `import x = require("y")`. `type_only` is set by `import type`,
 `import typeof` and per-specifier `type`. Go's grouped `import (...)` gives one
 object per spec; Python's `import a, b` gives one per module.
 
-The range is the grammar's import statement node and nothing else on its
-lines: code before or after the statement on the same line, a trailing
-comment, and the `;` of Python's `import os; import sys` are outside, while
-TypeScript and JavaScript keep the statement's own `;` and its import
-attribute clause (`with { type: "json" }`) inside. For Go a declaration with
+The range starts at the start of the statement's first non-comment leaf and
+ends at the end of its last non-comment leaf, the statement being the
+grammar's import statement node. So a leading or trailing comment is outside
+even where the grammar puts it inside the node (`import a from 'a' // tail`
+gives `import a from 'a'`), a comment in the middle of the statement stays
+inside, code before or after the statement on the same line is outside, and so
+is the `;` of Python's `import os; import sys`, while TypeScript and JavaScript
+keep the statement's own `;` and its import attribute clause
+(`with { type: "json" }`) inside. For Go a declaration with
 one spec and no parentheses (`import "fmt"`) is the statement, keyword
 included; in a grouped `import ( … )` each spec alone is a statement, so the
 `import` keyword and the parentheses belong to no statement. Python's
@@ -437,7 +441,12 @@ same tree-sitter tree. They do not mean the same behaviour:
   terminator, an Elixir heredoc's closing delimiter) either change the tree or
   lie inside a content node.
 - Source positions the program can observe (`__LINE__`, `line!()`, stack
-  traces) change with layout.
+  traces) change with layout, and so does source text the program can read
+  (`Function.prototype.toString()`, Python's `inspect.getsource()`).
+- An unconfirmed risk for Ruby, found in review and not checked on a current
+  Ruby: a blank line before a leading-dot method chain (`x = [1]`, a blank
+  line, `.size`) may change how Ruby parses it, while the rule above reads it
+  as layout.
 
 Literals whose value depends on where the closing delimiter sits (Java text
 blocks, C# raw strings, Elixir heredocs and sigils, Ruby heredocs, and every
@@ -445,12 +454,22 @@ multi-line literal) keep the delimiter's indentation inside their content node,
 so moving it, or reindenting the whole block, changes a leaf.
 
 A consumer that wants to decide that a change is layout only must, besides
-equal leaves, compare the gaps between consecutive rows, and the file's
-leading gap (before the first row) and trailing gap (after the last): each keeps its class
-(nothing, spaces on one line, or at least one line break), a gap holding a tab
-or carriage return is byte-identical, and the gaps around every
-directive-flagged comment are byte-identical. The rows' positions are enough to
-compute this, since a gap holds only space, tab, carriage return and line feed.
+equal leaves, compare the stretches between consecutive compared leaves, and
+the file's leading stretch (before the first) and trailing stretch (after the
+last). A stretch is everything between the two leaves, the bytes of any
+comment left out of the comparison included. Each stretch keeps its class
+(nothing, spaces on one line, or at least one line break), and a line feed
+anywhere in the stretch, inside a comment too, makes it a line break: a block
+comment that spans a line ends a statement in TypeScript
+(`function f(){ return /* see the note below */ 1; }` with a line break inside
+the comment parses as `return;` in tsc, and the value is lost) and in Go (the
+same `return /* … */ 1` fails with "not enough return values"), while both
+grammars give equal leaves and the comment, being prose, is not flagged. The
+JavaScript grammar already sees that break, so there the leaves differ. A
+stretch holding a tab or carriage return is byte-identical, and the stretches
+around every directive-flagged comment are byte-identical. The rows' positions
+and the file's bytes are enough to compute this, since outside rows a stretch
+holds only space, tab, carriage return and line feed.
 
 The `directive` flag is over-inclusive by design and still not complete. A
 comment that is not flagged may be read by a tool: an analysistest
@@ -497,7 +516,9 @@ snapshots (`query`, `neighbors`, `impact`, `def`) do not carry the entries.
 A TypeScript or JavaScript `"."` or `".."` names a directory as `"./"` and
 `"../"` do: each resolves to that directory's index file
 (`index.ts`, `index.tsx`, `index.js`, `index.jsx`), and without one is an
-unresolved relative import.
+unresolved relative import. Such an unresolved `"."` or `".."` relation now
+carries the `UNRESOLVED_RELATIVE_IMPORT` warning, which it did not before
+these two specifiers were read as relative.
 
 Packages of a nested Go module resolve to files only for the root `go.mod`'s
 module today, so such an import says declared by the nested `go.mod`.

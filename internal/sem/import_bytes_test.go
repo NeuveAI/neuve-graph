@@ -9,7 +9,7 @@ import (
 // lines, so a consumer can require every changed leaf to lie inside one. Each
 // case gives a file and the exact text each statement's range must hold, in
 // order; every leaf overlapping a range must lie wholly inside it, and the
-// leaves inside must spell the statement.
+// leaves inside (comments in the middle included) must spell the statement.
 func TestImportStatementByteRanges(t *testing.T) {
 	cases := []struct {
 		path, source string
@@ -30,6 +30,17 @@ func TestImportStatementByteRanges(t *testing.T) {
 		// The semicolon and an import attribute clause are inside, a trailing
 		// comment is outside.
 		{"a.ts", "import data from \"./d.json\" with { type: \"json\" }; // note\n", []string{`import data from "./d.json" with { type: "json" };`}},
+		// The range runs from the first non-comment leaf to the last: a
+		// leading or trailing comment is outside even where the grammar puts
+		// it inside the statement node, a comment in the middle stays inside.
+		{"a.ts", "import a from 'a' // tail\nconst b = 1;\n", []string{"import a from 'a'"}},
+		{"a.js", "import a from 'a' // tail\nconst b = 1;\n", []string{"import a from 'a'"}},
+		{"a.ts", "/* lead */ import a from \"a\"; /* tail */\n", []string{`import a from "a";`}},
+		{"a.ts", "import { a, /* keep */ b } from \"x\";\n", []string{`import { a, /* keep */ b } from "x";`}},
+		{"a.py", "import a  # tail\n", []string{"import a"}},
+		{"a.py", "from a import b, \\\n    c  # tail\n", []string{"from a import b, \\\n    c"}},
+		{"a.go", "package p\n\nimport (\n\t\"fmt\" // tail\n)\n", []string{`"fmt"`}},
+		{"a.go", "package p\n\nimport /* note */ \"fmt\"\n", []string{`import /* note */ "fmt"`}},
 		// Go: an ungrouped declaration is the statement; in a group each spec.
 		{"a.go", "package p\n\nimport \"fmt\"\nimport str \"strings\"\n", []string{`import "fmt"`, `import str "strings"`}},
 		{"a.go", "package p\n\nimport (\n\t\"fmt\"\n\tstr \"strings\"\n)\n", []string{`"fmt"`, `str "strings"`}},
@@ -65,11 +76,9 @@ func TestImportStatementByteRanges(t *testing.T) {
 				if row[1] < statement.StartByte || row[2] > statement.EndByte {
 					t.Errorf("%s: leaf %q straddles statement %q", tc.path, tc.source[row[1]:row[2]], got)
 				}
-				if row[5]&tokenFlagComment == 0 {
-					inside = append(inside, tc.source[row[1]:row[2]])
-				}
+				inside = append(inside, tc.source[row[1]:row[2]])
 			}
-			if joined, want := strings.Join(inside, ""), strings.Join(strings.Fields(got), ""); joined != want {
+			if joined, want := strings.Join(strings.Fields(strings.Join(inside, "")), ""), strings.Join(strings.Fields(got), ""); joined != want {
 				t.Errorf("%s: leaves inside %q spell %q", tc.path, got, joined)
 			}
 		}
