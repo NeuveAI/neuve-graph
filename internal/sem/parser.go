@@ -137,6 +137,9 @@ var treeSitterLanguages = map[string]languageSpec{
 
 type TreeSitterParser struct {
 	outline *FileOutlineRecord
+	// tokens, when set with outline, receives the file's leaves and imports
+	// from the same tree whenever the outline is extracted.
+	tokens *FileTokensRecord
 }
 
 const treeSitterParseTimeout = 5 * time.Second
@@ -383,6 +386,18 @@ func (parserOptions TreeSitterParser) ParseWithStatus(path, content string) ([]E
 	}
 	if parserOptions.outline != nil && !root.HasError() {
 		*parserOptions.outline = extractFileOutline(path, spec.language, root, entitySrc, parseSrc, entityLineOffset)
+		if parserOptions.tokens != nil {
+			view := tokenSourceView{file: src, parsed: parseSrc, grammar: spec.grammar}
+			if entityLineOffset > 0 {
+				// The Protocol Buffers view inserts its synthetic syntax line
+				// after any byte-order mark; no row may describe it.
+				if strings.HasPrefix(content, "\uFEFF") {
+					view.insertAt = len("\uFEFF")
+				}
+				view.insertN = len(protobufSyntheticSyntax)
+			}
+			*parserOptions.tokens = extractFileTokens(path, spec.language, root, view)
+		}
 	}
 	if spec.language == "YAML" {
 		status := ParseStatus{}

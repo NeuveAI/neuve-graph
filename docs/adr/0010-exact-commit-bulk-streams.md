@@ -25,7 +25,7 @@ There is no fallback to HEAD or the working tree in any row.
 
 The whole-stream records cache was keyed on HEAD's commit and tree. With `--commit` it is keyed on the target's commit and tree, so a second read of one commit with the same mode, profile and policy is a cache hit wherever HEAD has moved, and a different commit is a different entry. `Store` still refuses a header whose commit or tree disagrees with the key. A HEAD read and a `--commit <HEAD's OID>` read produce byte-identical streams, so they share one entry. The filtered path stays uncached, as before.
 
-The cache version is now `provider-records-v14`, and the key also carries whether coverage warnings were requested.
+The cache version became `provider-records-v14`, and the key also carries whether coverage warnings were requested. It is now `provider-records-v15` ([ADR 0011](0011-syntax-leaves-and-import-targets.md)).
 
 ## Policy origin
 

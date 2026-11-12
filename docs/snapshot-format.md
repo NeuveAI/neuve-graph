@@ -184,6 +184,148 @@ codes: on an engine without it, an absent warning proves nothing. Interactive
 query surfaces (`query`, `neighbors`, `def`, `impact`) do not add these
 warnings to their diagnostics.
 
+## File tokens records
+
+`symbols --outline --tokens` adds one `file_tokens` record right after each
+`file_outline` record (here for `const x = 1;\n`). A file with no outline (inventory-only, a parse error,
+over the size limit, minified, depth exceeded) has no tokens record either; its
+partial failure says why. A tree that holds an `ERROR` or missing node gets no
+outline today, so `has_errors` is false on every record this build emits; the
+field and the leaf `error` flag are kept for the contract.
+
+```json
+{"record_type":"file_tokens","file_path":"a.ts","language":"TypeScript","has_errors":false,
+ "identifier_names":["x"],"leaf_types":["const","identifier","=","number",";"],
+ "ancestors":["3b361d34bcd674d7","5fa142ba74908a4f","75261478695a6d99"],
+ "leaves":[[0,0,5,1,1,0,1,2],[1,6,7,1,1,9,2,1],[2,8,9,1,1,0,2,0],[3,10,11,1,1,8,2,0],[4,11,12,1,1,0,1,0]],
+ "import_bindings":"extracted","imports":[]}
+```
+
+`leaves` holds every leaf of the syntax tree, whole file, in source order, each
+once, named and anonymous alike, as rows of eight integers: index into
+`leaf_types`, start byte, end byte (exclusive), start line, end line (1-based;
+lines count `\n` only), flags, index into `ancestors`, and opens. Flags:
+`1` identifier, `2` comment, `4` error (missing node or under `ERROR`, or a
+rewritten span), `8` named node (otherwise an anonymous token: keyword,
+operator, punctuation), `16` rewritten. `ancestors` entries are the first 16
+hex characters of SHA-256 over the chain from the root to the leaf's parent,
+each node encoded as `n` or `a` (named or anonymous), its type's byte length as
+an unsigned varint and the type's bytes. `opens` counts the ancestors whose
+first row this is. Equal types, texts, ancestors and opens over a run of rows
+mean the same piece of tree; `return` before a line break differs from
+`return x` in ancestors, not tokens.
+
+Text a node owns between its children with no node of its own becomes a row
+typed with that node, whose parent is that node, trimmed of surrounding
+whitespace. With that rule the rows tile the file: only whitespace (Unicode
+White_Space, and a byte-order mark at byte 0) lies outside them. Strings and
+templates are one row per fragment as the grammar gives them, neither
+identifier nor comment.
+
+Some languages are parsed through a same-length rewritten view of the file
+(masks for constructs the grammar rejects). Where the view's bytes differ from
+the file's, the rows over that span become one row of type `""` flagged
+rewritten and error; identifier names inside it come from a second parse of
+the file as given. Protocol Buffers' synthetic `syntax` line is never a row.
+
+`identifier_names` is the sorted set of texts of every identifier row. A leaf
+is an identifier when it is a named node of a listed type and lies under no
+comment node; it is a comment when it or an ancestor is a listed comment node.
+Keywords are anonymous tokens in these grammars (SQL's `keyword_*` nodes are
+named and not listed), so a contextual keyword used as a keyword is never an
+identifier and one used as a name is. Python docstrings are strings. A JSX
+`{/* x */}` gives a comment row; its braces are punctuation rows.
+
+| Language | Identifier leaf types | Comment node types |
+| --- | --- | --- |
+| Bash | `variable_name` | `comment` |
+| C | `field_identifier`, `identifier`, `statement_identifier`, `type_identifier` | `comment` |
+| C# | `identifier` | `comment` |
+| C++ | `field_identifier`, `identifier`, `namespace_identifier`, `statement_identifier`, `type_identifier` | `comment` |
+| CUE | `identifier`, `package_identifier` | `comment` |
+| Clojure | `sym_name`, `sym_ns` | `comment` |
+| ClojureScript | `sym_name`, `sym_ns` | `comment` |
+| Dart | `identifier`, `identifier_dollar_escaped`, `type_identifier` | `comment`, `documentation_comment` |
+| Elixir | `alias`, `identifier` | `comment` |
+| Erlang | `atom`, `var` | `comment` |
+| F# | `identifier` | `block_comment`, `block_comment_content`, `line_comment` |
+| Go | `blank_identifier`, `field_identifier`, `identifier`, `label_name`, `package_identifier`, `type_identifier` | `comment` |
+| HCL | `identifier` | `comment` |
+| Haskell | `constructor`, `field_name`, `label`, `module_id`, `name`, `variable` | `comment` |
+| Java | `identifier`, `type_identifier` | `block_comment`, `line_comment` |
+| JavaScript | `identifier`, `private_property_identifier`, `property_identifier`, `shorthand_property_identifier`, `shorthand_property_identifier_pattern`, `statement_identifier`, `type_identifier` | `comment`, `html_comment` |
+| Julia | `identifier`, `macro_identifier` | `block_comment`, `line_comment` |
+| Kotlin | `interpolated_identifier`, `simple_identifier`, `type_identifier` | `line_comment`, `multiline_comment` |
+| Lua | `identifier` | `comment` |
+| OCaml | `class_name`, `class_type_name`, `constructor_name`, `field_name`, `instance_variable_name`, `label_name`, `method_name`, `module_name`, `module_type_name`, `type_constructor`, `type_variable`, `value_name` | `comment` |
+| Objective-C | `field_identifier`, `identifier`, `method_identifier`, `statement_identifier`, `type_identifier` | `comment` |
+| PHP | `name` | `comment` |
+| Perl | `identifier`, `varname` | `comment` |
+| Protocol Buffers | `identifier` | `comment` |
+| Python | `identifier` | `comment` |
+| R | `identifier` | `comment` |
+| Ruby | `class_variable`, `constant`, `global_variable`, `hash_key_symbol`, `identifier`, `instance_variable` | `comment` |
+| Rust | `field_identifier`, `identifier`, `metavariable`, `shorthand_field_identifier`, `type_identifier` | `block_comment`, `doc_comment`, `inner_doc_comment_marker`, `line_comment`, `outer_doc_comment_marker` |
+| SQL | `identifier` | `comment`, `marginalia` |
+| Scala | `identifier`, `operator_identifier`, `type_identifier` | `block_comment`, `comment` |
+| Swift | `simple_identifier`, `type_identifier` | `comment`, `multiline_comment` |
+| TypeScript | `identifier`, `private_property_identifier`, `property_identifier`, `shorthand_property_identifier`, `shorthand_property_identifier_pattern`, `statement_identifier`, `type_identifier` | `comment`, `html_comment` |
+| YAML | none | `comment` |
+| Zig | `identifier` | `comment` |
+| Zsh | `variable_name` | `comment` |
+
+`import_bindings` is `extracted` for TypeScript, JavaScript, Go and Python, with
+`imports` listing one object per imported specifier: `start_line`, `end_line`,
+`specifier` (as written, without quotes; Python relative modules keep their
+dots), `bindings` (`imported`, `local`, `type_only`, and `local_inferred: true`
+for a Go import without a name, whose local name is the one goimports assumes
+from the path), `side_effect_only` and `names_unknown`. `imported` is the
+imported name, `default`, `*` for a whole module under one name, or `=` for
+TypeScript `import x = require("y")`. `type_only` is set by `import type`,
+`import typeof` and per-specifier `type`. Go's grouped `import (...)` gives one
+object per spec; Python's `import a, b` gives one per module. Re-exports
+(`export … from`), `import x = A.B` aliases, dynamic `import()` and `require()`
+calls are not import statements. Every other language says `not_extracted` and
+has no `imports` field. Capabilities `optional_local_only_features` keys
+`symbols_outline_tokens` and `symbols_outline_import_bindings`, with their
+languages in `feature_languages`, declare both.
+
+## Import targets
+
+In `snapshot` and `edges` streams (every format) every `IMPORTS` relation carries,
+after its existing evidence, one entry per specifier that reached its target,
+saying where that specifier resolves in the snapshot's own tree:
+
+| `kind` | `file_path` | Meaning |
+| --- | --- | --- |
+| `import_target_file` | The resolved file | A file in the tree |
+| `import_target_declared_package` | The declaring manifest | Named in a package manifest of the tree |
+| `import_target_builtin` | (none) | The runtime's or standard library's own module |
+| `import_target_unresolved` | (none) | Graph looked and found nothing |
+| `import_target_not_classified` | (none) | Graph does not classify this specifier |
+
+`detail` is the specifier as the import scanner read it, and the entries carry
+no lines. All entries on one relation share one kind. Several entries appear
+only when several specifiers of one file reach one file (`./util` and
+`./util.ts`); the relation, which keeps its first specifier's
+`import_statement` evidence as before, lists each. The `fast` profile, which
+drops evidence, keeps these entries. Relations, their ids and every other field
+are unchanged; manifests are read from the snapshot's tree through its content
+reader, so `--commit` classifies against that commit. Interactive and search
+snapshots (`query`, `neighbors`, `impact`, `def`) do not carry the entries.
+
+| Language | Declared | Builtin | Otherwise |
+| --- | --- | --- | --- |
+| TypeScript, JavaScript | The package (`@scope/name` or first segment) is in `dependencies`, `devDependencies`, `peerDependencies` or `optionalDependencies` of the nearest `package.json` at or above the file, or its `@types/` package is; or it is the `name` of a `package.json` in the tree | `node:` and `bun:` specifiers, Node's unprefixed core modules, and `bun` | Unresolved, including a root `tsconfig.json` alias with no target file and an alias from any other `tsconfig.json`, which the engine does not follow |
+| Go | Within the module path of the nearest `go.mod`, or of a module it requires | `C`, and paths whose first element has no dot | Unresolved |
+| Python | The top-level module equals, under PEP 503 normalization, a distribution in the nearest directory's `pyproject.toml` (`[project]` dependencies and optional dependencies, `[dependency-groups]`, Poetry tables) or `requirements*.txt`, or the project's own name | The standard library (CPython 3.14's module names plus those removed since 3.11) | Relative: unresolved; bare: not classified, since a distribution's import name need not be its own name |
+| Any other | | | A file target says `import_target_file`; any other target is not classified |
+
+Packages of a nested Go module resolve to files only for the root `go.mod`'s
+module today, so such an import says declared by the nested `go.mod`.
+Capability `optional_local_only_features.import_target_classification`, with its
+languages in `feature_languages`, declares it.
+
 ## Compact snapshot NDJSON v1
 
 `snapshot --format ndjson` remains the default interoperable object stream.

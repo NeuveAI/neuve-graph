@@ -27,7 +27,8 @@ import (
 // v13 retires omissions of live-parse-proven Erlang named body self calls.
 // v14 retires summaries written before W_SUBMODULE_NOT_READ and
 // W_GO_BUILD_EXCLUDED named the source a stream did not read.
-const providerRecordsCacheVersion = "provider-records-v14-" + IdentityRevision
+// v15 retires streams whose IMPORTS relations lack import target evidence.
+const providerRecordsCacheVersion = "provider-records-v15-" + IdentityRevision
 
 // cachedProviderRecords is the on-disk envelope for a cached record stream. The
 // key alone is authoritative (sha256 over version+commit+tree+mode+profile+

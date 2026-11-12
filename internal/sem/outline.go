@@ -28,21 +28,37 @@ type OutlineNode struct {
 }
 
 func parseWithOutline(spec profileSpec, langSpec languageSpec, path, content string) ([]Entity, string, ParseStatus, *FileOutlineRecord) {
+	entities, language, status, outline, _ := parseWithOutlineTokens(spec, langSpec, path, content)
+	return entities, language, status, outline
+}
+
+// parseWithOutlineTokens also returns the tokens record when spec.tokens asks
+// for it, extracted from the same tree as the outline.
+func parseWithOutlineTokens(spec profileSpec, langSpec languageSpec, path, content string) ([]Entity, string, ParseStatus, *FileOutlineRecord, *FileTokensRecord) {
 	if !spec.outline {
 		entities, language, status := parseWithProfile(TreeSitterParser{}, spec, langSpec, path, content)
-		return entities, language, status, nil
+		return entities, language, status, nil, nil
 	}
 	outline := &FileOutlineRecord{}
-	entities, language, status := (TreeSitterParser{outline: outline}).ParseWithStatus(path, content)
+	var tokens *FileTokensRecord
+	if spec.tokens {
+		tokens = &FileTokensRecord{}
+	}
+	entities, language, status := (TreeSitterParser{outline: outline, tokens: tokens}).ParseWithStatus(path, content)
 	if useFastCFamilyParser(spec, langSpec) {
 		// These profiles normally use structural extraction without a tree. Keep
 		// their symbol inventory while parsing once for the requested outline.
 		entities = fastCFamilyEntities(path, content, langSpec.language)
 	}
+	// A file without an outline has no tokens record either, for the same
+	// reason, which the file's partial failure already states.
 	if outline.RecordType == "" || status.ParseError || status.Partial {
-		outline = nil
+		outline, tokens = nil, nil
 	}
-	return entities, language, status, outline
+	if tokens != nil && tokens.RecordType == "" {
+		tokens = nil
+	}
+	return entities, language, status, outline, tokens
 }
 
 func extractFileOutline(path, language string, root *sitter.Node, src, parsed []byte, lineOffset int) FileOutlineRecord {
