@@ -99,8 +99,10 @@ var directivePatterns = map[string][]*regexp.Regexp{
 		// analysistest expectations.
 		regexp.MustCompile(`^//\s*want\s`),
 	},
-	"C":          {fallThroughComment},
-	"Java":       {fallThroughComment},
+	"C": {fallThroughComment},
+	// javac translates Unicode escapes before it reads comments, so
+	// `\u000a` in a comment ends it and the rest of the line is code.
+	"Java":       {fallThroughComment, regexp.MustCompile(`\\u+[0-9A-Fa-f]{4}`)},
 	"JavaScript": {fallThroughComment},
 	"TypeScript": {fallThroughComment},
 }
@@ -132,7 +134,32 @@ func directiveComment(language, text string) bool {
 			return true
 		}
 	}
+	if commentHoldsHiddenBreakOrSpace(text) {
+		return true
+	}
 	return !commentLooksLikeProse(language, text)
+}
+
+// commentHoldsHiddenBreakOrSpace reports whether a comment holds a character
+// that is neither printable text nor plain layout: a Unicode line or paragraph
+// separator, NEL (U+0085), vertical tab, form feed, any other C0 or C1 control
+// character except tab, line feed and carriage return, or any space other than
+// U+0020 (category Zs, and U+FEFF). Some compilers end a line at such a
+// character (tsc at U+2028 and U+2029, C# also at U+0085) while the grammar
+// keeps one comment, so the comment must be compared by text.
+func commentHoldsHiddenBreakOrSpace(text string) bool {
+	for _, r := range text {
+		switch {
+		case r == '\t' || r == '\n' || r == '\r':
+		case r < 0x20 || r >= 0x7f && r <= 0x9f:
+			return true
+		case r == 0x2028 || r == 0x2029 || r == 0xFEFF:
+			return true
+		case r != ' ' && unicode.Is(unicode.Zs, r):
+			return true
+		}
+	}
+	return false
 }
 
 // commentLooksLikeProse is the shape rule. After the comment marker (or a

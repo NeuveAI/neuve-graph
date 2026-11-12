@@ -351,7 +351,15 @@ establish](#what-the-leaves-do-and-do-not-establish)).
    `nosec`, `nocov` or `skipcq` are often one word, and no list of them can be
    complete). So `// TODO: x`, `//nolint`, `// explain`, `# [tool]`, `// x=1`,
    `// 3rd` and an empty `/**/` are flagged, and `// This loop retries.` is
-   not.
+   not. A comment holding any character that is neither printable text nor
+   plain layout is flagged as well, whatever its words: a Unicode line or
+   paragraph separator (U+2028, U+2029), U+0085, vertical tab, form feed, any
+   other C0 or C1 control character except tab, line feed and carriage return,
+   and any space other than U+0020 (category Zs, and U+FEFF), because some
+   compilers end a line there (tsc at U+2028 and U+2029, C# also at U+0085)
+   while the grammar keeps one comment. Ordinary non-ASCII letters, accented
+   or CJK, and emoji are printable text. In Java a comment holding a Unicode
+   escape (`\u` with any number of `u`s and four hex digits) is flagged.
 
 Capability `optional_local_only_features.symbols_outline_token_directives`,
 with its languages in `feature_languages` (today the same as
@@ -443,10 +451,14 @@ same tree-sitter tree. They do not mean the same behaviour:
 - Source positions the program can observe (`__LINE__`, `line!()`, stack
   traces) change with layout, and so does source text the program can read
   (`Function.prototype.toString()`, Python's `inspect.getsource()`).
-- An unconfirmed risk for Ruby, found in review and not checked on a current
+- Unconfirmed risks for Ruby, found in review and not checked on a current
   Ruby: a blank line before a leading-dot method chain (`x = [1]`, a blank
-  line, `.size`) may change how Ruby parses it, while the rule above reads it
-  as layout.
+  line, `.size`), or a comment line in the same place (which Ruby 2.6
+  rejects), may change how Ruby parses it, while the rule above reads it as
+  layout.
+- Java translates Unicode escapes before it reads comments, so
+  `// … \u000a code` turns the rest of the line into code. The tree does not
+  model that; such comments are flagged directive.
 
 Literals whose value depends on where the closing delimiter sits (Java text
 blocks, C# raw strings, Elixir heredocs and sigils, Ruby heredocs, and every
@@ -457,7 +469,10 @@ A consumer that wants to decide that a change is layout only must, besides
 equal leaves, compare the stretches between consecutive compared leaves, and
 the file's leading stretch (before the first) and trailing stretch (after the
 last). A stretch is everything between the two leaves, the bytes of any
-comment left out of the comparison included. Each stretch keeps its class
+comment left out of the comparison included. The stretch's line-break test is
+about line feeds only; a comment holding any other line terminator (U+2028,
+U+2029, U+0085, a form feed or a vertical tab) is flagged directive, so it is
+compared by text rather than left in a stretch. Each stretch keeps its class
 (nothing, spaces on one line, or at least one line break), and a line feed
 anywhere in the stretch, inside a comment too, makes it a line break: a block
 comment that spans a line ends a statement in TypeScript

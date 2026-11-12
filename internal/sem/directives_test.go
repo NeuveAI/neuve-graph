@@ -1,6 +1,7 @@
 package sem
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -214,4 +215,79 @@ func TestPythonIndentationIsDeclaredSignificant(t *testing.T) {
 			t.Errorf("%s is declared indentation-significant but not a tokens language", language)
 		}
 	}
+}
+
+// A comment holding a character that is neither printable text nor plain
+// layout is flagged directive, whatever its words: some compilers end a line
+// there (tsc at U+2028 and U+2029, C# also at U+0085) while the grammar keeps
+// one comment, so a consumer must compare it by text. Ordinary non-ASCII
+// letters in prose are not such characters.
+func TestDirectiveCommentsWithHiddenBreaksOrSpaces(t *testing.T) {
+	hidden := []string{"\u2028", "\u2029", "\u0085", "\v", "\f", "\x01", "\x1b", "\u00a0", "\u2007", "\u3000", "\ufeff"}
+	forms := []struct{ path, before, comment, after string }{
+		{"a.ts", "function f() { return ", "/* see the%snote below */", " 1; }\n"},
+		{"a.cs", "class A { int x = 1; ", "// see the%snote below", "\n}\n"},
+		{"a.go", "package p\n\n", "// See the%snote below.", "\nvar x = 1\n"},
+		{"a.py", "x = 1  ", "# see the%snote below", "\n"},
+	}
+	for _, form := range forms {
+		for _, char := range hidden {
+			comment := fmt.Sprintf(form.comment, char)
+			source := form.before + comment + form.after
+			if !tokensAvailable(t, form.path, source) {
+				t.Errorf("%s %q: no extracted record", form.path, char)
+				continue
+			}
+			// A mask may rewrite the character (C# strips U+FEFF): the span is
+			// then a rewritten row, flagged error, which is never decided by
+			// code either.
+			if rewrittenOver(t, form.path, source, comment) {
+				continue
+			}
+			if !directiveFlags(t, form.path, source, comment) {
+				t.Errorf("%s: comment holding %q is not flagged directive", form.path, char)
+			}
+		}
+	}
+	// Java: javac translates Unicode escapes before it reads comments.
+	for _, comment := range []string{"// see the note \\u000a int y = 2;", "// see the note \\uuu000A here", "/* see \\u002a/ the note */"} {
+		if !directiveFlags(t, "A.java", "class A {\n  "+comment+"\n}\n", comment) {
+			t.Errorf("Java comment with a Unicode escape %q is not flagged", comment)
+		}
+	}
+	for _, prose := range []string{"// Café crème is served here.", "// \u65e5\u672c\u8a9e\u306e\u8aac\u660e \u3053\u3053\u306b", "// Ship it \U0001F680 today.", "// Naïve résumé of the flow."} {
+		if directiveFlags(t, "a.ts", prose+"\nf();\n", prose) {
+			t.Errorf("prose %q with ordinary non-ASCII letters is flagged", prose)
+		}
+	}
+}
+
+// Under the consumer's rule the reviewer's two pairs read as a change.
+func TestHiddenLineTerminatorInCommentIsTokenChange(t *testing.T) {
+	tsBase := "function f() { return /* see the note below */ 1; }\n"
+	csBase := "class A { int x = 1; // see the note int y = 2;\n}\n"
+	pairs := []struct{ path, base, head string }{
+		{"a.ts", tsBase, "function f() { return /* see the\u2028note below */ 1; }\n"},
+		{"a.ts", tsBase, "function f() { return /* see the\u2029note below */ 1; }\n"},
+		{"a.cs", csBase, "class A { int x = 1; // see the note\u2028int y = 2;\n}\n"},
+		{"a.cs", csBase, "class A { int x = 1; // see the note\u2029int y = 2;\n}\n"},
+		{"a.cs", csBase, "class A { int x = 1; // see the note\u0085int y = 2;\n}\n"},
+	}
+	for _, p := range pairs {
+		if tokensAvailable(t, p.path, p.head) && consumerNoTokenChange(t, p.path, p.base, p.head) {
+			t.Errorf("%s: %q read as no token change", p.path, p.head)
+		}
+	}
+}
+
+func rewrittenOver(t *testing.T, path, source, part string) bool {
+	t.Helper()
+	start := strings.Index(source, part)
+	end := start + len(part)
+	for _, row := range fileTokensFor(t, path, source).Leaves {
+		if row[1] < end && row[2] > start && row[5]&tokenFlagRewritten != 0 && row[5]&tokenFlagError != 0 {
+			return true
+		}
+	}
+	return false
 }
