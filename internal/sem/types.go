@@ -981,7 +981,21 @@ func asyncCallNames(body symbolBody) []string {
 // asyncCallSites maps each name asyncCallNames finds to the offset in the
 // body where the name of its first async call is written.
 func asyncCallSites(body symbolBody) map[string]int {
-	stripped := body.stripped
+	return asyncCallSitesIn(body.stripped)
+}
+
+// asyncCallCodeSites is asyncCallSites over the body's code view: for each
+// name, where its first async call is written in code, which is the one a
+// line may point at. A name whose every match is in a comment, a string or
+// other text that is not code has none.
+func asyncCallCodeSites(body symbolBody) map[string]int {
+	if body.code == "" {
+		return asyncCallSitesIn(body.stripped)
+	}
+	return asyncCallSitesIn(body.code)
+}
+
+func asyncCallSitesIn(stripped string) map[string]int {
 	seen := map[string]int{}
 	addMatches := func(re *regexp.Regexp) {
 		for _, match := range re.FindAllStringSubmatchIndex(stripped, -1) {
@@ -2905,7 +2919,28 @@ func receiverCalls(body symbolBody) []receiverCall {
 		seen[key] = true
 		out = append(out, receiverCall{Receiver: receiver, Method: method, Args: args, Site: m[4] + 1})
 	}
-	return out
+	return withCodeSites(body, out, receiverCalls, func(call receiverCall) string { return call.Receiver + "." + call.Method }, func(call *receiverCall) *int { return &call.Site })
+}
+
+// withCodeSites gives each call a scanner found in body the site of the
+// first call of the same spelling (key) in body's code view, or 0 when code
+// shows none: the scanner reads the generic mask, which knows no Python `#`
+// comment, no string across lines, no regular expression, JSX text or
+// template nested in a template, so its own first match can be text. The calls
+// themselves -- which are found, in what order, with what arguments -- are
+// the generic mask's, as before.
+func withCodeSites[T any](body symbolBody, calls []T, scan func(symbolBody) []T, key func(T) string, site func(*T) *int) []T {
+	if body.code == "" || body.code == body.stripped || len(calls) == 0 {
+		return calls
+	}
+	first := map[string]int{}
+	for _, call := range scan(symbolBody{text: body.text, stripped: body.code}) {
+		first[key(call)] = *site(&call)
+	}
+	for i := range calls {
+		*site(&calls[i]) = first[key(calls[i])]
+	}
+	return calls
 }
 
 // typedMethodCall is a `new Type().method(` / `Type().method(` call site. It is
@@ -2991,7 +3026,7 @@ func chainedConstructorCalls(body symbolBody) []typedMethodCall {
 	for i, m := range matches {
 		add(m[1], m[2], m[1]+"()."+m[2], sites[i])
 	}
-	return out
+	return withCodeSites(body, out, chainedConstructorCalls, func(call typedMethodCall) string { return call.TypeName + "." + call.Method }, func(call *typedMethodCall) *int { return &call.Site })
 }
 
 func returnedReceiverCalls(body symbolBody) []returnedMethodCall {
@@ -3014,7 +3049,7 @@ func returnedReceiverCalls(body symbolBody) []returnedMethodCall {
 		seen[key] = true
 		out = append(out, returnedMethodCall{Factory: factory, Method: m[2], Detail: factory + "()." + m[2], Site: sites[i]})
 	}
-	return out
+	return withCodeSites(body, out, returnedReceiverCalls, func(call returnedMethodCall) string { return call.Detail }, func(call *returnedMethodCall) *int { return &call.Site })
 }
 
 func chainedConstructorReturnCalls(body symbolBody) []typedMethodChainCall {
@@ -3041,7 +3076,9 @@ func chainedConstructorReturnCalls(body symbolBody) []typedMethodChainCall {
 			add(m[1], m[2], m[3], m[1]+"()."+m[2]+"()."+m[3], sites[i])
 		}
 	}
-	return out
+	return withCodeSites(body, out, chainedConstructorReturnCalls, func(call typedMethodChainCall) string {
+		return call.TypeName + "." + call.FirstMethod + "." + call.Method
+	}, func(call *typedMethodChainCall) *int { return &call.Site })
 }
 
 func chainedConstructorDeepReturnCalls(body symbolBody) []typedMethodDeepChainCall {
@@ -3073,7 +3110,9 @@ func chainedConstructorDeepReturnCalls(body symbolBody) []typedMethodDeepChainCa
 			add(m[1], []string{m[2], m[3], m[4]}, m[1]+"()."+m[2]+"()."+m[3]+"()."+m[4], sites[i])
 		}
 	}
-	return out
+	return withCodeSites(body, out, chainedConstructorDeepReturnCalls, func(call typedMethodDeepChainCall) string {
+		return call.TypeName + "." + strings.Join(call.Methods, ".")
+	}, func(call *typedMethodDeepChainCall) *int { return &call.Site })
 }
 
 func returnedReceiverChainCalls(body symbolBody) []returnedMethodChainCall {
@@ -3096,7 +3135,7 @@ func returnedReceiverChainCalls(body symbolBody) []returnedMethodChainCall {
 		seen[key] = true
 		out = append(out, returnedMethodChainCall{Factory: factory, FirstMethod: m[2], Method: m[3], Detail: factory + "()." + m[2] + "()." + m[3], Site: sites[i]})
 	}
-	return out
+	return withCodeSites(body, out, returnedReceiverChainCalls, func(call returnedMethodChainCall) string { return call.Detail }, func(call *returnedMethodChainCall) *int { return &call.Site })
 }
 
 func returnedReceiverDeepChainCalls(body symbolBody) []returnedMethodDeepChainCall {
@@ -3120,7 +3159,7 @@ func returnedReceiverDeepChainCalls(body symbolBody) []returnedMethodDeepChainCa
 		seen[key] = true
 		out = append(out, returnedMethodDeepChainCall{Factory: factory, Methods: methods, Detail: factory + "()." + strings.Join(methods, "()."), Site: sites[i]})
 	}
-	return out
+	return withCodeSites(body, out, returnedReceiverDeepChainCalls, func(call returnedMethodDeepChainCall) string { return call.Detail }, func(call *returnedMethodDeepChainCall) *int { return &call.Site })
 }
 
 // submatchesWithSites returns re's matches in s as FindAllStringSubmatch

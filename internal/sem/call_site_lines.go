@@ -44,18 +44,77 @@ const callLineLegacy = -1
 // file line of its first byte. Every scanner reads a copy of text whose masks
 // keep its length and every newline, so an offset into any of them counts the
 // same newlines as an offset into text.
+//
+// code is text through the language's own rule of what is code (see
+// callCodeView): every byte of a comment, a string, template text, a regular
+// expression or JSX text blank. A scanner's match is placed only where code
+// shows it, so a line always rests on code; with code blank throughout (the
+// rule could not be told) nothing a text scan found is placed.
 type callSiteLines struct {
 	declared  bool
 	from      SymbolRecord
 	text      string
+	code      string
 	firstLine int
 	// textStart is the file byte of text's first byte when text is a slice
 	// of the file, or -1 when its masks moved bytes (they never move lines).
 	textStart int
 }
 
-func newCallSiteLines(from SymbolRecord, language, text string, firstLine int) callSiteLines {
-	return callSiteLines{declared: callSiteLineLanguageSet[language], from: from, text: text, firstLine: firstLine, textStart: -1}
+func newCallSiteLines(from SymbolRecord, language, text, code string, firstLine int) callSiteLines {
+	return callSiteLines{declared: callSiteLineLanguageSet[language], from: from, text: text, code: code, firstLine: firstLine, textStart: -1}
+}
+
+// callCodeView returns text with every byte that is not code by language's
+// own rule blanked (newlines kept, so offsets and lines are text's), for a
+// language whose calls say where they are; "" for any other.
+//
+//   - Go: comments, interpreted and raw strings and runes, which is what the
+//     generic mask (stripCodeLiteralsAndComments) knows; stripped is that mask
+//     of text when the caller already has it.
+//   - Python: `#` comments and strings, triple-quoted ones across lines.
+//   - TypeScript and JavaScript: the syntax tree's comments, strings,
+//     template text (a `${}` substitution is code, a template nested in it is
+//     text again), regular expressions, JSX text, and what the parser read as
+//     blank. text must be the file's bytes from textStart; when it is not, or
+//     the tree cannot tell, the view is blank throughout.
+func callCodeView(language, text, stripped string, jsScan *jsScanState, textStart int) string {
+	switch language {
+	case "Go":
+		if len(stripped) == len(text) {
+			return stripped
+		}
+		return stripCodeLiteralsAndComments(text)
+	case "Python":
+		return stripPythonLiteralsAndComments(text)
+	case "JavaScript", "TypeScript":
+		if view, ok := jsScan.codeViewOf(text, textStart); ok {
+			return view
+		}
+		return blankCode(text)
+	}
+	return ""
+}
+
+// blankCode is a code view with no code: text's newlines and nothing else.
+func blankCode(text string) string {
+	view := []byte(text)
+	for i := range view {
+		if view[i] != '\n' && view[i] != '\r' {
+			view[i] = ' '
+		}
+	}
+	return string(view)
+}
+
+// isCodeAt reports whether the name a scanner matched at offset of text is
+// code: code shows it there. It holds for any offset when no code view is
+// kept (a language that does not promise call lines).
+func (c callSiteLines) isCodeAt(offset int) bool {
+	if c.code == "" {
+		return true
+	}
+	return offset >= 0 && offset < len(c.code) && c.code[offset] != ' ' && c.code[offset] != '\t'
 }
 
 // at returns the line of offset in text: callLineLegacy for a language that
@@ -71,7 +130,7 @@ func (c callSiteLines) in(text string, offset int) int {
 	if !c.declared {
 		return callLineLegacy
 	}
-	if offset < 0 || offset > len(text) {
+	if offset < 0 || offset > len(text) || !c.isCodeAt(offset) {
 		return 0
 	}
 	return c.checked(c.firstLine + strings.Count(text[:offset], "\n"))
@@ -223,7 +282,11 @@ func withCallLine(relations []RelationRecord, from SymbolRecord, line int) []Rel
 // signature, JSX text) and the entry gets no line. Without a whole tree, and in
 // every other language, it is the scanner's own first match: the generic call
 // scan's, else (JavaScript) the callable-argument scan's.
-func bareCallLine(sites callSiteLines, callBlock, name string, from SymbolRecord, jsScan *jsScanState, jsNamespaceCalls map[string]struct{}, excluded jsByteSpans, bareSites, argumentSites map[string]int, callsOnly, visibleOnly bool) int {
+//
+// bareSites and argumentSites are the scanners' first matches in callBlock's
+// code view (callCodeView), so the text-scan lines below rest on code. skip,
+// when not nil, passes over a callable argument bound in the caller.
+func bareCallLine(sites callSiteLines, callBlock, name string, from SymbolRecord, jsScan *jsScanState, jsNamespaceCalls map[string]struct{}, excluded jsByteSpans, bareSites, argumentSites map[string]int, callsOnly, visibleOnly bool, skip func(position int) bool) int {
 	if !sites.declared {
 		return callLineLegacy
 	}
@@ -242,7 +305,7 @@ func bareCallLine(sites callSiteLines, callBlock, name string, from SymbolRecord
 		}
 		if jsScan.parsed && !jsScan.depthTruncated {
 			treeLine := 0
-			if position, ok, argument := jsScan.callUseSite(name, start, end, excluded, callsOnly, visibleOnly); ok {
+			if position, ok, argument := jsScan.callUseSite(name, start, end, excluded, callsOnly, visibleOnly, skip); ok {
 				treeLine = sites.checked(jsScan.lineOf(position))
 				if argument {
 					treeLine = referenceLine(treeLine)
@@ -364,7 +427,7 @@ func nextNonSpace(text string, position int) byte {
 // topLevelCallLine is bareCallLine for the file-level caller: its calls are the
 // ones no symbol's source holds, which for TypeScript and JavaScript includes
 // every call inside a test callback (`test("...", () => { subject() })`).
-func topLevelCallLine(sites callSiteLines, topLevel, name string, jsScan *jsScanState, uses *jsTopLevelUses, jsNamespaceCalls map[string]struct{}, bareSites, argumentSites map[string]int, callsOnly, visibleOnly bool) int {
+func topLevelCallLine(sites callSiteLines, topLevel, name string, jsScan *jsScanState, uses *jsTopLevelUses, jsNamespaceCalls map[string]struct{}, bareSites, argumentSites map[string]int, callsOnly, visibleOnly bool, skip func(position int) bool) int {
 	if !sites.declared {
 		return callLineLegacy
 	}
@@ -377,7 +440,11 @@ func topLevelCallLine(sites callSiteLines, topLevel, name string, jsScan *jsScan
 		}
 		if jsScan.parsed && !jsScan.depthTruncated {
 			treeLine := 0
-			if position, ok, argument := uses.first(name, callsOnly, visibleOnly); ok {
+			position, ok, argument := uses.first(name, callsOnly, visibleOnly)
+			if skip != nil {
+				position, ok, argument = jsScan.callUseSite(name, 0, jsScan.contentLen, uses.spans, callsOnly, visibleOnly, skip)
+			}
+			if ok {
 				treeLine = sites.checked(jsScan.lineOf(position))
 				if argument {
 					treeLine = referenceLine(treeLine)
@@ -408,6 +475,8 @@ type jsTopLevelUses struct {
 	calls, arguments               map[string]int
 	visibleCalls, visibleArguments map[string]int
 	namespace                      map[string]int
+	// spans are the file's symbols, whose uses are not the file's.
+	spans jsByteSpans
 }
 
 // first returns where name's first file-level use is, and whether that use is
@@ -435,6 +504,7 @@ func (s *jsScanState) topLevelUses(symbols []SymbolRecord) *jsTopLevelUses {
 		return uses
 	}
 	spans := s.symbolByteSpans(symbols)
+	uses.spans = spans
 	index := func(list []jsIdentifierUse, all, visible map[string]int) {
 		for _, use := range list {
 			if spans.contains(use.startByte) {

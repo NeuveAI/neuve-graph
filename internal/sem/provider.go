@@ -50,8 +50,10 @@ const (
 	// symbols outside HCL (see ADR 0001). Revision 6 gives every import
 	// statement the syntax tree shows an IMPORTS relation (see ADR 0012).
 	// Revision 7 makes a call relation's evidence say where the call is in
-	// the languages call_site_lines lists (see ADR 0013).
-	IdentityRevision     = "7"
+	// the languages call_site_lines lists (see ADR 0013). Revision 8 places
+	// those lines only on code and drops a TypeScript or JavaScript argument
+	// relation whose name is bound where it is passed (also ADR 0013).
+	IdentityRevision     = "8"
 	defaultMaxParseBytes = 4 * 1024 * 1024
 	// defaultMaxSourceFiles bounds how many files one snapshot will list. The
 	// per-file indexes a snapshot keeps (one file record and its retained symbols)
@@ -1783,6 +1785,27 @@ var jsDeclarationOnlyCallSignaturePattern = regexp.MustCompile(`^\s*(?:export\s+
 // implementation (a `def f(...):` with a body on following lines) is part of an
 // emitted symbol and is already masked, so it is not matched here.
 var pythonEllipsisStubSignaturePattern = regexp.MustCompile(`^\s*(?:async\s+)?def\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^{}]*\)\s*(?:->[^:]+)?:\s*\.\.\.\s*$`)
+
+// stripDeclarationOnlyCallSignaturesLike empties in view, a copy of source
+// with the same lines, the lines stripDeclarationOnlyCallSignatures emptied
+// in source (stripped).
+func stripDeclarationOnlyCallSignaturesLike(source, stripped, view string) string {
+	if stripped == source {
+		return view
+	}
+	sourceLines := strings.Split(source, "\n")
+	strippedLines := strings.Split(stripped, "\n")
+	viewLines := strings.Split(view, "\n")
+	if len(sourceLines) != len(strippedLines) || len(sourceLines) != len(viewLines) {
+		return blankCode(stripped)
+	}
+	for i := range viewLines {
+		if strippedLines[i] != sourceLines[i] {
+			viewLines[i] = strippedLines[i]
+		}
+	}
+	return strings.Join(viewLines, "\n")
+}
 
 func stripDeclarationOnlyCallSignatures(language, content string) string {
 	var pattern *regexp.Regexp
@@ -5792,10 +5815,20 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 			}
 			// sites turns a position the call scanners below record in block
 			// (or in a masked copy of it) into the line the call is on.
-			sites := newCallSiteLines(from, file.Language, block, blockFirstLine)
+			textStart := -1
 			if exact, ok := exactSymbolSource(content, from); ok && len(exact) == len(block) && (file.Language == "JavaScript" || file.Language == "TypeScript") {
-				sites.textStart = from.sourceStartByte
+				textStart = from.sourceStartByte
 			}
+			// blockCode is block with every byte that is not code by the
+			// language's own rule blanked; a line is placed only on code. Go's
+			// rule is the generic mask every scanner already reads, so Go keeps
+			// none and its scanners' own matches stand.
+			blockCode := ""
+			if callSiteLineLanguageSet[file.Language] && file.Language != "Go" {
+				blockCode = callCodeView(file.Language, block, "", jsScan, textStart)
+			}
+			sites := newCallSiteLines(from, file.Language, block, blockCode, blockFirstLine)
+			sites.textStart = textStart
 			if fileNeedsCallScan && !typeLikeKind(from.Kind) && file.Language == "Erlang" {
 				// Erlang call sites carry information the generic scanner cannot
 				// use: a bare call is module-local by language rule, and a remote
@@ -6028,8 +6061,51 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 				// rule an imported alias resolves by), and otherwise the first match
 				// of the scanner that found the name. callsOnly is for a
 				// construction, which only a call can make.
-				bareLine := func(name string, callsOnly, visibleOnly bool) int {
-					return bareCallLine(sites, callBlock, name, from, jsScan, jsNamespaceCalls, objectCallableSpans, bareSites, jsArgumentSites, callsOnly, visibleOnly)
+				//
+				// In TypeScript and JavaScript the text scans' matches it may
+				// fall back to are taken again over the block's code view, so a
+				// name written first in a comment, a string, template text, a
+				// regular expression or JSX text is not taken for the call.
+				placeBlock, placeBareSites, placeArgumentSites := callBlock, bareSites, jsArgumentSites
+				if (file.Language == "JavaScript" || file.Language == "TypeScript") && sites.code != "" {
+					placeBlock = sites.code
+					placeBareSites = callLikeIdentifierSites(placeBlock, file.Language)
+					placeArgumentSites = jsCallableArgumentIdentifierSites(placeBlock)
+				}
+				bareLine := func(name string, callsOnly, visibleOnly bool, skip func(position int) bool) int {
+					return bareCallLine(sites, placeBlock, name, from, jsScan, jsNamespaceCalls, objectCallableSpans, placeBareSites, placeArgumentSites, callsOnly, visibleOnly, skip)
+				}
+				// jsTreeWhole says the syntax tree read this file whole, so it can
+				// tell where a name is bound.
+				jsTreeWhole := (file.Language == "JavaScript" || file.Language == "TypeScript") && jsScan != nil && jsScan.parsed && !jsScan.depthTruncated
+				callerStart, callerEnd := 0, 0
+				if jsTreeWhole {
+					callerStart, callerEnd = jsScan.symbolByteRange(from)
+				}
+				// jsArgumentBinding answers, for a relation to target from name,
+				// whether the identifier name passed as a call argument is a
+				// binding of this file where it is passed (a parameter, a local,
+				// a destructured, loop or catch binding, a class or function
+				// declared in the caller or around it, a module-level binding
+				// when the target is another file's) rather than the target.
+				// unbound reports a relation whose entry would be such an
+				// argument, a reference, with every argument use of name in the
+				// caller bound: nothing hands the target over, so there is no
+				// relation. Otherwise boundHere (nil when the tree cannot tell)
+				// lets the entry pass over the bound uses: a caller that also
+				// hands over the target, or calls it, keeps the relation, at that
+				// place.
+				jsArgumentBinding := func(name string, target SymbolRecord, sameFile, visibleOnly bool) (boundHere func(position int) bool, unbound bool) {
+					if !jsTreeWhole {
+						return nil, false
+					}
+					boundHere = func(position int) bool {
+						return jsScan.localArgumentBinding(name, position, target, sameFile)
+					}
+					if jsScan.argumentUsesAllLocal(name, callerStart, callerEnd, objectCallableSpans, boundHere) && isReferenceLine(bareLine(name, false, visibleOnly, nil)) {
+						return nil, true
+					}
+					return boundHere, false
 				}
 				// Python module-qualified dotted calls (`pkg.mod.fn()`) are resolved
 				// by a dedicated, strictly module-scoped path (emitted after the
@@ -6182,6 +6258,10 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 						if typeLikeKind(to.Kind) {
 							relType = "CONSTRUCTS"
 						}
+						boundHere, unbound := jsArgumentBinding(name, to.SymbolRecord, to.FilePath == from.FilePath, jsAliasHandled)
+						if unbound {
+							continue
+						}
 						emit(RelationRecord{
 							RecordType:    "relation",
 							FromID:        from.ID,
@@ -6192,7 +6272,7 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 							RelationScope: to.Scope,
 							Resolution:    to.Resolution,
 							TargetKind:    "symbol",
-							Evidence:      []Evidence{callSiteEvidence("call_site", from, name, bareLine(name, relType == "CONSTRUCTS", jsAliasHandled))},
+							Evidence:      []Evidence{callSiteEvidence("call_site", from, name, bareLine(name, relType == "CONSTRUCTS", jsAliasHandled, boundHere))},
 							WarningCodes:  []string{},
 						})
 					}
@@ -6217,27 +6297,40 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 								RelationScope: scope,
 								Resolution:    "type_inferred",
 								TargetKind:    "symbol",
-								Evidence:      []Evidence{callSiteEvidence("call_site", from, name, bareLine(name, false, false))},
+								Evidence:      []Evidence{callSiteEvidence("call_site", from, name, bareLine(name, false, false, nil))},
 								WarningCodes:  []string{},
 							})
 							continue
 						}
 					}
 					if jsAliasHandled {
-						for _, relation := range withCallLine(jsAliasExternal, from, bareLine(name, false, true)) {
+						// An imported name is the target of these: any binding of
+						// the name where it is passed is not.
+						boundHere, unbound := jsArgumentBinding(name, SymbolRecord{}, false, true)
+						if unbound {
+							jsAliasExternal = nil
+						}
+						for _, relation := range withCallLine(jsAliasExternal, from, bareLine(name, false, true, boundHere)) {
 							emit(relation)
 						}
 					} else if file.Language == "Python" {
-						for _, relation := range withCallLine(pythonAliasExternal, from, bareLine(name, false, false)) {
+						for _, relation := range withCallLine(pythonAliasExternal, from, bareLine(name, false, false, nil)) {
 							emit(relation)
 						}
 						if pythonGenericAllowed && len(normalTargets) == 0 && !suppressExternal {
-							for _, relation := range withCallLine(importedExternalCallRelationsForName(from, name, importsForCall[name]), from, bareLine(name, false, false)) {
+							for _, relation := range withCallLine(importedExternalCallRelationsForName(from, name, importsForCall[name]), from, bareLine(name, false, false, nil)) {
 								emit(relation)
 							}
 						}
 					} else if len(targets) == 0 && !suppressExternal {
-						for _, relation := range withCallLine(importedExternalCallRelationsForName(from, name, importsForCall[name]), from, bareLine(name, false, false)) {
+						external := importedExternalCallRelationsForName(from, name, importsForCall[name])
+						// As for an import alias above: a binding of the name
+						// where it is passed is not the import.
+						boundHere, unbound := jsArgumentBinding(name, SymbolRecord{}, false, false)
+						if unbound {
+							external = nil
+						}
+						for _, relation := range withCallLine(external, from, bareLine(name, false, false, boundHere)) {
 							emit(relation)
 						}
 					}
@@ -6254,9 +6347,12 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 			var body symbolBody
 			if callableSymbol && (needsAsyncCalls || needsDataFlow || needsFields || spec.callResolution == "full") {
 				body = newSymbolBody(block)
+				body.code = sites.code
 			}
 			if needsAsyncCalls && callableSymbol {
 				asyncSites := asyncCallSites(body)
+				// Where each name's first async call is written in code.
+				asyncCodeSites := asyncCallCodeSites(body)
 				for _, name := range sortedKeysOf(asyncSites) {
 					if name == from.Name {
 						continue
@@ -6284,7 +6380,7 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 							RelationScope: to.Scope,
 							Resolution:    to.Resolution,
 							TargetKind:    "symbol",
-							Evidence:      []Evidence{callSiteEvidence("async_call_site", from, name, sites.callIn(body.stripped, asyncSites[name]))},
+							Evidence:      []Evidence{callSiteEvidence("async_call_site", from, name, sites.callIn(body.stripped, textSite(asyncCodeSites, name)))},
 							WarningCodes:  []string{},
 						})
 					}
@@ -6566,6 +6662,16 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 				topLevelSource = jsScan.topLevelBlock(content, currentFileSymbols)
 			}
 			topLevel := stripDeclarationOnlyCallSignatures(file.Language, topLevelSource)
+			// topLevelCode is topLevel's code view (see blockCode above): for
+			// TypeScript and JavaScript the file's, with the same lines emptied
+			// as topLevel's.
+			topLevelCode := ""
+			switch file.Language {
+			case "Python":
+				topLevelCode = stripPythonLiteralsAndComments(topLevel)
+			case "JavaScript", "TypeScript":
+				topLevelCode = stripDeclarationOnlyCallSignaturesLike(topLevelSource, topLevel, callCodeView(file.Language, topLevelSource, "", jsScan, 0))
+			}
 			if file.Language == "Rust" {
 				topLevel = stripRustCodegenMacroBodies(topLevel)
 			}
@@ -6669,11 +6775,20 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 				}
 				// The top-level text keeps the file's lines (a symbol's lines are
 				// blanked, not removed), so its first byte is line 1.
-				topLevelLines := newCallSiteLines(fileSource, file.Language, topLevel, 1)
+				topLevelLines := newCallSiteLines(fileSource, file.Language, topLevel, topLevelCode, 1)
 				var topLevelUses *jsTopLevelUses
 				if jsScan != nil && topLevelLines.declared {
 					topLevelUses = jsScan.topLevelUses(currentFileSymbols)
 				}
+				// As for a symbol: TypeScript and JavaScript text-scan matches
+				// are taken again over the code view.
+				topLevelPlace, topLevelPlaceSites, topLevelPlaceArgumentSites := topLevel, topLevelSites, topLevelArgumentSites
+				if (file.Language == "JavaScript" || file.Language == "TypeScript") && topLevelCode != "" {
+					topLevelPlace = topLevelCode
+					topLevelPlaceSites = callLikeIdentifierSites(topLevelCode, file.Language)
+					topLevelPlaceArgumentSites = jsCallableArgumentIdentifierSites(topLevelCode)
+				}
+				topLevelTreeWhole := topLevelUses != nil && jsScan.parsed && !jsScan.depthTruncated
 				for _, name := range sortedKeysOf(topLevelNames) {
 					inputs := pythonCallImportBinding(name, fileSource, file.Language, pythonBareScopes, symbolsByShortName, importsByName, file.Path, manifestImports, knownFiles, readContent)
 					rawCandidates := inputs.rawCandidates
@@ -6744,6 +6859,20 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 						if jsCallableArgumentOnly[name] && typeLikeKind(to.Kind) {
 							continue
 						}
+						// The same at file level: a name bound where it is passed
+						// (a test callback's parameter or local, a loop binding, a
+						// module-level binding when the target is another file's)
+						// is not the target: no relation.
+						var boundHere func(position int) bool
+						if topLevelTreeWhole {
+							target, sameFile := to.SymbolRecord, to.FilePath == file.Path
+							boundHere = func(position int) bool {
+								return jsScan.localArgumentBinding(name, position, target, sameFile)
+							}
+							if jsScan.argumentUsesAllLocal(name, 0, jsScan.contentLen, topLevelUses.spans, boundHere) && isReferenceLine(topLevelCallLine(topLevelLines, topLevelPlace, name, jsScan, topLevelUses, jsNamespaceCalls, topLevelPlaceSites, topLevelPlaceArgumentSites, false, jsAliasHandled, nil)) {
+								continue
+							}
+						}
 						relType := "CALLS"
 						if typeLikeKind(to.Kind) {
 							relType = "CONSTRUCTS"
@@ -6758,11 +6887,11 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 							RelationScope: to.Scope,
 							Resolution:    to.Resolution,
 							TargetKind:    "symbol",
-							Evidence:      []Evidence{callSiteEvidence("top_level_call_site", fileSource, name, topLevelCallLine(topLevelLines, topLevel, name, jsScan, topLevelUses, jsNamespaceCalls, topLevelSites, topLevelArgumentSites, relType == "CONSTRUCTS", jsAliasHandled))},
+							Evidence:      []Evidence{callSiteEvidence("top_level_call_site", fileSource, name, topLevelCallLine(topLevelLines, topLevelPlace, name, jsScan, topLevelUses, jsNamespaceCalls, topLevelPlaceSites, topLevelPlaceArgumentSites, relType == "CONSTRUCTS", jsAliasHandled, boundHere))},
 							WarningCodes:  []string{},
 						})
 					}
-					for _, relation := range withCallLine(pythonIncompleteAliasExternal, fileSource, topLevelCallLine(topLevelLines, topLevel, name, jsScan, topLevelUses, jsNamespaceCalls, topLevelSites, topLevelArgumentSites, false, false)) {
+					for _, relation := range withCallLine(pythonIncompleteAliasExternal, fileSource, topLevelCallLine(topLevelLines, topLevelPlace, name, jsScan, topLevelUses, jsNamespaceCalls, topLevelPlaceSites, topLevelPlaceArgumentSites, false, false, nil)) {
 						emit(relation)
 					}
 				}

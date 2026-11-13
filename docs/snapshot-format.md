@@ -94,26 +94,52 @@ TypeScript), the same for all four kinds:
   written in the call that produced the relation. For a call spanning lines
   (`store\n  .save()`, `fn(\n  arg,\n)`) that is the line of the callee's
   name, the one a reader needs.
+- The line rests on code. Every scan reads the caller through its
+  language's own rule of what is code: in Go comments, strings and raw strings;
+  in Python `#` comments and strings, triple-quoted ones across lines; in
+  TypeScript and JavaScript the syntax tree's comments, strings, template text
+  (a `${}` substitution is code, a template nested in it is text again),
+  regular expressions and JSX text. A spelling written there is never the
+  line; the first one written in code is.
 - When the caller writes that spelling more than once, it is the first in
-  source order. One relation per caller, target and family stays the rule; a
-  target the caller reaches through two spellings (`helper()` and
+  source order, with these exceptions in TypeScript and JavaScript, where the
+  line is a later real call of the target: an awaited call with type
+  arguments (`await load<T>()`) is not read by the awaited-call scan, and a
+  call whose type arguments hold braces (`load<{ id: string }>()`) is read by
+  neither the text scan nor, as a call, the syntax tree. On the Neuve
+  repository's 420-commit head 5 entries (in 4 callers) are of these shapes;
+  on this repository none. One relation per caller, target and family stays
+  the rule; a target the caller reaches through two spellings (`helper()` and
   `this.helper()`) keeps the entry the engine emitted first, with that
   spelling's line.
 - A symbol caller's line lies inside the symbol's span. A file-level caller's
   line is outside every symbol's source.
 - Both are absent when the engine cannot tell where the call is: the text scan
-  found the name in something that is not a call (a method declaration or
-  signature, a word in template or JSX text, a regular expression, a private
-  member call `this.#name(` that a bare name cannot resolve to with certainty,
-  a Python or Go name whose `(` opens the next statement). The relation is
-  kept; its entry never carries the caller's span in its place.
+  found the name only in something that is not a call (a method declaration
+  or signature, a comment, a string or docstring, template or JSX text, a
+  regular expression, a private member call `this.#name(` that a bare name
+  cannot resolve to with certainty, a Python or Go name whose `(` opens the
+  next statement). The relation is kept; its entry never carries the caller's
+  span in its place. A TypeScript or JavaScript file whose parse failed, or
+  whose walk stopped at the depth limit, has no syntax tree to tell code from
+  text, so a call the tree did not record gets no line there.
+- In a TypeScript or JavaScript file with a syntax error the parser's
+  recovery decides what is code: near the error it can read a string, a
+  template or a regular expression as code, and where the tree shows no use of
+  the name the line comes from the text scan, which declines a
+  declaration-shaped match but cannot rule out every non-call.
 - `form`, when present, is `reference`: the target's name is handed over at
   that line as a value (`xs.map(double)`, `useCallback(handler)`) and not
   called there. It is set only when the caller never calls the target; a
   caller that both passes and calls it reports the first call, unmarked.
   Absent, a call or construction is written at that line. In TypeScript and
   JavaScript the only shape that gives a call relation without a call is a
-  name passed as a call argument, which is the one marked; in Python and Go no
+  name passed as a call argument, which is the one marked. A name bound where
+  it is passed (a parameter, a local, a destructured, loop or catch binding, a
+  class or function declared in the caller or around it, a module-level
+  binding when the target is in another file) is not the target, so it gives
+  no relation, and a caller that passes such a binding and also the target
+  carries the target's line. In Python and Go no
   scanner turns a name handed over as a value into a call relation, so an
   unmarked entry is a call in all four.
 

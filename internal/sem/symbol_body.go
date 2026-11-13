@@ -15,6 +15,11 @@ package sem
 type symbolBody struct {
 	text     string
 	stripped string
+	// code is text through its language's own rule of what is code
+	// (callCodeView), for a language whose calls say where they are, else "".
+	// The scanners find calls in stripped, as always; a call's site, which a
+	// line may point at, comes from code (withCodeSites).
+	code string
 }
 
 func newSymbolBody(text string) symbolBody {

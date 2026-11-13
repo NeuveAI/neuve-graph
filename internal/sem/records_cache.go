@@ -32,7 +32,10 @@ import (
 // alone, without the specifiers the syntax tree's import statements add.
 // v17 retires streams whose call relations carry the caller's span, or no
 // line at file level, where the entry now says where the call is.
-const providerRecordsCacheVersion = "provider-records-v17-" + IdentityRevision
+// v18 retires streams whose call lines can rest on a comment, a string or
+// other text that is not code, and that hold argument relations to a name
+// bound where it is passed.
+const providerRecordsCacheVersion = "provider-records-v18-" + IdentityRevision
 
 // cachedProviderRecords is the on-disk envelope for a cached record stream. The
 // key alone is authoritative (sha256 over version+commit+tree+mode+profile+

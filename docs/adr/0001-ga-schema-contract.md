@@ -116,7 +116,7 @@ as a need to refresh derived semantic data. History consumers must also migrate
 previously persisted entity deltas rather than merely append newly parsed ones.
 
 This is one global revision for parser identity rules across all languages.
-The value is a decimal revision encoded as a string, currently `"7"`. Consumers
+The value is a decimal revision encoded as a string, currently `"8"`. Consumers
 compare the complete opaque string for equality rather than relying on numeric
 ordering. The field name supplies its meaning; the value names no language or
 feature. A bump invalidates both snapshot and search
@@ -131,6 +131,14 @@ caller's span, a file-level call's entry gains that line, and an entry whose
 line hands the target over by name carries the schema `1.4` field `form`. The
 snapshot of an unchanged tree therefore differs. Consumers upgrading from
 `"6"` must refresh derived snapshots; entity deltas are unaffected. See
+[ADR 0013](0013-call-site-lines.md).
+
+Revision `"8"` re-keys no symbol and changes no entity. It places those call
+lines only on code (never in a comment, a string, template or JSX text or a
+regular expression), and it removes the TypeScript and JavaScript call
+relations whose only evidence is an identifier passed as an argument that is
+bound where it is passed, not the target. Consumers upgrading from `"7"` must
+refresh derived snapshots; entity deltas are unaffected. See
 [ADR 0013](0013-call-site-lines.md).
 
 Revision `"6"` re-keys no symbol and changes no entity: it adds `IMPORTS`

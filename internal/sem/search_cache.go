@@ -37,7 +37,9 @@ import (
 // IMPORTS relations add to the scanner's as a cold build does.
 // v22 retires snapshots whose call relations carry the caller's span, or no
 // line at file level, where the entry now says where the call is.
-const searchSnapshotCacheVersion = "search-snapshot-v22-" + IdentityRevision
+// v23 retires snapshots whose call lines can rest on text that is not code,
+// and that hold argument relations to a name bound where it is passed.
+const searchSnapshotCacheVersion = "search-snapshot-v23-" + IdentityRevision
 
 type cachedSymbolByteRange struct {
 	Start int `json:"start"`

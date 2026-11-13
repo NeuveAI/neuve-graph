@@ -50,12 +50,31 @@ type jsScanState struct {
 	// Existing import fallback uses parsed even for recovery trees. New exact
 	// self attribution additionally requires an error-free, complete AST walk.
 	errorFree bool
+	// codeOps are the spans of the file that are not code by the language's
+	// own rule (comments, strings, template text, regular expressions, JSX
+	// text) and, inside a template, the substitutions that are code again, in
+	// the order the walk met them: applied in that order they give the file's
+	// code view (see codeViewOf).
+	codeOps []jsCodeOp
+	// parseMasked are the spans the parser read as blank because the grammar
+	// cannot parse them (maskTypeScriptUnsupportedSyntax); none is code.
+	parseMasked jsByteSpans
+	// codeUnknown says the code view cannot be told: the parse failed, the
+	// walk stopped at the depth limit, or the parsed text is not the file's.
+	codeUnknown bool
+	codeMask    []bool
 	// depthTruncated reports that a relation-phase walk stopped at
 	// maxParseWalkDepth (parser.go). The scope state stays usable — everything
 	// above the limit was collected — but it is incomplete, so the provider
 	// records it as an E_PARSE_DEPTH_EXCEEDED partial failure rather than
 	// letting a silently short scope scan look like a complete one.
 	depthTruncated bool
+}
+
+// jsCodeOp marks [start, end) as not code (blank) or as code again.
+type jsCodeOp struct {
+	start, end int
+	blank      bool
 }
 
 type jsNamespaceScope struct {
@@ -174,6 +193,22 @@ func buildJSScanState(grammar *sitter.Language, parseSrc []byte, content string)
 	}
 	state.parsed = true
 	state.errorFree = !root.HasError()
+	if len(parseSrc) == len(content) {
+		for i := 0; i < len(content); {
+			if parseSrc[i] == content[i] {
+				i++
+				continue
+			}
+			j := i
+			for j < len(content) && parseSrc[j] != content[j] {
+				j++
+			}
+			state.parseMasked = append(state.parseMasked, struct{ start, end int }{i, j})
+			i = j
+		}
+	} else {
+		state.codeUnknown = true
+	}
 	walker := &jsScopeWalker{src: parseSrc, state: state}
 	walker.walk(root, jsScopeContext{
 		lexStart:  -1,
@@ -381,7 +416,10 @@ func (s *jsScanState) namespaceCallSite(qualified string, start, end int, exclud
 // that a nearer lexical binding shadows is not counted, which is the rule an
 // imported alias resolves by. argument reports that the use is a callable
 // argument: the name is handed over there, and no call of it is in range.
-func (s *jsScanState) callUseSite(name string, start, end int, excluded jsByteSpans, callsOnly, visibleOnly bool) (position int, ok, argument bool) {
+//
+// skip, when not nil, passes over a callable argument it reports (a name bound
+// in the caller, which hands nothing over).
+func (s *jsScanState) callUseSite(name string, start, end int, excluded jsByteSpans, callsOnly, visibleOnly bool, skip func(position int) bool) (position int, ok, argument bool) {
 	if s == nil {
 		return 0, false, false
 	}
@@ -399,6 +437,9 @@ func (s *jsScanState) callUseSite(name string, start, end int, excluded jsByteSp
 				continue
 			}
 			if visibleOnly && s.bindingShadowsName(name, use.startByte) {
+				continue
+			}
+			if list == 1 && skip != nil && skip(use.startByte) {
 				continue
 			}
 			return use.startByte, true, list == 1
@@ -568,6 +609,18 @@ func (w *jsScopeWalker) walk(node *sitter.Node, ctx jsScopeContext, depth int) {
 		return
 	}
 	switch node.Type() {
+	case "comment", "html_comment", "hash_bang_line", "string", "regex", "jsx_text", "template_literal_type":
+		w.state.codeOps = append(w.state.codeOps, jsCodeOp{start: int(node.StartByte()), end: int(node.EndByte()), blank: true})
+	case "template_string":
+		// Template text is not code; each `${...}` substitution's expression
+		// is, and a template nested in it is handled when the walk reaches it.
+		w.state.codeOps = append(w.state.codeOps, jsCodeOp{start: int(node.StartByte()), end: int(node.EndByte()), blank: true})
+		for i := 0; i < int(node.NamedChildCount()); i++ {
+			child := node.NamedChild(i)
+			if validNode(child) && child.Type() == "template_substitution" && child.EndByte() >= child.StartByte()+3 {
+				w.state.codeOps = append(w.state.codeOps, jsCodeOp{start: int(child.StartByte()) + 2, end: int(child.EndByte()) - 1})
+			}
+		}
 	case "statement_block", "class_body", "switch_body":
 		ctx.lexStart, ctx.lexEnd = int(node.StartByte()), int(node.EndByte())
 	case "for_statement":
@@ -1199,4 +1252,106 @@ func jsNamespaceAtLine(scopes []jsNamespaceScope, line int) string {
 		}
 	}
 	return name
+}
+
+// fileCodeMask returns, per byte of the file, whether it is not code by the
+// language's own rule, as the syntax tree tells it; nil when that cannot be
+// told (no tree, a walk stopped at the depth limit, parsed text of another
+// length). Built once per file, on first use.
+func (s *jsScanState) fileCodeMask() []bool {
+	if s == nil || !s.parsed || s.depthTruncated || s.codeUnknown {
+		return nil
+	}
+	if s.codeMask == nil {
+		mask := make([]bool, s.contentLen)
+		for _, op := range s.codeOps {
+			for i := maxInt(0, op.start); i < minInt(op.end, len(mask)); i++ {
+				mask[i] = op.blank
+			}
+		}
+		for _, span := range s.parseMasked {
+			for i := maxInt(0, span.start); i < minInt(span.end, len(mask)); i++ {
+				mask[i] = true
+			}
+		}
+		s.codeMask = mask
+	}
+	return s.codeMask
+}
+
+// codeViewOf returns text, the file's bytes from start, with every byte that
+// is not code blanked (newlines kept), so a text scan over it can only match
+// code. ok is false when the file's code view cannot be told or text is not
+// a slice of the file at start; the caller then has no code to point at.
+func (s *jsScanState) codeViewOf(text string, start int) (string, bool) {
+	mask := s.fileCodeMask()
+	if mask == nil || start < 0 || start+len(text) > len(mask) {
+		return "", false
+	}
+	view := []byte(text)
+	for i := range view {
+		if mask[start+i] && view[i] != '\n' && view[i] != '\r' {
+			view[i] = ' '
+		}
+	}
+	return string(view), true
+}
+
+// localArgumentBinding reports whether the identifier passed as a call
+// argument at position names a binding of the file rather than the target: a
+// parameter, a local, a destructured or loop binding, a catch binding, a class
+// or function declared in the caller or around it, or a module-level one. A
+// binding whose scope holds the target's own declaration (the target declared
+// in this file, in the caller or at module level) may be the target itself and
+// is not counted; a target in another file is never a binding of this one.
+func (s *jsScanState) localArgumentBinding(name string, position int, target SymbolRecord, sameFile bool) bool {
+	if s == nil {
+		return false
+	}
+	for _, binding := range s.bindings {
+		if binding.Name != name || position <= binding.startByte || position >= binding.endByte {
+			continue
+		}
+		if sameFile && target.sourceStartByte >= binding.startByte && target.sourceStartByte < binding.endByte {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// argumentUsesAllLocal reports whether the syntax tree shows name in [start,
+// end) outside excluded only as call arguments, at least one, and every one
+// of them is a binding of the file, not the target (local reports it): nothing hands the target
+// over there. A direct call or construction of name in range answers false.
+func (s *jsScanState) argumentUsesAllLocal(name string, start, end int, excluded jsByteSpans, local func(position int) bool) bool {
+	if s == nil {
+		return false
+	}
+	for _, use := range jsUsesIn(s.bareCalls, start, end) {
+		if use.name == name && !excluded.contains(use.startByte) {
+			return false
+		}
+	}
+	seen := false
+	for _, use := range jsUsesIn(s.callableArguments, start, end) {
+		if use.name != name || excluded.contains(use.startByte) {
+			continue
+		}
+		if !local(use.startByte) {
+			return false
+		}
+		seen = true
+	}
+	return seen
+}
+
+// jsUsesIn returns the uses of a sorted list that start in [start, end).
+func jsUsesIn(uses []jsIdentifierUse, start, end int) []jsIdentifierUse {
+	first := sort.Search(len(uses), func(i int) bool { return uses[i].startByte >= start })
+	last := sort.Search(len(uses), func(i int) bool { return uses[i].startByte >= end })
+	if last < first {
+		return nil
+	}
+	return uses[first:last]
 }
