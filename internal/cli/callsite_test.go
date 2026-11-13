@@ -129,7 +129,7 @@ func TestResolveCallSiteReportsCallLineNotContainerStart(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			read := staticLineReader(map[string]string{testCase.path: testCase.content})
-			site, ok := resolveCallSite(read, testCase.path, testCase.token, testCase.spanStart, testCase.spanEnd)
+			site, ok := resolveCallSite(read, testCase.path, testCase.token, testCase.spanStart, testCase.spanEnd, 0)
 			if !ok {
 				t.Fatalf("resolveCallSite reported no site")
 			}
@@ -199,7 +199,7 @@ func TestResolveCallSiteIgnoresCommentsAndStringLiterals(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			read := staticLineReader(map[string]string{testCase.path: testCase.content})
-			site, ok := resolveCallSite(read, testCase.path, "target", 1, len(linesOf(testCase.content)))
+			site, ok := resolveCallSite(read, testCase.path, "target", 1, len(linesOf(testCase.content)), 0)
 			if !ok {
 				t.Fatalf("resolveCallSite reported no site")
 			}
@@ -271,7 +271,7 @@ func TestResolveCallSiteHandlesLifetimesAndLabels(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			read := staticLineReader(map[string]string{testCase.path: testCase.content})
-			site, ok := resolveCallSite(read, testCase.path, "target", 1, len(linesOf(testCase.content)))
+			site, ok := resolveCallSite(read, testCase.path, "target", 1, len(linesOf(testCase.content)), 0)
 			if !ok {
 				t.Fatalf("resolveCallSite reported no site (a lifetime blanked the line?)")
 			}
@@ -288,7 +288,7 @@ func TestResolveCallSiteHandlesLifetimesAndLabels(t *testing.T) {
 func TestEnclosingGuardLinesSurfaceTheConditionChainVerbatim(t *testing.T) {
 	t.Parallel()
 	read := staticLineReader(map[string]string{"src/expression.rs": rustDispatch})
-	site, ok := resolveCallSite(read, "src/expression.rs", "target", 1, len(linesOf(rustDispatch)))
+	site, ok := resolveCallSite(read, "src/expression.rs", "target", 1, len(linesOf(rustDispatch)), 0)
 	if !ok {
 		t.Fatal("resolveCallSite reported no site")
 	}
@@ -332,7 +332,7 @@ func TestEnclosingGuardLinesIndentedLanguage(t *testing.T) {
 		"            if item.valid:\n" +
 		"                process(item)\n"
 	read := staticLineReader(map[string]string{"handler.py": source})
-	site, ok := resolveCallSite(read, "handler.py", "process", 1, len(linesOf(source)))
+	site, ok := resolveCallSite(read, "handler.py", "process", 1, len(linesOf(source)), 0)
 	if !ok {
 		t.Fatal("resolveCallSite reported no site")
 	}
@@ -357,7 +357,7 @@ func TestGuardCapKeepsInnermostAndReportsOmission(t *testing.T) {
 	builder.WriteString(strings.Repeat("    ", callContextGuardLimit+4) + "target(1);\n")
 	source := builder.String()
 	read := staticLineReader(map[string]string{"deep.rs": source})
-	site, ok := resolveCallSite(read, "deep.rs", "target", 1, len(linesOf(source)))
+	site, ok := resolveCallSite(read, "deep.rs", "target", 1, len(linesOf(source)), 0)
 	if !ok {
 		t.Fatal("resolveCallSite reported no site")
 	}
@@ -399,7 +399,7 @@ func TestResolveCallSiteFallsBackWhenUnresolvable(t *testing.T) {
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
-			if _, ok := resolveCallSite(read, testCase.path, testCase.token, testCase.start, testCase.end); ok {
+			if _, ok := resolveCallSite(read, testCase.path, testCase.token, testCase.start, testCase.end, 0); ok {
 				t.Fatalf("resolveCallSite claimed a site it could not know")
 			}
 		})
@@ -448,7 +448,7 @@ func TestCallContextIsWindowedAndBudgeted(t *testing.T) {
 	source := builder.String()
 	total := len(linesOf(source))
 	read := staticLineReader(map[string]string{"giant.rs": source})
-	site, ok := resolveCallSite(read, "giant.rs", "target", 1, total)
+	site, ok := resolveCallSite(read, "giant.rs", "target", 1, total, 0)
 	if !ok {
 		t.Fatal("resolveCallSite reported no site")
 	}
@@ -496,7 +496,7 @@ func TestCallContextByteBudgetBindsBeforeBlockCount(t *testing.T) {
 	}
 	source := builder.String()
 	read := staticLineReader(map[string]string{"wide.rs": source})
-	site, ok := resolveCallSite(read, "wide.rs", "target", 1, len(linesOf(source)))
+	site, ok := resolveCallSite(read, "wide.rs", "target", 1, len(linesOf(source)), 0)
 	if !ok {
 		t.Fatal("resolveCallSite reported no site")
 	}
@@ -526,7 +526,7 @@ func TestCallContextTruncatesOverlongLines(t *testing.T) {
 	t.Parallel()
 	source := "fn outer() {\n    let x = " + strings.Repeat("z", 5000) + ";\n    target(1);\n}\n"
 	read := staticLineReader(map[string]string{"wide.rs": source})
-	site, ok := resolveCallSite(read, "wide.rs", "target", 1, len(linesOf(source)))
+	site, ok := resolveCallSite(read, "wide.rs", "target", 1, len(linesOf(source)), 0)
 	if !ok {
 		t.Fatal("resolveCallSite reported no site")
 	}
@@ -539,15 +539,62 @@ func TestCallContextTruncatesOverlongLines(t *testing.T) {
 
 func TestCallEvidenceSpanReadsCallSiteEvidence(t *testing.T) {
 	t.Parallel()
-	path, start, end, token, ok := callEvidenceSpan([]sem.Evidence{
+	// A language outside call_site_lines: the entry is the caller's span and
+	// the call is looked for in it.
+	java := neighborEndpoint{Kind: "method", Language: "Java", StartLine: 24, EndLine: 1694}
+	path, start, end, callLine, token, ok := callEvidenceSpan([]sem.Evidence{
 		{Kind: "import", FilePath: "other.go", StartLine: 1},
-		{Kind: "call_site", FilePath: "caller.go", StartLine: 24, EndLine: 1694, Detail: "target"},
-	})
-	if !ok || path != "caller.go" || start != 24 || end != 1694 || token != "target" {
-		t.Fatalf("callEvidenceSpan = (%q, %d, %d, %q, %v)", path, start, end, token, ok)
+		{Kind: "call_site", FilePath: "Caller.java", StartLine: 24, EndLine: 1694, Detail: "target"},
+	}, java)
+	if !ok || path != "Caller.java" || start != 24 || end != 1694 || callLine != 0 || token != "target" {
+		t.Fatalf("callEvidenceSpan = (%q, %d, %d, %d, %q, %v)", path, start, end, callLine, token, ok)
 	}
-	if _, _, _, _, ok := callEvidenceSpan([]sem.Evidence{{Kind: "import", StartLine: 3}}); ok {
+	if _, _, _, _, _, ok := callEvidenceSpan([]sem.Evidence{{Kind: "import", StartLine: 3}}, java); ok {
 		t.Fatal("callEvidenceSpan accepted non-call evidence")
+	}
+}
+
+// For a caller in a language call_site_lines lists, the entry's line is the
+// call: it is reported as is, and the span searched for the other calls and
+// the guards is the caller's own -- the whole file for a file-level caller.
+// Reason: the entry no longer carries the caller's span, so reading it as one
+// would clip the window and the guards to the call's single line.
+func TestCallEvidenceSpanTakesTheEnginesCallLine(t *testing.T) {
+	t.Parallel()
+	goCaller := neighborEndpoint{Kind: "function", Language: "Go", StartLine: 3, EndLine: 900}
+	path, start, end, callLine, token, ok := callEvidenceSpan([]sem.Evidence{
+		{Kind: "call_site", FilePath: "dispatch.go", StartLine: 806, EndLine: 806, Detail: "Target"},
+	}, goCaller)
+	if !ok || path != "dispatch.go" || start != 3 || end != 900 || callLine != 806 || token != "Target" {
+		t.Fatalf("callEvidenceSpan = (%q, %d, %d, %d, %q, %v)", path, start, end, callLine, token, ok)
+	}
+	file := neighborEndpoint{Kind: "file", Language: "TypeScript"}
+	path, start, end, callLine, _, ok = callEvidenceSpan([]sem.Evidence{
+		{Kind: "top_level_call_site", FilePath: "a.test.ts", StartLine: 6, EndLine: 6, Detail: "helper"},
+	}, file)
+	if !ok || path != "a.test.ts" || start != 1 || end != 0 || callLine != 6 {
+		t.Fatalf("file-level callEvidenceSpan = (%q, %d, %d, %d, %v)", path, start, end, callLine, ok)
+	}
+	// An entry with no line is a call the engine could not place: no site.
+	if _, _, _, _, _, ok := callEvidenceSpan([]sem.Evidence{{Kind: "call_site", FilePath: "a.ts", Detail: "helper"}}, neighborEndpoint{Kind: "function", Language: "TypeScript", StartLine: 1, EndLine: 9}); ok {
+		t.Fatal("an entry with no line produced a call site")
+	}
+}
+
+// resolveCallSite reports the engine's line even when another call of the
+// same name comes first in the span, and counts that one as an additional
+// site. Reason: the engine's line is the call the relation came from.
+func TestResolveCallSiteKeepsTheEnginesLine(t *testing.T) {
+	t.Parallel()
+	source := "func caller() {\n\tif ok {\n\t\ttarget()\n\t}\n\ttarget()\n}\n"
+	read := func(string) ([]string, bool) { return linesOf(source), true }
+	site, ok := resolveCallSite(read, "caller.go", "target", 1, 6, 5)
+	if !ok || site.Line != 5 || site.AdditionalSites != 1 {
+		t.Fatalf("site = %+v, %v; want line 5 with one additional site", site, ok)
+	}
+	site, ok = resolveCallSite(read, "caller.go", "target", 1, 6, 3)
+	if !ok || site.Line != 3 || len(site.Guards) != 1 || site.Guards[0].Line != 2 {
+		t.Fatalf("site = %+v, %v; want line 3 under the guard on line 2", site, ok)
 	}
 }
 

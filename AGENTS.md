@@ -153,6 +153,14 @@ empty, since the relations add the syntax tree's import statements to the
 import scanner's. See
 [import targets](docs/snapshot-format.md#import-targets).
 
+A `CALLS`, `CONSTRUCTS` or `ASYNC_CALLS` relation whose caller is in a
+language `feature_languages.call_site_lines` lists (Go, JavaScript, Python,
+TypeScript) says where the call is: its call-site entry's one line is where
+the callee's name is written in the first such call, `form: "reference"` marks
+a name handed over by value rather than called, and no line means the engine
+could not place it. Other languages keep the caller's span. See
+[call-site evidence](docs/snapshot-format.md#call-site-evidence).
+
 **When:** you want every relation (bulk export / ingestion) or a filtered relation stream. For a targeted one-symbol question, use `neighbors`.
 
 ### 🗺️ snapshot — *the whole graph*

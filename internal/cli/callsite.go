@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -270,17 +271,51 @@ func readRepoFileLines(repoRoot, relPath string) ([]string, bool) {
 	return strings.Split(strings.ReplaceAll(string(content), "\r\n", "\n"), "\n"), true
 }
 
-// callEvidenceSpan extracts the caller-body span and the written call text from
-// a relation's evidence. The caller of a CALLS edge owns the evidence, so the
-// span is the caller's body and the detail is the callee as it appears there.
-func callEvidenceSpan(evidence []sem.Evidence) (filePath string, start, end int, token string, ok bool) {
+// callEvidenceSpan extracts, from a call relation's evidence, the span to look
+// for the call in, the line the call is on when the engine says, and the
+// written call text.
+//
+// Where the caller's language is one capability call_site_lines lists, the
+// entry's one line is the call itself: callLine is that line and the span is
+// the caller's own (a file-level caller's is the whole file, spanEnd 0). An
+// entry of any other language carries the caller's span and no call line, so
+// callLine is 0 and the call is looked for in that span, as it always was.
+// The detail is the callee as it is written there.
+func callEvidenceSpan(evidence []sem.Evidence, caller neighborEndpoint) (filePath string, start, end, callLine int, token string, ok bool) {
 	for _, item := range evidence {
-		if item.Kind != "call_site" || item.StartLine <= 0 {
+		if !callSiteEvidenceKind(item.Kind) || item.StartLine <= 0 {
 			continue
 		}
-		return item.FilePath, item.StartLine, item.EndLine, item.Detail, true
+		if callSiteLineLanguage(caller.Language) && item.StartLine == item.EndLine {
+			if caller.Kind == "file" {
+				return item.FilePath, 1, 0, item.StartLine, item.Detail, true
+			}
+			if caller.StartLine > 0 && caller.StartLine <= item.StartLine && item.StartLine <= caller.EndLine {
+				return item.FilePath, caller.StartLine, caller.EndLine, item.StartLine, item.Detail, true
+			}
+		}
+		if item.Kind != "call_site" {
+			// Only a call_site entry ever carried the caller's span.
+			continue
+		}
+		return item.FilePath, item.StartLine, item.EndLine, 0, item.Detail, true
 	}
-	return "", 0, 0, "", false
+	return "", 0, 0, 0, "", false
+}
+
+// callSiteEvidenceKind reports the evidence kinds that say where a call is.
+func callSiteEvidenceKind(kind string) bool {
+	switch kind {
+	case "call_site", "async_call_site", "top_level_call_site":
+		return true
+	}
+	return false
+}
+
+// callSiteLineLanguage reports whether the engine says where a call is for a
+// caller written in language (capability call_site_lines).
+func callSiteLineLanguage(language string) bool {
+	return slices.Contains(sem.CallSiteLineLanguages(), language)
 }
 
 // callTokenFromDetail reduces a written call expression to the identifier that
@@ -355,8 +390,11 @@ func isIdentifierByte(character byte) bool {
 // resolveCallSite locates the call to token inside [spanStart, spanEnd] of
 // relPath and builds the guard chain and window around it. It reports ok=false
 // when the file cannot be read or the token does not occur in the span, in
-// which case the caller keeps the definition line and says so.
-func resolveCallSite(read lineReader, relPath, token string, spanStart, spanEnd int) (callSite, bool) {
+// which case the caller keeps the definition line and says so. A callLine
+// above zero is the engine's own line for the call (call_site_lines): it is
+// the line reported, and the token is only looked for to count the other
+// calls in the span.
+func resolveCallSite(read lineReader, relPath, token string, spanStart, spanEnd, callLine int) (callSite, bool) {
 	if read == nil || relPath == "" || token == "" || spanStart <= 0 {
 		return callSite{}, false
 	}
@@ -372,16 +410,27 @@ func resolveCallSite(read lineReader, relPath, token string, spanStart, spanEnd 
 	}
 	masked := maskedSourceLines(lines, maskingRules(relPath))
 	hits := callTokenLines(masked, token, spanStart, spanEnd)
-	if len(hits) == 0 {
+	line, additional := 0, len(hits)-1
+	switch {
+	case callLine >= spanStart && callLine <= spanEnd:
+		line, additional = callLine, 0
+		for _, hit := range hits {
+			if hit != callLine {
+				additional++
+			}
+		}
+	case len(hits) > 0:
+		line = hits[0]
+	default:
 		return callSite{}, false
 	}
 	site := callSite{
 		FilePath:        relPath,
-		Line:            hits[0],
-		AdditionalSites: len(hits) - 1,
+		Line:            line,
+		AdditionalSites: additional,
 	}
-	site.Guards, site.GuardsOmitted = enclosingGuardLines(masked, lines, spanStart, hits[0], bracedLanguage(relPath))
-	site.Window, site.WindowStart, site.WindowEnd = callWindow(lines, spanStart, spanEnd, hits[0])
+	site.Guards, site.GuardsOmitted = enclosingGuardLines(masked, lines, spanStart, line, bracedLanguage(relPath))
+	site.Window, site.WindowStart, site.WindowEnd = callWindow(lines, spanStart, spanEnd, line)
 	return site, true
 }
 

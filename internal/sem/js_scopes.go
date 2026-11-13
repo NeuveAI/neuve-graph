@@ -85,6 +85,8 @@ type jsDottedCall struct {
 	parts     []string
 	startByte int
 	line      int
+	// nameByte is where the called name, the chain's last part, is written.
+	nameByte int
 }
 
 type jsIdentifierUse struct {
@@ -349,6 +351,60 @@ func (s *jsScanState) topLevelNamespaceCalls(symbols []SymbolRecord) map[string]
 		}
 	}
 	return out
+}
+
+// namespaceCallSite returns where the first namespace call whose canonical
+// name is qualified is written in [start, end) outside excluded: the byte of
+// its called name.
+func (s *jsScanState) namespaceCallSite(qualified string, start, end int, excluded jsByteSpans) (int, bool) {
+	if s == nil {
+		return 0, false
+	}
+	first := sort.Search(len(s.calls), func(i int) bool { return s.calls[i].startByte >= start })
+	for _, call := range s.calls[first:] {
+		if call.startByte >= end {
+			break
+		}
+		if excluded.contains(call.startByte) {
+			continue
+		}
+		if s.qualifiedNamespaceCall(call) == qualified {
+			return call.nameByte, true
+		}
+	}
+	return 0, false
+}
+
+// callUseSite returns where name is first used in [start, end) outside
+// excluded, as the call scans count a use: a direct call or construction
+// first, then (unless callsOnly) a callable argument. With visibleOnly a use
+// that a nearer lexical binding shadows is not counted, which is the rule an
+// imported alias resolves by. argument reports that the use is a callable
+// argument: the name is handed over there, and no call of it is in range.
+func (s *jsScanState) callUseSite(name string, start, end int, excluded jsByteSpans, callsOnly, visibleOnly bool) (position int, ok, argument bool) {
+	if s == nil {
+		return 0, false, false
+	}
+	lists := [][]jsIdentifierUse{s.bareCalls}
+	if !callsOnly {
+		lists = append(lists, s.callableArguments)
+	}
+	for list, uses := range lists {
+		first := sort.Search(len(uses), func(i int) bool { return uses[i].startByte >= start })
+		for _, use := range uses[first:] {
+			if use.startByte >= end {
+				break
+			}
+			if use.name != name || excluded.contains(use.startByte) {
+				continue
+			}
+			if visibleOnly && s.bindingShadowsName(name, use.startByte) {
+				continue
+			}
+			return use.startByte, true, list == 1
+		}
+	}
+	return 0, false, false
 }
 
 // importAliasUseVisibilityForSymbol reports whether a direct call or callable
@@ -811,7 +867,11 @@ func (w *jsScopeWalker) addDottedCall(function, arguments *sitter.Node, ctx jsSc
 		return
 	}
 	start := int(function.StartByte())
-	w.state.calls = append(w.state.calls, jsDottedCall{parts: parts, startByte: start, line: w.state.lineOf(start)})
+	nameByte := int(function.EndByte()) - len(parts[len(parts)-1])
+	if nameByte < start {
+		nameByte = start
+	}
+	w.state.calls = append(w.state.calls, jsDottedCall{parts: parts, startByte: start, line: w.state.lineOf(start), nameByte: nameByte})
 }
 
 func (w *jsScopeWalker) addWrites(target *sitter.Node) {

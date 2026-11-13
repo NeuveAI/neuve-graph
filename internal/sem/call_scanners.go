@@ -92,8 +92,20 @@ func sqlCallNameIgnored(name string) bool {
 }
 
 func jsCallableArgumentIdentifiers(content string) map[string]struct{} {
+	sites := jsCallableArgumentIdentifierSites(content)
+	out := make(map[string]struct{}, len(sites))
+	for name := range sites {
+		out[name] = struct{}{}
+	}
+	return out
+}
+
+// jsCallableArgumentIdentifierSites is jsCallableArgumentIdentifiers with, for
+// each name, the offset in content of its first whole-word occurrence inside
+// the argument list it was first found in (-1 when none is found there).
+func jsCallableArgumentIdentifierSites(content string) map[string]int {
 	stripped := stripCodeLiteralsAndComments(content)
-	out := map[string]struct{}{}
+	out := map[string]int{}
 	for i := 0; i < len(stripped); i++ {
 		if stripped[i] != '(' || jsOpenParenStartsDeclarationOrControl(stripped, i) {
 			continue
@@ -107,11 +119,31 @@ func jsCallableArgumentIdentifiers(content string) map[string]struct{} {
 			if !isSimpleIdentifier(arg) || jsCallableArgumentIgnored(arg) {
 				continue
 			}
-			out[arg] = struct{}{}
+			if _, seen := out[arg]; !seen {
+				out[arg] = wholeWordIndex(stripped[:close], arg, i+1)
+			}
 		}
 		i = close
 	}
 	return out
+}
+
+// wholeWordIndex returns the first offset at or after from where word occurs
+// in content with no identifier byte on either side, or -1.
+func wholeWordIndex(content, word string, from int) int {
+	for from >= 0 && from < len(content) {
+		index := strings.Index(content[from:], word)
+		if index < 0 {
+			return -1
+		}
+		start := from + index
+		end := start + len(word)
+		if (start == 0 || !isASCIIIdentifierByte(content[start-1])) && (end >= len(content) || !isASCIIIdentifierByte(content[end])) {
+			return start
+		}
+		from = start + 1
+	}
+	return -1
 }
 
 func jsOpenParenStartsDeclarationOrControl(content string, open int) bool {

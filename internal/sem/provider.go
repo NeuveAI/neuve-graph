@@ -33,13 +33,15 @@ import (
 )
 
 const (
-	// SchemaVersion 1.3 adds optional source-file health accounting; 1.2 added
-	// optional parser identity metadata.
+	// SchemaVersion 1.4 adds the optional `form` field of an evidence entry
+	// (a call relation's entry whose line hands the target over by name); 1.3
+	// added optional source-file health accounting; 1.2 added optional parser
+	// identity metadata.
 	// Schema 1.1 added the snapshot fields introduced
 	// alongside boundary source locations (the `external` flag on external records
 	// and the per-symbol source-location fields). The shape is backward compatible
 	// for tolerant readers; the bump lets consumers detect the new fields.
-	SchemaVersion         = "1.3"
+	SchemaVersion         = "1.4"
 	ProviderName          = "entire-graph"
 	StableSymbolIDVersion = "compound-v1"
 	// IdentityRevision is a global, opaque revision of parser identity rules across
@@ -47,7 +49,9 @@ const (
 	// emitted entity or relation membership. Revision 5 stops emitting `block`
 	// symbols outside HCL (see ADR 0001). Revision 6 gives every import
 	// statement the syntax tree shows an IMPORTS relation (see ADR 0012).
-	IdentityRevision     = "6"
+	// Revision 7 makes a call relation's evidence say where the call is in
+	// the languages call_site_lines lists (see ADR 0013).
+	IdentityRevision     = "7"
 	defaultMaxParseBytes = 4 * 1024 * 1024
 	// defaultMaxSourceFiles bounds how many files one snapshot will list. The
 	// per-file indexes a snapshot keeps (one file record and its retained symbols)
@@ -420,6 +424,11 @@ type Evidence struct {
 	StartLine int    `json:"start_line,omitempty"`
 	EndLine   int    `json:"end_line,omitempty"`
 	Detail    string `json:"detail,omitempty"`
+	// Form is "reference" on a call relation's call-site entry whose line
+	// hands the target's name over as a value (`xs.map(double)`) rather than
+	// calling it; absent, the line writes a call or construction. Only the
+	// languages capability call_site_lines lists set it (schema 1.4).
+	Form string `json:"form,omitempty"`
 }
 
 type CapabilityReport struct {
@@ -758,6 +767,7 @@ func Capabilities() CapabilityReport {
 			"symbols_outline_import_bindings":         true,
 			"import_target_classification":            true,
 			"import_targets_cover_statements":         true,
+			"call_site_lines":                         true,
 			"compact_snapshot_ndjson_v1":              true,
 			"scip_snapshot_experimental":              true,
 			"hybrid_source_search":                    true,
@@ -784,6 +794,11 @@ func Capabilities() CapabilityReport {
 			// a statement whose specifier is empty (Go's `import ""`), which
 			// names nothing (withTreeImports).
 			"import_targets_cover_statements": ImportBindingLanguages(),
+			// For a CALLS, CONSTRUCTS or ASYNC_CALLS relation whose caller's
+			// file is in one of these languages, a line on its call-site
+			// evidence entry is the line of the call itself; an entry with no
+			// line is a call the engine could not place (call_site_lines.go).
+			"call_site_lines": CallSiteLineLanguages(),
 		},
 		FeaturesRequiringNetworkAccess: map[string]bool{
 			"grammar_download":  false,
@@ -5743,20 +5758,43 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 			// can resolve.
 			swiftTypes = swiftFileTypeInfo(content)
 		}
+		// The file's line starts, built once and only for a file whose calls say
+		// where they are and whose symbol blocks start mid-line.
+		var fileLineStarts []int
+		lineStartsOfFile := func() []int {
+			if fileLineStarts == nil {
+				if jsScan != nil && len(jsScan.lineStarts) > 0 {
+					fileLineStarts = jsScan.lineStarts
+				} else {
+					fileLineStarts = jsLineStarts(content)
+				}
+			}
+			return fileLineStarts
+		}
 		for _, from := range currentFileSymbols {
 			if shouldStop() {
 				return result
 			}
 			block := symbolBlockFromLines(lines, from)
+			blockFirstLine := maxInt(1, from.StartLine)
 			var objectCallableSpans jsByteSpans
 			if file.Language == "JavaScript" || file.Language == "TypeScript" || file.Language == "Julia" {
 				if exact, ok := exactSymbolSource(content, from); ok {
 					block = exact
+					if callSiteLineLanguageSet[file.Language] {
+						blockFirstLine = lineOfByte(lineStartsOfFile(), from.sourceStartByte)
+					}
 					if from.objectLiteral {
 						objectCallableSpans = jsObjectCallableSpans(from, currentFileSymbols)
 						block = jsMaskObjectCallables(block, from.sourceStartByte, objectCallableSpans)
 					}
 				}
+			}
+			// sites turns a position the call scanners below record in block
+			// (or in a masked copy of it) into the line the call is on.
+			sites := newCallSiteLines(from, file.Language, block, blockFirstLine)
+			if exact, ok := exactSymbolSource(content, from); ok && len(exact) == len(block) && (file.Language == "JavaScript" || file.Language == "TypeScript") {
+				sites.textStart = from.sourceStartByte
 			}
 			if fileNeedsCallScan && !typeLikeKind(from.Kind) && file.Language == "Erlang" {
 				// Erlang call sites carry information the generic scanner cannot
@@ -5820,7 +5858,14 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 					// register as call sites.
 					callBlock = maskGroovyLiteralsAndComments(block)
 				}
-				callNames := callLikeIdentifiers(callBlock, file.Language)
+				// bareSites keeps, for each name the generic scanner finds, where
+				// its first call is written in callBlock.
+				bareSites := callLikeIdentifierSites(callBlock, file.Language)
+				callNames := make(map[string]struct{}, len(bareSites))
+				for name := range bareSites {
+					callNames[name] = struct{}{}
+				}
+				var jsArgumentSites map[string]int
 				jsCallableArgumentOnly := map[string]bool{}
 				jsNamespaceCalls := map[string]struct{}{}
 				fsharpCallQualifiers := map[string]map[string]struct{}{}
@@ -5870,7 +5915,8 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 						callNames[name] = struct{}{}
 						jsNamespaceCalls[name] = struct{}{}
 					}
-					for name := range jsCallableArgumentIdentifiers(callBlock) {
+					jsArgumentSites = jsCallableArgumentIdentifierSites(callBlock)
+					for name := range jsArgumentSites {
 						if _, directCall := callNames[name]; !directCall {
 							jsCallableArgumentOnly[name] = true
 						}
@@ -5975,15 +6021,27 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 					}
 				}
 				callImportsByName := importsByName
+				// bareLine says where the call behind a relation the loop below
+				// emits for name is written: in TypeScript and JavaScript the first
+				// use the syntax tree shows (a call or construction, else a callable
+				// argument; with visibleOnly, one no nearer binding shadows, the
+				// rule an imported alias resolves by), and otherwise the first match
+				// of the scanner that found the name. callsOnly is for a
+				// construction, which only a call can make.
+				bareLine := func(name string, callsOnly, visibleOnly bool) int {
+					return bareCallLine(sites, callBlock, name, from, jsScan, jsNamespaceCalls, objectCallableSpans, bareSites, jsArgumentSites, callsOnly, visibleOnly)
+				}
 				// Python module-qualified dotted calls (`pkg.mod.fn()`) are resolved
 				// by a dedicated, strictly module-scoped path (emitted after the
 				// generic loop below): the generic resolver ignores the module
 				// qualifier and would mis-resolve to an unrelated same-named symbol.
 				var pythonDottedRelations []RelationRecord
 				if file.Language == "Python" {
-					allDotted, externalDotted := pythonDottedCallImportedNames(callBlock, importsByName, pythonImportForms, pythonModuleExists)
+					allDotted, externalDotted, dottedSites := pythonDottedCallImportedNameSites(callBlock, importsByName, pythonImportForms, pythonModuleExists)
 					if len(allDotted) > 0 {
-						pythonDottedRelations = pythonDottedCallRelations(from, allDotted, externalDotted, importsByName, symbolsByShortName, childNamesByContainer[from.ID])
+						pythonDottedRelations = pythonDottedCallRelations(from, allDotted, externalDotted, importsByName, symbolsByShortName, childNamesByContainer[from.ID], func(name string, match func(module string) bool) int {
+							return sites.callIn(callBlock, pythonDottedCallSite(dottedSites, name, match))
+						})
 					}
 				}
 				for _, name := range sortedKeysOf(callNames) {
@@ -6134,14 +6192,8 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 							RelationScope: to.Scope,
 							Resolution:    to.Resolution,
 							TargetKind:    "symbol",
-							Evidence: []Evidence{{
-								Kind:      "call_site",
-								FilePath:  from.FilePath,
-								StartLine: from.StartLine,
-								EndLine:   from.EndLine,
-								Detail:    name,
-							}},
-							WarningCodes: []string{},
+							Evidence:      []Evidence{callSiteEvidence("call_site", from, name, bareLine(name, relType == "CONSTRUCTS", jsAliasHandled))},
+							WarningCodes:  []string{},
 						})
 					}
 					if len(targets) == 0 && file.Language == "Kotlin" && spec.callResolution == "full" {
@@ -6165,33 +6217,27 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 								RelationScope: scope,
 								Resolution:    "type_inferred",
 								TargetKind:    "symbol",
-								Evidence: []Evidence{{
-									Kind:      "call_site",
-									FilePath:  from.FilePath,
-									StartLine: from.StartLine,
-									EndLine:   from.EndLine,
-									Detail:    name,
-								}},
-								WarningCodes: []string{},
+								Evidence:      []Evidence{callSiteEvidence("call_site", from, name, bareLine(name, false, false))},
+								WarningCodes:  []string{},
 							})
 							continue
 						}
 					}
 					if jsAliasHandled {
-						for _, relation := range jsAliasExternal {
+						for _, relation := range withCallLine(jsAliasExternal, from, bareLine(name, false, true)) {
 							emit(relation)
 						}
 					} else if file.Language == "Python" {
-						for _, relation := range pythonAliasExternal {
+						for _, relation := range withCallLine(pythonAliasExternal, from, bareLine(name, false, false)) {
 							emit(relation)
 						}
 						if pythonGenericAllowed && len(normalTargets) == 0 && !suppressExternal {
-							for _, relation := range importedExternalCallRelationsForName(from, name, importsForCall[name]) {
+							for _, relation := range withCallLine(importedExternalCallRelationsForName(from, name, importsForCall[name]), from, bareLine(name, false, false)) {
 								emit(relation)
 							}
 						}
 					} else if len(targets) == 0 && !suppressExternal {
-						for _, relation := range importedExternalCallRelationsForName(from, name, importsForCall[name]) {
+						for _, relation := range withCallLine(importedExternalCallRelationsForName(from, name, importsForCall[name]), from, bareLine(name, false, false)) {
 							emit(relation)
 						}
 					}
@@ -6210,7 +6256,8 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 				body = newSymbolBody(block)
 			}
 			if needsAsyncCalls && callableSymbol {
-				for _, name := range asyncCallNames(body) {
+				asyncSites := asyncCallSites(body)
+				for _, name := range sortedKeysOf(asyncSites) {
 					if name == from.Name {
 						continue
 					}
@@ -6237,14 +6284,8 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 							RelationScope: to.Scope,
 							Resolution:    to.Resolution,
 							TargetKind:    "symbol",
-							Evidence: []Evidence{{
-								Kind:      "async_call_site",
-								FilePath:  from.FilePath,
-								StartLine: from.StartLine,
-								EndLine:   from.EndLine,
-								Detail:    name,
-							}},
-							WarningCodes: []string{},
+							Evidence:      []Evidence{callSiteEvidence("async_call_site", from, name, sites.callIn(body.stripped, asyncSites[name]))},
+							WarningCodes:  []string{},
 						})
 					}
 				}
@@ -6487,10 +6528,10 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 			// symbol still reached it and matched a `x.y(...)` shape anywhere
 			// in the file against another language's methods.
 			if spec.callResolution == "full" && callExtractionLanguage(file.Language) {
-				for _, r := range receiverCallRelations(from, body, methodsByContainer, superContainerByID, implementersByContainer, symbolsByShortName, returnTypesBySymbolNameAndFile, returnTypesBySymbolNameAndDir, importsByName, manifestImports.goModules, goFileImportIndex, pkgVarTypesByDir[filepath.ToSlash(filepath.Dir(file.Path))], phpPropTypes, kotlinPropTypes, typeScriptPropTypes, fieldsByContainer, swiftTypes) {
+				for _, r := range receiverCallRelations(from, body, methodsByContainer, superContainerByID, implementersByContainer, symbolsByShortName, returnTypesBySymbolNameAndFile, returnTypesBySymbolNameAndDir, importsByName, manifestImports.goModules, goFileImportIndex, pkgVarTypesByDir[filepath.ToSlash(filepath.Dir(file.Path))], phpPropTypes, kotlinPropTypes, typeScriptPropTypes, fieldsByContainer, swiftTypes, sites) {
 					emit(r)
 				}
-				for _, r := range importedReceiverCallRelations(from, body, importsByName, symbolsByShortName) {
+				for _, r := range importedReceiverCallRelations(from, body, importsByName, symbolsByShortName, sites) {
 					emit(r)
 				}
 			}
@@ -6541,7 +6582,12 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 					FilePath: file.Path,
 					Language: file.Language,
 				}
-				topLevelNames := callLikeIdentifiers(topLevel, file.Language)
+				topLevelSites := callLikeIdentifierSites(topLevel, file.Language)
+				topLevelNames := make(map[string]struct{}, len(topLevelSites))
+				for name := range topLevelSites {
+					topLevelNames[name] = struct{}{}
+				}
+				var topLevelArgumentSites map[string]int
 				jsCallableArgumentOnly := map[string]bool{}
 				jsNamespaceCalls := map[string]struct{}{}
 				topLevelFSharpQualifiers := map[string]map[string]struct{}{}
@@ -6561,7 +6607,8 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 						topLevelNames[name] = struct{}{}
 						jsNamespaceCalls[name] = struct{}{}
 					}
-					for name := range jsCallableArgumentIdentifiers(topLevel) {
+					topLevelArgumentSites = jsCallableArgumentIdentifierSites(topLevel)
+					for name := range topLevelArgumentSites {
 						if _, directCall := topLevelNames[name]; !directCall {
 							jsCallableArgumentOnly[name] = true
 						}
@@ -6619,6 +6666,13 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 					for name := range rubySuffixedCallIdentifiers(topLevel) {
 						topLevelNames[name] = struct{}{}
 					}
+				}
+				// The top-level text keeps the file's lines (a symbol's lines are
+				// blanked, not removed), so its first byte is line 1.
+				topLevelLines := newCallSiteLines(fileSource, file.Language, topLevel, 1)
+				var topLevelUses *jsTopLevelUses
+				if jsScan != nil && topLevelLines.declared {
+					topLevelUses = jsScan.topLevelUses(currentFileSymbols)
 				}
 				for _, name := range sortedKeysOf(topLevelNames) {
 					inputs := pythonCallImportBinding(name, fileSource, file.Language, pythonBareScopes, symbolsByShortName, importsByName, file.Path, manifestImports, knownFiles, readContent)
@@ -6704,15 +6758,11 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 							RelationScope: to.Scope,
 							Resolution:    to.Resolution,
 							TargetKind:    "symbol",
-							Evidence: []Evidence{{
-								Kind:     "top_level_call_site",
-								FilePath: file.Path,
-								Detail:   name,
-							}},
-							WarningCodes: []string{},
+							Evidence:      []Evidence{callSiteEvidence("top_level_call_site", fileSource, name, topLevelCallLine(topLevelLines, topLevel, name, jsScan, topLevelUses, jsNamespaceCalls, topLevelSites, topLevelArgumentSites, relType == "CONSTRUCTS", jsAliasHandled))},
+							WarningCodes:  []string{},
 						})
 					}
-					for _, relation := range pythonIncompleteAliasExternal {
+					for _, relation := range withCallLine(pythonIncompleteAliasExternal, fileSource, topLevelCallLine(topLevelLines, topLevel, name, jsScan, topLevelUses, jsNamespaceCalls, topLevelSites, topLevelArgumentSites, false, false)) {
 						emit(relation)
 					}
 				}
@@ -7583,7 +7633,7 @@ func qualifiedTypeDirMatches(filePath, alias string, goModules goModuleIndex, im
 	return false
 }
 
-func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContainer map[string]map[string]SymbolRecord, superContainerByID map[string]string, implementersByContainer map[string][]string, symbolsByShortName map[string][]SymbolRecord, returnTypesBySymbolNameAndFile, returnTypesBySymbolNameAndDir map[string]map[string][]string, importsByName map[string][]string, goModules goModuleIndex, goImports *goFileImports, pkgVarTypes map[string]pkgQualType, phpPropTypes, kotlinPropTypes, typeScriptPropTypes map[string]string, fieldsByContainer map[string]map[string]SymbolRecord, swiftTypes swiftFileTypes) []RelationRecord {
+func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContainer map[string]map[string]SymbolRecord, superContainerByID map[string]string, implementersByContainer map[string][]string, symbolsByShortName map[string][]SymbolRecord, returnTypesBySymbolNameAndFile, returnTypesBySymbolNameAndDir map[string]map[string][]string, importsByName map[string][]string, goModules goModuleIndex, goImports *goFileImports, pkgVarTypes map[string]pkgQualType, phpPropTypes, kotlinPropTypes, typeScriptPropTypes map[string]string, fieldsByContainer map[string]map[string]SymbolRecord, swiftTypes swiftFileTypes, sites callSiteLines) []RelationRecord {
 	if typeLikeKind(from.Kind) {
 		return nil
 	}
@@ -8017,14 +8067,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 			RelationScope: scope,
 			Resolution:    resolution,
 			TargetKind:    "symbol",
-			Evidence: []Evidence{{
-				Kind:      "call_site",
-				FilePath:  from.FilePath,
-				StartLine: from.StartLine,
-				EndLine:   from.EndLine,
-				Detail:    call.Receiver + "." + call.Method,
-			}},
-			WarningCodes: []string{},
+			Evidence:      []Evidence{callSiteEvidence("call_site", from, call.Receiver+"."+call.Method, sites.site(call.Site))},
+			WarningCodes:  []string{},
 		})
 		methodResolved[call.Receiver+"."+call.Method] = true
 	}
@@ -8069,14 +8113,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 				RelationScope: scope,
 				Resolution:    "type_inferred",
 				TargetKind:    "symbol",
-				Evidence: []Evidence{{
-					Kind:      "call_site",
-					FilePath:  from.FilePath,
-					StartLine: from.StartLine,
-					EndLine:   from.EndLine,
-					Detail:    call.Receiver + "." + call.Method,
-				}},
-				WarningCodes: []string{},
+				Evidence:      []Evidence{callSiteEvidence("call_site", from, call.Receiver+"."+call.Method, sites.site(call.Site))},
+				WarningCodes:  []string{},
 			})
 			methodResolved[call.Receiver+"."+call.Method] = true
 		}
@@ -8248,14 +8286,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 			RelationScope: scope,
 			Resolution:    resolution,
 			TargetKind:    "symbol",
-			Evidence: []Evidence{{
-				Kind:      "call_site",
-				FilePath:  from.FilePath,
-				StartLine: from.StartLine,
-				EndLine:   from.EndLine,
-				Detail:    call.Receiver + "." + call.Method,
-			}},
-			WarningCodes: []string{},
+			Evidence:      []Evidence{callSiteEvidence("call_site", from, call.Receiver+"."+call.Method, sites.site(call.Site))},
+			WarningCodes:  []string{},
 		})
 		if from.Language == "TypeScript" && strings.HasPrefix(strings.TrimSpace(method.Signature), "abstract ") {
 			if impl, implOK := uniqueImplementedMethod(targetID, call.Method, methodsByContainer, superContainerByID, implementersByContainer); implOK && impl.ID != method.ID {
@@ -8268,7 +8300,7 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 					Confidence:    minFloat(confidence, 0.72),
 					Reason:        "interface-typed receiver call resolved to the unique TypeScript implementation",
 					RelationScope: implScope, Resolution: "type_inferred", TargetKind: "symbol",
-					Evidence:     []Evidence{{Kind: "call_site", FilePath: from.FilePath, StartLine: from.StartLine, EndLine: from.EndLine, Detail: call.Receiver + "." + call.Method}},
+					Evidence:     []Evidence{callSiteEvidence("call_site", from, call.Receiver+"."+call.Method, sites.site(call.Site))},
 					WarningCodes: []string{},
 				})
 			}
@@ -8316,7 +8348,7 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 				Confidence:    0.64,
 				Reason:        "TypeScript receiver call matched unique same-file method on caller inheritance chain",
 				RelationScope: "file", Resolution: "name_only", TargetKind: "symbol",
-				Evidence:     []Evidence{{Kind: "call_site", FilePath: from.FilePath, StartLine: from.StartLine, EndLine: from.EndLine, Detail: key}},
+				Evidence:     []Evidence{callSiteEvidence("call_site", from, key, sites.site(call.Site))},
 				WarningCodes: []string{},
 			})
 		}
@@ -8367,14 +8399,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 			RelationScope: scope,
 			Resolution:    "name_only",
 			TargetKind:    "symbol",
-			Evidence: []Evidence{{
-				Kind:      "call_site",
-				FilePath:  from.FilePath,
-				StartLine: from.StartLine,
-				EndLine:   from.EndLine,
-				Detail:    call.Receiver + "." + call.Method,
-			}},
-			WarningCodes: []string{},
+			Evidence:      []Evidence{callSiteEvidence("call_site", from, call.Receiver+"."+call.Method, sites.site(call.Site))},
+			WarningCodes:  []string{},
 		})
 	}
 	for _, call := range calls {
@@ -8399,14 +8425,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 			RelationScope: "file",
 			Resolution:    "name_only",
 			TargetKind:    "symbol",
-			Evidence: []Evidence{{
-				Kind:      "call_site",
-				FilePath:  from.FilePath,
-				StartLine: from.StartLine,
-				EndLine:   from.EndLine,
-				Detail:    call.Receiver + "." + call.Method,
-			}},
-			WarningCodes: []string{},
+			Evidence:      []Evidence{callSiteEvidence("call_site", from, call.Receiver+"."+call.Method, sites.site(call.Site))},
+			WarningCodes:  []string{},
 		})
 	}
 	if from.Language == "Perl" {
@@ -8433,14 +8453,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 				RelationScope: scope,
 				Resolution:    "name_only",
 				TargetKind:    "symbol",
-				Evidence: []Evidence{{
-					Kind:      "call_site",
-					FilePath:  from.FilePath,
-					StartLine: from.StartLine,
-					EndLine:   from.EndLine,
-					Detail:    call.Receiver + "." + call.Method,
-				}},
-				WarningCodes: []string{},
+				Evidence:      []Evidence{callSiteEvidence("call_site", from, call.Receiver+"."+call.Method, sites.site(call.Site))},
+				WarningCodes:  []string{},
 			})
 		}
 	}
@@ -8488,14 +8502,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 				RelationScope: scope,
 				Resolution:    resolution,
 				TargetKind:    "symbol",
-				Evidence: []Evidence{{
-					Kind:      "call_site",
-					FilePath:  from.FilePath,
-					StartLine: from.StartLine,
-					EndLine:   from.EndLine,
-					Detail:    call.Receiver + "." + call.Method,
-				}},
-				WarningCodes: []string{},
+				Evidence:      []Evidence{callSiteEvidence("call_site", from, call.Receiver+"."+call.Method, sites.site(call.Site))},
+				WarningCodes:  []string{},
 			})
 		}
 	}
@@ -8548,14 +8556,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 				RelationScope: scope,
 				Resolution:    "type_inferred",
 				TargetKind:    "symbol",
-				Evidence: []Evidence{{
-					Kind:      "call_site",
-					FilePath:  from.FilePath,
-					StartLine: from.StartLine,
-					EndLine:   from.EndLine,
-					Detail:    chain.Detail,
-				}},
-				WarningCodes: []string{},
+				Evidence:      []Evidence{callSiteEvidence("call_site", from, chain.Detail, sites.site(0))},
+				WarningCodes:  []string{},
 			})
 		}
 	}
@@ -8626,14 +8628,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 				RelationScope: scope,
 				Resolution:    resolution,
 				TargetKind:    "symbol",
-				Evidence: []Evidence{{
-					Kind:      "call_site",
-					FilePath:  from.FilePath,
-					StartLine: from.StartLine,
-					EndLine:   from.EndLine,
-					Detail:    chain.Detail,
-				}},
-				WarningCodes: []string{},
+				Evidence:      []Evidence{callSiteEvidence("call_site", from, chain.Detail, sites.site(0))},
+				WarningCodes:  []string{},
 			})
 		}
 		// Locals chain-bound to dotted nested types (`if let firstRange =
@@ -8669,14 +8665,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 				RelationScope: scope,
 				Resolution:    "type_inferred",
 				TargetKind:    "symbol",
-				Evidence: []Evidence{{
-					Kind:      "call_site",
-					FilePath:  from.FilePath,
-					StartLine: from.StartLine,
-					EndLine:   from.EndLine,
-					Detail:    call.Receiver + "." + call.Method,
-				}},
-				WarningCodes: []string{},
+				Evidence:      []Evidence{callSiteEvidence("call_site", from, call.Receiver+"."+call.Method, sites.site(call.Site))},
+				WarningCodes:  []string{},
 			})
 		}
 	}
@@ -8709,14 +8699,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 				RelationScope: scope,
 				Resolution:    "signature",
 				TargetKind:    "symbol",
-				Evidence: []Evidence{{
-					Kind:      "call_site",
-					FilePath:  from.FilePath,
-					StartLine: from.StartLine,
-					EndLine:   from.EndLine,
-					Detail:    call.Receiver + "." + call.Method,
-				}},
-				WarningCodes: []string{},
+				Evidence:      []Evidence{callSiteEvidence("call_site", from, call.Receiver+"."+call.Method, sites.site(call.Site))},
+				WarningCodes:  []string{},
 			})
 		}
 	}
@@ -8763,14 +8747,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 					RelationScope: scope,
 					Resolution:    "type_inferred",
 					TargetKind:    "symbol",
-					Evidence: []Evidence{{
-						Kind:      "call_site",
-						FilePath:  from.FilePath,
-						StartLine: from.StartLine,
-						EndLine:   from.EndLine,
-						Detail:    chain.Detail,
-					}},
-					WarningCodes: []string{},
+					Evidence:      []Evidence{callSiteEvidence("call_site", from, chain.Detail, sites.site(0))},
+					WarningCodes:  []string{},
 				})
 			}
 		}
@@ -8807,14 +8785,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 			RelationScope: scope,
 			Resolution:    "type_inferred",
 			TargetKind:    "symbol",
-			Evidence: []Evidence{{
-				Kind:      "call_site",
-				FilePath:  from.FilePath,
-				StartLine: from.StartLine,
-				EndLine:   from.EndLine,
-				Detail:    name,
-			}},
-			WarningCodes: []string{},
+			Evidence:      []Evidence{callSiteEvidence("call_site", from, name, sites.site(0))},
+			WarningCodes:  []string{},
 		})
 	}
 	// PHP `Class::method()` / `self::` / `static::` / `parent::` static calls:
@@ -8866,14 +8838,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 			RelationScope: scope,
 			Resolution:    "type_inferred",
 			TargetKind:    "symbol",
-			Evidence: []Evidence{{
-				Kind:      "call_site",
-				FilePath:  from.FilePath,
-				StartLine: from.StartLine,
-				EndLine:   from.EndLine,
-				Detail:    call.Detail,
-			}},
-			WarningCodes: []string{},
+			Evidence:      []Evidence{callSiteEvidence("call_site", from, call.Detail, sites.site(0))},
+			WarningCodes:  []string{},
 		})
 	}
 	// PHP `$this->prop->method()` property receivers: the property's type comes
@@ -8912,14 +8878,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 			RelationScope: scope,
 			Resolution:    "type_inferred",
 			TargetKind:    "symbol",
-			Evidence: []Evidence{{
-				Kind:      "call_site",
-				FilePath:  from.FilePath,
-				StartLine: from.StartLine,
-				EndLine:   from.EndLine,
-				Detail:    "this->" + call.Receiver + "->" + call.Method,
-			}},
-			WarningCodes: []string{},
+			Evidence:      []Evidence{callSiteEvidence("call_site", from, "this->"+call.Receiver+"->"+call.Method, sites.site(0))},
+			WarningCodes:  []string{},
 		})
 	}
 	// Generated factory convention: a property typed `CustomerFactory` exposes
@@ -8962,14 +8922,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 			RelationScope: scope,
 			Resolution:    "type_inferred",
 			TargetKind:    "symbol",
-			Evidence: []Evidence{{
-				Kind:      "call_site",
-				FilePath:  from.FilePath,
-				StartLine: from.StartLine,
-				EndLine:   from.EndLine,
-				Detail:    call.Detail,
-			}},
-			WarningCodes: []string{},
+			Evidence:      []Evidence{callSiteEvidence("call_site", from, call.Detail, sites.site(0))},
+			WarningCodes:  []string{},
 		})
 	}
 	relations = append(relations, rustModulePathCallRelations(from, rustPathCalls, importsByName, symbolsByShortName)...)
@@ -9040,14 +8994,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 			RelationScope: scope,
 			Resolution:    "type_inferred",
 			TargetKind:    "symbol",
-			Evidence: []Evidence{{
-				Kind:      "call_site",
-				FilePath:  from.FilePath,
-				StartLine: from.StartLine,
-				EndLine:   from.EndLine,
-				Detail:    call.Detail,
-			}},
-			WarningCodes: []string{},
+			Evidence:      []Evidence{callSiteEvidence("call_site", from, call.Detail, sites.site(0))},
+			WarningCodes:  []string{},
 		})
 		// The generic scanner saw this site as `B.Method(`; mark that pair
 		// resolved so the fallback tiers below do not re-emit for it.
@@ -9085,14 +9033,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 				RelationScope: scope,
 				Resolution:    "name_only",
 				TargetKind:    "symbol",
-				Evidence: []Evidence{{
-					Kind:      "call_site",
-					FilePath:  from.FilePath,
-					StartLine: from.StartLine,
-					EndLine:   from.EndLine,
-					Detail:    call.Receiver + "." + call.Method,
-				}},
-				WarningCodes: []string{},
+				Evidence:      []Evidence{callSiteEvidence("call_site", from, call.Receiver+"."+call.Method, sites.site(call.Site))},
+				WarningCodes:  []string{},
 			})
 		}
 	}
@@ -9136,14 +9078,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 			RelationScope: scope,
 			Resolution:    resolution,
 			TargetKind:    "symbol",
-			Evidence: []Evidence{{
-				Kind:      "call_site",
-				FilePath:  from.FilePath,
-				StartLine: from.StartLine,
-				EndLine:   from.EndLine,
-				Detail:    call.Detail,
-			}},
-			WarningCodes: []string{},
+			Evidence:      []Evidence{callSiteEvidence("call_site", from, call.Detail, sites.site(call.Site))},
+			WarningCodes:  []string{},
 		})
 	}
 	for _, call := range returnedCalls {
@@ -9176,14 +9112,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 				RelationScope: scope,
 				Resolution:    "name_only",
 				TargetKind:    "symbol",
-				Evidence: []Evidence{{
-					Kind:      "call_site",
-					FilePath:  from.FilePath,
-					StartLine: from.StartLine,
-					EndLine:   from.EndLine,
-					Detail:    call.Detail,
-				}},
-				WarningCodes: []string{},
+				Evidence:      []Evidence{callSiteEvidence("call_site", from, call.Detail, sites.site(call.Site))},
+				WarningCodes:  []string{},
 			})
 			continue
 		}
@@ -9226,14 +9156,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 				RelationScope: scope,
 				Resolution:    resolution,
 				TargetKind:    "symbol",
-				Evidence: []Evidence{{
-					Kind:      "call_site",
-					FilePath:  from.FilePath,
-					StartLine: from.StartLine,
-					EndLine:   from.EndLine,
-					Detail:    call.Detail,
-				}},
-				WarningCodes: []string{},
+				Evidence:      []Evidence{callSiteEvidence("call_site", from, call.Detail, sites.site(call.Site))},
+				WarningCodes:  []string{},
 			})
 			break
 		}
@@ -9262,14 +9186,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 				RelationScope: scope,
 				Resolution:    "type_inferred",
 				TargetKind:    "symbol",
-				Evidence: []Evidence{{
-					Kind:      "call_site",
-					FilePath:  from.FilePath,
-					StartLine: from.StartLine,
-					EndLine:   from.EndLine,
-					Detail:    call.Detail,
-				}},
-				WarningCodes: []string{},
+				Evidence:      []Evidence{callSiteEvidence("call_site", from, call.Detail, sites.site(call.Site))},
+				WarningCodes:  []string{},
 			})
 			break
 		}
@@ -9303,14 +9221,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 				RelationScope: scope,
 				Resolution:    "type_inferred",
 				TargetKind:    "symbol",
-				Evidence: []Evidence{{
-					Kind:      "call_site",
-					FilePath:  from.FilePath,
-					StartLine: from.StartLine,
-					EndLine:   from.EndLine,
-					Detail:    call.Detail,
-				}},
-				WarningCodes: []string{},
+				Evidence:      []Evidence{callSiteEvidence("call_site", from, call.Detail, sites.site(call.Site))},
+				WarningCodes:  []string{},
 			})
 			break
 		}
@@ -9340,14 +9252,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 					RelationScope: scope,
 					Resolution:    "type_inferred",
 					TargetKind:    "symbol",
-					Evidence: []Evidence{{
-						Kind:      "call_site",
-						FilePath:  from.FilePath,
-						StartLine: from.StartLine,
-						EndLine:   from.EndLine,
-						Detail:    call.Detail,
-					}},
-					WarningCodes: []string{},
+					Evidence:      []Evidence{callSiteEvidence("call_site", from, call.Detail, sites.site(call.Site))},
+					WarningCodes:  []string{},
 				})
 				break
 			}
@@ -9384,14 +9290,8 @@ func receiverCallRelations(from SymbolRecord, body symbolBody, methodsByContaine
 					RelationScope: scope,
 					Resolution:    "type_inferred",
 					TargetKind:    "symbol",
-					Evidence: []Evidence{{
-						Kind:      "call_site",
-						FilePath:  from.FilePath,
-						StartLine: from.StartLine,
-						EndLine:   from.EndLine,
-						Detail:    call.Detail,
-					}},
-					WarningCodes: []string{},
+					Evidence:      []Evidence{callSiteEvidence("call_site", from, call.Detail, sites.site(call.Site))},
+					WarningCodes:  []string{},
 				})
 				break
 			}
@@ -9778,8 +9678,13 @@ func appendGoInterfaceImplementationCalls(relations []RelationRecord, from Symbo
 				scope = "module"
 			}
 			detail := ifaceMethod.Name
+			startLine, endLine := from.StartLine, from.EndLine
 			if len(relation.Evidence) > 0 && relation.Evidence[0].Detail != "" {
 				detail = relation.Evidence[0].Detail
+			}
+			if len(relation.Evidence) > 0 {
+				// The call is the interface call it was carried from.
+				startLine, endLine = relation.Evidence[0].StartLine, relation.Evidence[0].EndLine
 			}
 			added = append(added, RelationRecord{
 				RecordType:    "relation",
@@ -9794,8 +9699,8 @@ func appendGoInterfaceImplementationCalls(relations []RelationRecord, from Symbo
 				Evidence: []Evidence{{
 					Kind:      "call_site",
 					FilePath:  from.FilePath,
-					StartLine: from.StartLine,
-					EndLine:   from.EndLine,
+					StartLine: startLine,
+					EndLine:   endLine,
 					Detail:    detail,
 				}},
 				WarningCodes: []string{},
@@ -10301,7 +10206,7 @@ func importedReceiverCallTargets(from SymbolRecord, modules []string, candidates
 	return targets
 }
 
-func importedReceiverCallRelations(from SymbolRecord, body symbolBody, importsByName map[string][]string, symbolsByShortName map[string][]SymbolRecord) []RelationRecord {
+func importedReceiverCallRelations(from SymbolRecord, body symbolBody, importsByName map[string][]string, symbolsByShortName map[string][]SymbolRecord, sites callSiteLines) []RelationRecord {
 	if typeLikeKind(from.Kind) {
 		return nil
 	}
@@ -10326,14 +10231,8 @@ func importedReceiverCallRelations(from SymbolRecord, body symbolBody, importsBy
 					RelationScope: target.Scope,
 					Resolution:    target.Resolution,
 					TargetKind:    "symbol",
-					Evidence: []Evidence{{
-						Kind:      "call_site",
-						FilePath:  from.FilePath,
-						StartLine: from.StartLine,
-						EndLine:   from.EndLine,
-						Detail:    call.Receiver + "." + call.Method,
-					}},
-					WarningCodes: []string{},
+					Evidence:      []Evidence{callSiteEvidence("call_site", from, call.Receiver+"."+call.Method, sites.site(call.Site))},
+					WarningCodes:  []string{},
 				})
 			}
 			continue
@@ -10344,7 +10243,9 @@ func importedReceiverCallRelations(from SymbolRecord, body symbolBody, importsBy
 				continue
 			}
 			seen[target] = true
-			relations = append(relations, importedExternalCallRelation(from, target, call.Receiver+"."+call.Method))
+			relation := importedExternalCallRelation(from, target, call.Receiver+"."+call.Method)
+			setEvidenceCallLine(&relation.Evidence[0], from, sites.site(call.Site))
+			relations = append(relations, relation)
 		}
 	}
 	return relations
@@ -24673,6 +24574,19 @@ func matchDelimiter(b []byte, openIdx int) int {
 var callLikeIdentifiersCall = regexp.MustCompile(`\b([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:<[^>\n;{}()]*>)?\(`)
 
 func callLikeIdentifiers(content, language string) map[string]struct{} {
+	sites := callLikeIdentifierSites(content, language)
+	identifiers := make(map[string]struct{}, len(sites))
+	for name := range sites {
+		identifiers[name] = struct{}{}
+	}
+	return identifiers
+}
+
+// callLikeIdentifierSites is callLikeIdentifiers with, for each name, the
+// offset in content where the name of its first call is written, or -1 when
+// every match is a declaration (`function name(`, `def name(`): the name is
+// still found, exactly as before, but no match of it is a call to point at.
+func callLikeIdentifierSites(content, language string) map[string]int {
 	stripped := stripCodeLiteralsAndComments(content)
 	if language == "Python" {
 		// Python uses # line comments and triple-quoted strings. The generic
@@ -24683,7 +24597,7 @@ func callLikeIdentifiers(content, language string) map[string]struct{} {
 		// before scanning bare call expressions.
 		stripped = stripPythonLiteralsAndComments(content)
 	}
-	identifiers := map[string]struct{}{}
+	sites := map[string]int{}
 	for _, match := range callLikeIdentifiersCall.FindAllStringSubmatchIndex(stripped, -1) {
 		if len(match) < 4 {
 			continue
@@ -24693,9 +24607,17 @@ func callLikeIdentifiers(content, language string) map[string]struct{} {
 		if callNameIgnored(stripped, start, name, language) {
 			continue
 		}
-		identifiers[name] = struct{}{}
+		site := start
+		if callDeclarationKeyword(stripped, start) || lineBreakBeforeCallParen(language, stripped, start) {
+			// A declaration, or (Python, Go) a name whose `(` opens the next
+			// statement: found, as before, but not a call to point at.
+			site = -1
+		}
+		if previous, seen := sites[name]; !seen || previous < 0 {
+			sites[name] = site
+		}
 	}
-	return identifiers
+	return sites
 }
 
 func callNameIgnored(content string, start int, name, language string) bool {

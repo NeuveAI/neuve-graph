@@ -35,7 +35,9 @@ import (
 // the shared extraction products; dropping them changes downstream binding.
 // v21 retains each file's tree import statements, which a selective view's
 // IMPORTS relations add to the scanner's as a cold build does.
-const searchSnapshotCacheVersion = "search-snapshot-v21-" + IdentityRevision
+// v22 retires snapshots whose call relations carry the caller's span, or no
+// line at file level, where the entry now says where the call is.
+const searchSnapshotCacheVersion = "search-snapshot-v22-" + IdentityRevision
 
 type cachedSymbolByteRange struct {
 	Start int `json:"start"`

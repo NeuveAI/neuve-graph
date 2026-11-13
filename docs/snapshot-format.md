@@ -74,6 +74,58 @@ must remain within their lexical source scope. Statically named objects such as
 `api` can supply actual receiver paths. Computed property names and indirect
 callable values remain outside this bounded extraction.
 
+## Call-site evidence
+
+A `CALLS`, `CONSTRUCTS` or `ASYNC_CALLS` relation made by a call carries one
+evidence entry of kind `call_site` (a call resolved to a symbol),
+`imported_call_site` (a call resolved to an imported external symbol),
+`async_call_site` (an awaited, spawned or `go` call) or `top_level_call_site`
+(a call made at file level, outside every symbol's source, which includes every
+call inside a test callback such as `test("...", () => { subject() })`). Its
+`detail` is the callee as written there (`helper`, `store.save`,
+`new Store().save`).
+
+What the entry's `start_line` and `end_line` mean depends on the caller's
+language. For a caller whose file is in a language that
+`feature_languages.call_site_lines` lists (Go, JavaScript, Python and
+TypeScript), the same for all four kinds:
+
+- Both are one line: the line of the caller's file where the callee's name is
+  written in the call that produced the relation. For a call spanning lines
+  (`store\n  .save()`, `fn(\n  arg,\n)`) that is the line of the callee's
+  name, the one a reader needs.
+- When the caller writes that spelling more than once, it is the first in
+  source order. One relation per caller, target and family stays the rule; a
+  target the caller reaches through two spellings (`helper()` and
+  `this.helper()`) keeps the entry the engine emitted first, with that
+  spelling's line.
+- A symbol caller's line lies inside the symbol's span. A file-level caller's
+  line is outside every symbol's source.
+- Both are absent when the engine cannot tell where the call is: the text scan
+  found the name in something that is not a call (a method declaration or
+  signature, a word in template or JSX text, a regular expression, a private
+  member call `this.#name(` that a bare name cannot resolve to with certainty,
+  a Python or Go name whose `(` opens the next statement). The relation is
+  kept; its entry never carries the caller's span in its place.
+- `form`, when present, is `reference`: the target's name is handed over at
+  that line as a value (`xs.map(double)`, `useCallback(handler)`) and not
+  called there. It is set only when the caller never calls the target; a
+  caller that both passes and calls it reports the first call, unmarked.
+  Absent, a call or construction is written at that line. In TypeScript and
+  JavaScript the only shape that gives a call relation without a call is a
+  name passed as a call argument, which is the one marked; in Python and Go no
+  scanner turns a name handed over as a value into a call relation, so an
+  unmarked entry is a call in all four.
+
+For a caller in any other language the entry keeps the earlier meaning: a
+call from a symbol carries the caller's own span (`start_line` to `end_line`
+of the calling symbol, not of the call), a file-level call carries no line,
+and `form` is never set. A consumer treats an engine without capability
+`call_site_lines`, and a language it does not list, as giving no call line.
+Relations of kind `route_endpoint_match` and `graphql_schema_resolver_match`
+are not calls written in the caller and are unchanged. See
+[ADR 0013](adr/0013-call-site-lines.md).
+
 ## Streaming NDJSON
 
 The `snapshot`/`symbols`/`edges` commands stream records to stdout as they are
@@ -632,7 +684,11 @@ first line is `["h", 1, header]`, and the version appears nowhere else.
 Deterministic first-seen dictionary lines `d` precede positional `f` (file),
 `x` (external), `s` (symbol), and `r` (relation) rows; a trailing `m` summary
 is mandatory. A v1 relation row has the original 11 fields, plus an optional
-twelfth `evidence_dropped` integer when the value is nonzero. For artifacts that
+twelfth `evidence_dropped` integer when the value is nonzero. Each evidence
+entry is `[kind, file_path, start_line, end_line, detail]` (strings as
+dictionary indexes, an absent line as `0`), plus, from schema 1.4, an optional
+sixth `form` element when the entry has one; current readers accept five or
+six. For artifacts that
 declare the current or an older supported schema minor, consumers accept either
 relation arity and reject every other one. For a newer minor in the supported
 major, consumers warn, decode each known data row's required positional prefix,

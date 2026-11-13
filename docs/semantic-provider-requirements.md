@@ -241,7 +241,9 @@ unknown fields):
 - `target_kind`: `symbol`, `file`, `external`, `route`, `resource`, `channel`,
   or `config`.
 - `evidence`: array of compact `{kind, file_path, start_line, end_line, detail}`
-  source pointers. Several facts can justify one edge — forwarding three caller
+  source pointers, with an optional `form` (schema 1.4) on a call's entry. What
+  a call entry's lines mean is in
+  [the snapshot format](snapshot-format.md#call-site-evidence). Several facts can justify one edge — forwarding three caller
   parameters into the same callee is three `DATA_FLOWS` flows on one relation —
   and the array holds all of them, in a canonical order, not one representative.
   Two bounds qualify that. It is capped per relation, and a relation whose array

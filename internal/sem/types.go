@@ -975,19 +975,31 @@ var (
 )
 
 func asyncCallNames(body symbolBody) []string {
+	return sortedKeysOf(asyncCallSites(body))
+}
+
+// asyncCallSites maps each name asyncCallNames finds to the offset in the
+// body where the name of its first async call is written.
+func asyncCallSites(body symbolBody) map[string]int {
 	stripped := body.stripped
-	seen := map[string]struct{}{}
+	seen := map[string]int{}
 	addMatches := func(re *regexp.Regexp) {
-		for _, match := range re.FindAllStringSubmatch(stripped, -1) {
-			if len(match) > 1 && match[1] != "" {
-				seen[strings.TrimPrefix(match[1], "$")] = struct{}{}
+		for _, match := range re.FindAllStringSubmatchIndex(stripped, -1) {
+			if len(match) < 4 || match[2] < 0 || match[3] <= match[2] {
+				continue
+			}
+			raw := stripped[match[2]:match[3]]
+			name := strings.TrimPrefix(raw, "$")
+			offset := match[2] + len(raw) - len(name)
+			if previous, ok := seen[name]; !ok || offset < previous {
+				seen[name] = offset
 			}
 		}
 	}
 	addMatches(awaitCallRe)
 	addMatches(goRoutineCallRe)
 	addMatches(spawnCallRe)
-	return sortedStringSet(seen)
+	return seen
 }
 
 func returnFlowCallNames(body symbolBody) []string {
@@ -2859,6 +2871,10 @@ type receiverCall struct {
 	// and setter) the shared short-name method index collapses to one accessor,
 	// so the resolver consults this flag to prefer the setter deterministically.
 	SetterAssign bool
+	// Site is where the method name of the first such call is written in the
+	// scanned body, plus one; 0 when the scanner that found the call kept no
+	// position. Only receiverCalls sets it.
+	Site int
 }
 
 var receiverCallRe = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*(?:->|\.)\s*([A-Za-z_]\w*)\s*(?:<[^>\n;{}()]*>)?\(`)
@@ -2887,7 +2903,7 @@ func receiverCalls(body symbolBody) []receiverCall {
 			args = stripped[open+1 : close]
 		}
 		seen[key] = true
-		out = append(out, receiverCall{Receiver: receiver, Method: method, Args: args})
+		out = append(out, receiverCall{Receiver: receiver, Method: method, Args: args, Site: m[4] + 1})
 	}
 	return out
 }
@@ -2895,16 +2911,22 @@ func receiverCalls(body symbolBody) []receiverCall {
 // typedMethodCall is a `new Type().method(` / `Type().method(` call site. It is
 // intentionally limited to direct constructor chains so relation extraction can
 // resolve the receiver without tracking arbitrary returned values.
+//
+// Site, in this and the chain call shapes below, is where the called (last)
+// method name of the first such call is written in the scanned body, plus one;
+// 0 when the scanner kept no position.
 type typedMethodCall struct {
 	TypeName string
 	Method   string
 	Detail   string
+	Site     int
 }
 
 type returnedMethodCall struct {
 	Factory string
 	Method  string
 	Detail  string
+	Site    int
 }
 
 type returnedMethodChainCall struct {
@@ -2912,12 +2934,14 @@ type returnedMethodChainCall struct {
 	FirstMethod string
 	Method      string
 	Detail      string
+	Site        int
 }
 
 type returnedMethodDeepChainCall struct {
 	Factory string
 	Methods []string
 	Detail  string
+	Site    int
 }
 
 type typedMethodChainCall struct {
@@ -2925,12 +2949,14 @@ type typedMethodChainCall struct {
 	FirstMethod string
 	Method      string
 	Detail      string
+	Site        int
 }
 
 type typedMethodDeepChainCall struct {
 	TypeName string
 	Methods  []string
 	Detail   string
+	Site     int
 }
 
 var (
@@ -2949,19 +2975,21 @@ func chainedConstructorCalls(body symbolBody) []typedMethodCall {
 	stripped := body.stripped
 	var out []typedMethodCall
 	seen := map[string]bool{}
-	add := func(typeName, method, detail string) {
+	add := func(typeName, method, detail string, site int) {
 		key := typeName + "." + method
 		if typeName == "" || method == "" || seen[key] {
 			return
 		}
 		seen[key] = true
-		out = append(out, typedMethodCall{TypeName: typeName, Method: method, Detail: detail})
+		out = append(out, typedMethodCall{TypeName: typeName, Method: method, Detail: detail, Site: site})
 	}
-	for _, m := range newCtorMethodCallRe.FindAllStringSubmatch(stripped, -1) {
-		add(m[1], m[2], "new "+m[1]+"()."+m[2])
+	matches, sites := submatchesWithSites(newCtorMethodCallRe, stripped)
+	for i, m := range matches {
+		add(m[1], m[2], "new "+m[1]+"()."+m[2], sites[i])
 	}
-	for _, m := range ctorMethodCallRe.FindAllStringSubmatch(stripped, -1) {
-		add(m[1], m[2], m[1]+"()."+m[2])
+	matches, sites = submatchesWithSites(ctorMethodCallRe, stripped)
+	for i, m := range matches {
+		add(m[1], m[2], m[1]+"()."+m[2], sites[i])
 	}
 	return out
 }
@@ -2970,7 +2998,8 @@ func returnedReceiverCalls(body symbolBody) []returnedMethodCall {
 	stripped := body.stripped
 	var out []returnedMethodCall
 	seen := map[string]bool{}
-	for _, m := range returnedMethodCallRe.FindAllStringSubmatch(stripped, -1) {
+	matches, sites := submatchesWithSites(returnedMethodCallRe, stripped)
+	for i, m := range matches {
 		if len(m) != 3 {
 			continue
 		}
@@ -2983,7 +3012,7 @@ func returnedReceiverCalls(body symbolBody) []returnedMethodCall {
 			continue
 		}
 		seen[key] = true
-		out = append(out, returnedMethodCall{Factory: factory, Method: m[2], Detail: factory + "()." + m[2]})
+		out = append(out, returnedMethodCall{Factory: factory, Method: m[2], Detail: factory + "()." + m[2], Site: sites[i]})
 	}
 	return out
 }
@@ -2992,22 +3021,24 @@ func chainedConstructorReturnCalls(body symbolBody) []typedMethodChainCall {
 	stripped := body.stripped
 	var out []typedMethodChainCall
 	seen := map[string]bool{}
-	add := func(typeName, firstMethod, method, detail string) {
+	add := func(typeName, firstMethod, method, detail string, site int) {
 		key := typeName + "." + firstMethod + "." + method
 		if typeName == "" || firstMethod == "" || method == "" || seen[key] {
 			return
 		}
 		seen[key] = true
-		out = append(out, typedMethodChainCall{TypeName: typeName, FirstMethod: firstMethod, Method: method, Detail: detail})
+		out = append(out, typedMethodChainCall{TypeName: typeName, FirstMethod: firstMethod, Method: method, Detail: detail, Site: site})
 	}
-	for _, m := range newCtorMethodChainCallRe.FindAllStringSubmatch(stripped, -1) {
+	matches, sites := submatchesWithSites(newCtorMethodChainCallRe, stripped)
+	for i, m := range matches {
 		if len(m) == 4 {
-			add(m[1], m[2], m[3], "new "+m[1]+"()."+m[2]+"()."+m[3])
+			add(m[1], m[2], m[3], "new "+m[1]+"()."+m[2]+"()."+m[3], sites[i])
 		}
 	}
-	for _, m := range ctorMethodChainCallRe.FindAllStringSubmatch(stripped, -1) {
+	matches, sites = submatchesWithSites(ctorMethodChainCallRe, stripped)
+	for i, m := range matches {
 		if len(m) == 4 {
-			add(m[1], m[2], m[3], m[1]+"()."+m[2]+"()."+m[3])
+			add(m[1], m[2], m[3], m[1]+"()."+m[2]+"()."+m[3], sites[i])
 		}
 	}
 	return out
@@ -3017,7 +3048,7 @@ func chainedConstructorDeepReturnCalls(body symbolBody) []typedMethodDeepChainCa
 	stripped := body.stripped
 	var out []typedMethodDeepChainCall
 	seen := map[string]bool{}
-	add := func(typeName string, methods []string, detail string) {
+	add := func(typeName string, methods []string, detail string, site int) {
 		key := typeName + "." + strings.Join(methods, ".")
 		if typeName == "" || len(methods) < 3 || seen[key] {
 			return
@@ -3028,16 +3059,18 @@ func chainedConstructorDeepReturnCalls(body symbolBody) []typedMethodDeepChainCa
 			}
 		}
 		seen[key] = true
-		out = append(out, typedMethodDeepChainCall{TypeName: typeName, Methods: methods, Detail: detail})
+		out = append(out, typedMethodDeepChainCall{TypeName: typeName, Methods: methods, Detail: detail, Site: site})
 	}
-	for _, m := range newCtorMethodDeepChainCallRe.FindAllStringSubmatch(stripped, -1) {
+	matches, sites := submatchesWithSites(newCtorMethodDeepChainCallRe, stripped)
+	for i, m := range matches {
 		if len(m) == 5 {
-			add(m[1], []string{m[2], m[3], m[4]}, "new "+m[1]+"()."+m[2]+"()."+m[3]+"()."+m[4])
+			add(m[1], []string{m[2], m[3], m[4]}, "new "+m[1]+"()."+m[2]+"()."+m[3]+"()."+m[4], sites[i])
 		}
 	}
-	for _, m := range ctorMethodDeepChainCallRe.FindAllStringSubmatch(stripped, -1) {
+	matches, sites = submatchesWithSites(ctorMethodDeepChainCallRe, stripped)
+	for i, m := range matches {
 		if len(m) == 5 {
-			add(m[1], []string{m[2], m[3], m[4]}, m[1]+"()."+m[2]+"()."+m[3]+"()."+m[4])
+			add(m[1], []string{m[2], m[3], m[4]}, m[1]+"()."+m[2]+"()."+m[3]+"()."+m[4], sites[i])
 		}
 	}
 	return out
@@ -3047,7 +3080,8 @@ func returnedReceiverChainCalls(body symbolBody) []returnedMethodChainCall {
 	stripped := body.stripped
 	var out []returnedMethodChainCall
 	seen := map[string]bool{}
-	for _, m := range returnedMethodChainCallRe.FindAllStringSubmatch(stripped, -1) {
+	matches, sites := submatchesWithSites(returnedMethodChainCallRe, stripped)
+	for i, m := range matches {
 		if len(m) != 4 {
 			continue
 		}
@@ -3060,7 +3094,7 @@ func returnedReceiverChainCalls(body symbolBody) []returnedMethodChainCall {
 			continue
 		}
 		seen[key] = true
-		out = append(out, returnedMethodChainCall{Factory: factory, FirstMethod: m[2], Method: m[3], Detail: factory + "()." + m[2] + "()." + m[3]})
+		out = append(out, returnedMethodChainCall{Factory: factory, FirstMethod: m[2], Method: m[3], Detail: factory + "()." + m[2] + "()." + m[3], Site: sites[i]})
 	}
 	return out
 }
@@ -3069,7 +3103,8 @@ func returnedReceiverDeepChainCalls(body symbolBody) []returnedMethodDeepChainCa
 	stripped := body.stripped
 	var out []returnedMethodDeepChainCall
 	seen := map[string]bool{}
-	for _, m := range returnedMethodDeepChainRe.FindAllStringSubmatch(stripped, -1) {
+	matches, sites := submatchesWithSites(returnedMethodDeepChainRe, stripped)
+	for i, m := range matches {
 		if len(m) != 5 {
 			continue
 		}
@@ -3083,9 +3118,31 @@ func returnedReceiverDeepChainCalls(body symbolBody) []returnedMethodDeepChainCa
 			continue
 		}
 		seen[key] = true
-		out = append(out, returnedMethodDeepChainCall{Factory: factory, Methods: methods, Detail: factory + "()." + strings.Join(methods, "().")})
+		out = append(out, returnedMethodDeepChainCall{Factory: factory, Methods: methods, Detail: factory + "()." + strings.Join(methods, "()."), Site: sites[i]})
 	}
 	return out
+}
+
+// submatchesWithSites returns re's matches in s as FindAllStringSubmatch
+// does, each with the offset of its last group plus one (0 when that group
+// took no part in the match).
+func submatchesWithSites(re *regexp.Regexp, s string) ([][]string, []int) {
+	indexes := re.FindAllStringSubmatchIndex(s, -1)
+	matches := make([][]string, len(indexes))
+	sites := make([]int, len(indexes))
+	for i, index := range indexes {
+		match := make([]string, len(index)/2)
+		for group := range match {
+			if start := index[2*group]; start >= 0 {
+				match[group] = s[start:index[2*group+1]]
+			}
+		}
+		matches[i] = match
+		if last := index[len(index)-2]; last >= 0 {
+			sites[i] = last + 1
+		}
+	}
+	return matches, sites
 }
 
 // interfaceBodyRe locates an interface body inside a type-like symbol's

@@ -7,7 +7,7 @@ Date: 2026-07-03
 
 `entire-graph` emits a semantic index consumed by downstream tools (notably
 `entire-brain`). The wire format carries `schema_version` in `major.minor` form.
-The provider currently advertises **`1.3`** (`internal/sem/provider.go`
+The provider currently advertises **`1.4`** (`internal/sem/provider.go`
 `SchemaVersion`), where the `1.1` minor adds *optional, additive* relation fields
 that tolerant readers ignore. A compatibility policy already exists in the
 [semantic provider requirements](../semantic-provider-requirements.md), but it
@@ -19,7 +19,7 @@ against it and so future changes have clear, non-breaking rules.
 
 ## Decision
 
-**GA ships on schema `1.x`, with `1.3` as the current minor. `1.x` is the frozen,
+**GA ships on schema `1.x`, with `1.4` as the current minor. `1.x` is the frozen,
 stable GA contract.** We do NOT roll back to `1.0`; `1.1` is strictly additive
 over `1.0` and every `1.0` reader already tolerates it.
 
@@ -116,12 +116,22 @@ as a need to refresh derived semantic data. History consumers must also migrate
 previously persisted entity deltas rather than merely append newly parsed ones.
 
 This is one global revision for parser identity rules across all languages.
-The value is a decimal revision encoded as a string, currently `"6"`. Consumers
+The value is a decimal revision encoded as a string, currently `"7"`. Consumers
 compare the complete opaque string for equality rather than relying on numeric
 ordering. The field name supplies its meaning; the value names no language or
 feature. A bump invalidates both snapshot and search
 cache namespaces even when the source tree and provider release are unchanged.
 It does not change the individual symbol-ID format.
+
+Revision `"7"` re-keys no symbol, changes no entity and adds or removes no
+relation: in the languages capability `call_site_lines` lists, the call-site
+evidence entry of a `CALLS`, `CONSTRUCTS` or `ASYNC_CALLS` relation says where
+the call is (one line, or none when the engine cannot tell) instead of the
+caller's span, a file-level call's entry gains that line, and an entry whose
+line hands the target over by name carries the schema `1.4` field `form`. The
+snapshot of an unchanged tree therefore differs. Consumers upgrading from
+`"6"` must refresh derived snapshots; entity deltas are unaffected. See
+[ADR 0013](0013-call-site-lines.md).
 
 Revision `"6"` re-keys no symbol and changes no entity: it adds `IMPORTS`
 relations, one for each specifier a TypeScript, JavaScript, Go or Python import
@@ -200,6 +210,16 @@ the same ceiling on encoding and decoding. Older readers can still reject summar
 records larger than 16 MiB; upgrade readers before exchanging these larger
 artifacts. The identity revision describes parser identity rules, not compact
 reader compatibility, and does not remove this reader upgrade requirement.
+
+### Evidence form (schema 1.4)
+
+Schema 1.4 adds one optional evidence field, `form`. Its one value,
+`reference`, marks a call relation's call-site entry whose line hands the
+target over by name (`xs.map(double)`) instead of calling it; absent, the line
+writes a call or construction. The compact form carries it as an optional sixth
+element of an evidence entry, which a reader of an older minor ignores as a
+trailing additive field. The persisted Result shape is unchanged. See
+[ADR 0013](0013-call-site-lines.md).
 
 ### Source-file health accounting (schema 1.3)
 

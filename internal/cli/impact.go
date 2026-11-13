@@ -63,6 +63,7 @@ type impactEntry struct {
 	callFile  string
 	callStart int
 	callEnd   int
+	callLine  int
 	callToken string
 }
 
@@ -544,11 +545,11 @@ func buildImpactResponseFromReader(
 				}
 				// Keep the caller-body span and written call text so the call
 				// LINE can replace the definition line in the answer.
-				if callFile, callStart, callEnd, detail, ok := callEvidenceSpan(relation.Evidence); ok {
+				if callFile, callStart, callEnd, callLine, detail, ok := callEvidenceSpan(relation.Evidence, endpoint); ok {
 					if callFile == "" {
 						callFile = endpoint.FilePath
 					}
-					entry.callFile, entry.callStart, entry.callEnd = callFile, callStart, callEnd
+					entry.callFile, entry.callStart, entry.callEnd, entry.callLine = callFile, callStart, callEnd, callLine
 					// The callee as written is normally in the evidence detail; the
 					// callee endpoint's own NAME (not its qualified name) is the
 					// fallback, because that is what appears at a call site.
@@ -605,7 +606,7 @@ func annotateImpactCallSites(response *impactResponse, read lineReader) {
 		if entry.callFile == "" || entry.callToken == "" {
 			continue
 		}
-		site, ok := resolveCallSite(read, entry.callFile, entry.callToken, entry.callStart, entry.callEnd)
+		site, ok := resolveCallSite(read, entry.callFile, entry.callToken, entry.callStart, entry.callEnd, entry.callLine)
 		if !ok {
 			continue
 		}

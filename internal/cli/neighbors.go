@@ -637,7 +637,7 @@ func annotateNeighborCallSites(response *neighborResponse, read lineReader) {
 			if !isCallRelation(edge.Relation) {
 				continue
 			}
-			filePath, start, end, detail, ok := callEvidenceSpan(edge.Evidence)
+			filePath, start, end, callLine, detail, ok := callEvidenceSpan(edge.Evidence, edge.Endpoint)
 			if !ok {
 				continue
 			}
@@ -645,7 +645,7 @@ func annotateNeighborCallSites(response *neighborResponse, read lineReader) {
 				filePath = edge.Endpoint.FilePath
 			}
 			token := callTokenFromDetail(detail, focusName)
-			if site, resolved := resolveCallSite(read, filePath, token, start, end); resolved {
+			if site, resolved := resolveCallSite(read, filePath, token, start, end, callLine); resolved {
 				edge.CallSite = &site
 			}
 		}
@@ -1154,7 +1154,8 @@ func formatCallSiteLocation(endpoint neighborEndpoint, site *callSite) string {
 	// escaping has to be repeated rather than inherited.
 	name := termsafe.Line(endpointDisplayName(endpoint))
 	path := termsafe.Line(site.FilePath)
-	if site.Line == endpoint.StartLine && site.FilePath == endpoint.FilePath {
+	if (site.Line == endpoint.StartLine || endpoint.StartLine <= 0) && site.FilePath == endpoint.FilePath {
+		// A file-level caller has no definition line to keep beside the call.
 		return fmt.Sprintf("%s (%s:%d)", name, path, site.Line)
 	}
 	return fmt.Sprintf("%s (%s:%d, def :%d)", name, path, site.Line, endpoint.StartLine)

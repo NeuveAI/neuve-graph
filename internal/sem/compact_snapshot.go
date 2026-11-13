@@ -227,6 +227,10 @@ func (encoder *CompactSnapshotEncoder) relationRow(record RelationRecord) compac
 	evidence := make([][]any, len(record.Evidence))
 	for i, item := range record.Evidence {
 		evidence[i] = []any{encoder.intern(item.Kind), encoder.intern(item.FilePath), item.StartLine, item.EndLine, encoder.intern(item.Detail)}
+		if item.Form != "" {
+			// Schema 1.4: the optional sixth element is the entry's form.
+			evidence[i] = append(evidence[i], encoder.intern(item.Form))
+		}
 	}
 	var warnings []int
 	if record.WarningCodes != nil {
@@ -1510,8 +1514,8 @@ func decodeCompactData(tag string, fields []json.RawMessage, dictionary []string
 		}
 		evidence := make([]Evidence, len(rawEvidence))
 		for i, raw := range rawEvidence {
-			if len(raw) < 5 || (!tolerateTrailingFields && len(raw) != 5) {
-				return nil, fmt.Errorf("evidence arity %d, want 5", len(raw))
+			if len(raw) < 5 || (!tolerateTrailingFields && len(raw) != 5 && len(raw) != 6) {
+				return nil, fmt.Errorf("evidence arity %d, want 5 or 6", len(raw))
 			}
 			var err error
 			evidence[i].Kind, err = compactRawString(raw[0], dictionary)
@@ -1531,6 +1535,18 @@ func decodeCompactData(tag string, fields []json.RawMessage, dictionary []string
 			evidence[i].Detail, err = compactRawString(raw[4], dictionary)
 			if err != nil {
 				return nil, err
+			}
+			if len(raw) >= 6 {
+				// Schema 1.4's form. A newer minor may put something else in
+				// a trailing slot; under its tolerance an unreadable one is
+				// skipped like any other additive field.
+				form, err := compactRawString(raw[5], dictionary)
+				if err != nil && !tolerateTrailingFields {
+					return nil, err
+				}
+				if err == nil {
+					evidence[i].Form = form
+				}
 			}
 		}
 		var warningIndexes []int

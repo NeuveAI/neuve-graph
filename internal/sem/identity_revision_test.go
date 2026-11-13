@@ -9,7 +9,8 @@ func TestParserIdentityRevisionsSnapshotAndCaches(t *testing.T) {
 	header := leanHeader(sourceContext{}, "same-release", profileSpec{})
 	// "5": `block` symbols are emitted for HCL only (Rust function bodies lost theirs).
 	// "6": every import statement the syntax tree shows has an IMPORTS relation.
-	if header.IdentityRevision != "6" {
+	// "7": a call relation's evidence says where the call is (call_site_lines).
+	if header.IdentityRevision != "7" {
 		t.Fatalf("identity=%q", header.IdentityRevision)
 	}
 	if !strings.HasSuffix(searchSnapshotCacheVersion, "-"+header.IdentityRevision) || !strings.HasSuffix(providerRecordsCacheVersion, "-"+header.IdentityRevision) ||

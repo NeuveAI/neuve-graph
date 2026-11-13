@@ -15,9 +15,21 @@ var pythonDottedCallRe = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*(?:\s*\.\s
 // external-symbol fallback (it excludes the fan-out, which must never become a
 // speculative external edge in an ordinary repo).
 func pythonDottedCallImportedNames(block string, importsByName map[string][]string, importFormsByName map[string]map[string]pythonImportForm, moduleExists func(module string) bool) (allModules, externalModules map[string][]string) {
+	allModules, externalModules, _ = pythonDottedCallImportedNameSites(block, importsByName, importFormsByName, moduleExists)
+	return allModules, externalModules
+}
+
+// pythonDottedCallImportedNameSites is pythonDottedCallImportedNames with, for
+// each terminal name and each module a dotted call gave it, the offset in
+// block where the terminal name of the first such call is written. A name's
+// modules can come from several spellings (`a.x.fn()`, `b.y.fn()`), so the
+// call that produced a relation is the first one whose module the relation's
+// target came from.
+func pythonDottedCallImportedNameSites(block string, importsByName map[string][]string, importFormsByName map[string]map[string]pythonImportForm, moduleExists func(module string) bool) (allModules, externalModules map[string][]string, sites map[string]map[string]int) {
 	stripped := stripPythonLiteralsAndComments(block)
 	allModules = map[string][]string{}
 	externalModules = map[string][]string{}
+	sites = map[string]map[string]int{}
 	for _, m := range pythonDottedCallRe.FindAllStringSubmatchIndex(stripped, -1) {
 		if len(m) < 4 {
 			continue
@@ -44,8 +56,29 @@ func pythonDottedCallImportedNames(block string, importsByName map[string][]stri
 		all, external := pythonDottedCallModules(alias, tail, imported, importFormsByName[alias], moduleExists)
 		allModules[name] = uniqueStrings(append(allModules[name], all...))
 		externalModules[name] = uniqueStrings(append(externalModules[name], external...))
+		if sites[name] == nil {
+			sites[name] = map[string]int{}
+		}
+		for _, module := range append(all, external...) {
+			module = strings.TrimSpace(module)
+			if _, seen := sites[name][module]; !seen {
+				sites[name][module] = m[3] - len(name)
+			}
+		}
 	}
-	return allModules, externalModules
+	return allModules, externalModules, sites
+}
+
+// pythonDottedCallSite returns the first site of name among the dotted calls
+// whose module satisfies match, or -1.
+func pythonDottedCallSite(sites map[string]map[string]int, name string, match func(module string) bool) int {
+	site := -1
+	for module, offset := range sites[name] {
+		if match(module) && (site < 0 || offset < site) {
+			site = offset
+		}
+	}
+	return site
 }
 
 // pythonDottedCallRelations resolves dotted imported-module calls
@@ -63,7 +96,11 @@ func pythonDottedCallImportedNames(block string, importsByName map[string][]stri
 // back to an imported external edge, exactly as the bare imported-call fallback
 // does. A terminal name that has its own bare import binding is left to the
 // generic path so a bare-imported call keeps its established behavior.
-func pythonDottedCallRelations(from SymbolRecord, allModules, externalModules, importsByName map[string][]string, symbolsByShortName map[string][]SymbolRecord, childNames map[string]bool) []RelationRecord {
+//
+// line says where a relation's call is written: the line of the first dotted
+// call of name whose module the relation's target came from, as
+// callSiteLines reports it.
+func pythonDottedCallRelations(from SymbolRecord, allModules, externalModules, importsByName map[string][]string, symbolsByShortName map[string][]SymbolRecord, childNames map[string]bool, line func(name string, match func(module string) bool) int) []RelationRecord {
 	if typeLikeKind(from.Kind) {
 		return nil
 	}
@@ -125,6 +162,7 @@ func pythonDottedCallRelations(from SymbolRecord, allModules, externalModules, i
 			if typeLikeKind(to.Kind) {
 				relType = "CONSTRUCTS"
 			}
+			targetFile := to.FilePath
 			local = append(local, RelationRecord{
 				RecordType:    "relation",
 				FromID:        from.ID,
@@ -135,13 +173,9 @@ func pythonDottedCallRelations(from SymbolRecord, allModules, externalModules, i
 				RelationScope: "module",
 				Resolution:    "import_resolved",
 				TargetKind:    "symbol",
-				Evidence: []Evidence{{
-					Kind:      "call_site",
-					FilePath:  from.FilePath,
-					StartLine: from.StartLine,
-					EndLine:   from.EndLine,
-					Detail:    name,
-				}},
+				Evidence: []Evidence{callSiteEvidence("call_site", from, name, line(name, func(module string) bool {
+					return dottedImportedModuleMatchesFile([]string{module}, targetFile)
+				}))},
 				WarningCodes: []string{},
 			})
 		}
@@ -158,7 +192,20 @@ func pythonDottedCallRelations(from SymbolRecord, allModules, externalModules, i
 			// target — the generic pipeline still emits the correct local edge.
 			continue
 		}
-		relations = append(relations, importedExternalCallRelationsForName(from, name, externalModules[name])...)
+		// importedExternalCallRelationsForName, one module at a time so each
+		// external target carries the line of the call its module came from.
+		seenTargets := map[string]bool{}
+		for _, module := range externalModules[name] {
+			target := importedExternalSymbolName(module, name)
+			if target == "" || seenTargets[target] {
+				continue
+			}
+			seenTargets[target] = true
+			relation := importedExternalCallRelation(from, target, name)
+			module := strings.TrimSpace(module)
+			relation.Evidence[0] = callSiteEvidence("imported_call_site", from, name, line(name, func(candidate string) bool { return candidate == module }))
+			relations = append(relations, relation)
+		}
 	}
 	return relations
 }
