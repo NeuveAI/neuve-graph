@@ -542,7 +542,32 @@ const callLinesNestedFStringPython = "import os\nimport helpers\nfrom helpers im
 	"    def in_braces(self):\n" +
 	"        text = f\"{self.refresh()} done\"  # braces-receiver\n" +
 	"        self.refresh()\n" +
-	"        return text\n"
+	"        return text\n\n" +
+	"    def spec_escaped_quote(self):\n" +
+	"        text = f\"{self:\\\"self.refresh()}\"\n" +
+	"        self.refresh()  # spec-escaped-receiver\n" +
+	"        return text\n\n" +
+	"    def doubled_braces(self):\n" +
+	"        text = f\"{{self.refresh()}} done\"\n" +
+	"        self.refresh()  # doubled-receiver\n" +
+	"        return text\n\n" +
+	"    def spec_text(self):\n" +
+	"        text = f\"{1:>10} {2:self.refresh()}\"\n" +
+	"        self.refresh()  # spec-text-receiver\n" +
+	"        return text\n\n" +
+	"    def comment_in_field(self):\n" +
+	"        text = f\"\"\"{\n" +
+	"            1  # self.refresh()\n" +
+	"        }\"\"\"\n" +
+	"        self.refresh()  # field-comment-receiver\n" +
+	"        return text\n\n" +
+	"    def triple_in_field(self):\n" +
+	"        text = f\"{'''self.refresh()'''}\"\n" +
+	"        self.refresh()  # triple-in-field-receiver\n" +
+	"        return text\n\n\n" +
+	"def spec_escaped_fill():\n" +
+	"    x = f\"{1:\\\">10} os.getcwd()\"\n" +
+	"    return os.getcwd(), x  # spec-fill-imported-call\n"
 
 // Python 3.12 and later (PEP 701): a string nested in an f-string's braces
 // may use the outer quote, so the outer quote ends the f-string only outside
@@ -562,6 +587,22 @@ func TestCallSiteLinesPythonNestedFStringIsText(t *testing.T) {
 	assertCallLine(t, snapshot, "CALLS", "app.py", "nested_prefixes", "os.getcwd", "imported_call_site", markerLine(t, src, "prefixes-imported-call"))
 	assertCallNoLine(t, snapshot, "CALLS", "app.py", "nested_prefixes", "helpers.py:function:compute")
 	assertCallLine(t, snapshot, "CALLS", "app.py", "in_braces", ":Store.refresh", "call_site", markerLine(t, src, "braces-receiver"))
+	// A backslash in a format specification takes the next byte, so an
+	// escaped outer quote there does not end the f-string (review of round
+	// 10d, note 1).
+	assertCallLine(t, snapshot, "CALLS", "app.py", "spec_escaped_quote", ":Store.refresh", "call_site", markerLine(t, src, "spec-escaped-receiver"))
+	assertCallLine(t, snapshot, "CALLS", "app.py", "spec_escaped_fill", "os.getcwd", "imported_call_site", markerLine(t, src, "spec-fill-imported-call"))
+	// Text inside an f-string: {{ }}, a format specification, a comment in a
+	// field and a triple-quoted string nested in one (review of round 10d,
+	// note 2).
+	for _, shape := range []struct{ caller, marker string }{
+		{"doubled_braces", "doubled-receiver"},
+		{"spec_text", "spec-text-receiver"},
+		{"comment_in_field", "field-comment-receiver"},
+		{"triple_in_field", "triple-in-field-receiver"},
+	} {
+		assertCallLine(t, snapshot, "CALLS", "app.py", shape.caller, ":Store.refresh", "call_site", markerLine(t, src, shape.marker))
+	}
 }
 
 const callLinesRawBackslashOnlyTextGo = "package main\n\n" +

@@ -105,12 +105,14 @@ TypeScript), the same for all four kinds:
   allows; in TypeScript and JavaScript the syntax tree's comments, strings,
   template text (a `${}` substitution is code, a template nested in it is text
   again), regular expressions and JSX text. A spelling written there is never
-  the line; the first one written in code is, with one Python limit: the
-  bare-name and module-qualified scans (`helper()`, `pkg.mod.fn()`) read a
-  whole f-string as text, so for them a call inside its braces is not the
-  line; the line is a later call of the same spelling, or the entry has no
-  line when the braces hold the only one. Receiver and awaited calls inside
-  braces are placed there.
+  the line; the first one written in code is, with one Python limit. Inside
+  an f-string's braces a receiver call (`self.refresh()`), a call through an
+  imported module by one name (`os.getcwd()`, `helpers.compute()`) and an
+  awaited call are placed there. A bare-name call (`compute()`) and a call
+  through a longer module path (`os.path.join()`) are not: the scans that find
+  them read a whole f-string as text, so the line is a later call of the same
+  spelling, and a call written only inside braces gives the caller no relation
+  from those scans.
 - When the caller writes that spelling more than once, it is the first in
   source order, with these exceptions in TypeScript and JavaScript, where the
   line is a later real call of the target: an awaited call with type

@@ -586,24 +586,7 @@ func maskPythonFString(b []byte, start int, raw bool) (int, bool) {
 		case width == 1 && (c == '\n' || c == '\r'):
 			return j, false
 		case c == '\\':
-			if !raw && j+2 < len(b) && b[j+1] == 'N' && b[j+2] == '{' {
-				// A named escape, `\N{EM DASH}`: its braces are not a field.
-				k := j + 3
-				for k < len(b) && b[k] != '}' && b[k] != quote && b[k] != '\n' {
-					k++
-				}
-				if k < len(b) && b[k] == '}' {
-					k++
-				}
-				j = k
-				continue
-			}
-			if j+1 < len(b) && (b[j+1] == '{' || b[j+1] == '}') {
-				// A backslash does not escape a brace.
-				j++
-				continue
-			}
-			j += 2
+			j = pythonFStringEscapeEnd(b, j, quote, raw)
 		case c == '{' && j+1 < len(b) && b[j+1] == '{':
 			j += 2
 		case c == '{':
@@ -698,6 +681,10 @@ func maskPythonFormatSpec(b []byte, j int, quote byte, width int, raw bool) (int
 				return end, false
 			}
 			j, text = end, end
+		case c == '\\':
+			// As in the literal part: an escaped quote does not end the
+			// f-string, raw or not.
+			j = pythonFStringEscapeEnd(b, j, quote, raw)
 		case c == quote && (width == 1 || (j+2 < len(b) && b[j+1] == quote && b[j+2] == quote)), width == 1 && (c == '\n' || c == '\r'):
 			maskBytes(b, text, j)
 			return j, true
@@ -706,6 +693,28 @@ func maskPythonFormatSpec(b []byte, j int, quote byte, width int, raw bool) (int
 		}
 	}
 	return len(b), false
+}
+
+// pythonFStringEscapeEnd returns where an f-string's text resumes after the
+// backslash at j, in its literal part or a format specification: past the
+// byte after it (an escaped quote does not end the string, raw or not),
+// before a brace (a backslash does not escape one), or past a non-raw
+// string's named escape (`\N{EM DASH}`, whose braces are not a field).
+func pythonFStringEscapeEnd(b []byte, j int, quote byte, raw bool) int {
+	if !raw && j+2 < len(b) && b[j+1] == 'N' && b[j+2] == '{' {
+		k := j + 3
+		for k < len(b) && b[k] != '}' && b[k] != quote && b[k] != '\n' {
+			k++
+		}
+		if k < len(b) && b[k] == '}' {
+			k++
+		}
+		return k
+	}
+	if j+1 < len(b) && (b[j+1] == '{' || b[j+1] == '}') {
+		return j + 1
+	}
+	return j + 2
 }
 
 // maskPythonPlainString blanks the string without f or t prefix whose opening
