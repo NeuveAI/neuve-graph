@@ -69,22 +69,29 @@ func newCallSiteLines(from SymbolRecord, language, text, code string, firstLine 
 // own rule blanked (newlines kept, so offsets and lines are text's), for a
 // language whose calls say where they are; "" for any other.
 //
-//   - Go: comments, interpreted and raw strings and runes, which is what the
-//     generic mask (stripCodeLiteralsAndComments) knows; stripped is that mask
-//     of text when the caller already has it.
-//   - Python: `#` comments and strings, triple-quoted ones across lines.
+//   - Go: comments, interpreted strings and runes (a backslash takes the next
+//     byte) and raw strings, which take no escapes and end at the next
+//     backtick (stripGoLiteralsAndComments). The generic mask the scanners
+//     read differs from it only where a backslash comes before a backtick: it
+//     reads that backtick as escaped, so a raw string ending in a backslash
+//     runs on and swaps code and text after it. Where text holds no backslash
+//     before a backtick the two agree byte for byte and the view is "": the
+//     scanners' own matches already rest on Go code.
+//   - Python: `#` comments and strings, triple-quoted ones across lines, a
+//     backslash taking the next byte in every string, raw ones included
+//     (stripPythonLiteralsAndComments).
 //   - TypeScript and JavaScript: the syntax tree's comments, strings,
 //     template text (a `${}` substitution is code, a template nested in it is
 //     text again), regular expressions, JSX text, and what the parser read as
 //     blank. text must be the file's bytes from textStart; when it is not, or
 //     the tree cannot tell, the view is blank throughout.
-func callCodeView(language, text, stripped string, jsScan *jsScanState, textStart int) string {
+func callCodeView(language, text string, jsScan *jsScanState, textStart int) string {
 	switch language {
 	case "Go":
-		if len(stripped) == len(text) {
-			return stripped
+		if !strings.Contains(text, "\\`") {
+			return ""
 		}
-		return stripCodeLiteralsAndComments(text)
+		return stripGoLiteralsAndComments(text)
 	case "Python":
 		return stripPythonLiteralsAndComments(text)
 	case "JavaScript", "TypeScript":

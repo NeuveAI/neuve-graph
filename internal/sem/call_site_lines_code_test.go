@@ -175,9 +175,18 @@ export function receiverAfterText(store: Store): unknown {
   const view = <p>store.save() and new Store().save() and helper() and readFileSync() as text</p>;
   store.save(); // receiver-after-text
   store.save();
-  new Store().save(); // chain-after-text
+  new Store().save();
   helper(); // bare-after-text
   readFileSync("x"); // imported-after-text
+  return [re, s, view];
+}
+
+export function chainAfterText(): unknown {
+  const re = /new Store().save()/;
+  // new Store().save() in a comment
+  const s = "new Store().save()";
+  const view = <p>new Store().save() as text</p>;
+  new Store().save(); // chain-after-text
   return [re, s, view];
 }
 
@@ -256,15 +265,13 @@ func TestCallSiteLinesTypeScriptTextIsNotACall(t *testing.T) {
 	assertCallLine(t, snapshot, "CALLS", "top.ts", "", ":helper", "top_level_call_site", markerLine(t, callLinesCodeTypeScriptTopLevel, "top-level-after-text"))
 	assertCallLine(t, snapshot, "CALLS", "generic.ts", "genericAfterText", ":pick", "call_site", markerLine(t, callLinesCodeTypeScriptGeneric, "generic-after-text"))
 	// The constructor chain: its relation is the class's method, reached by
-	// `new Store().save()`; the entry with that detail is the real one.
-	for _, relation := range snapshot.Relations {
-		for _, evidence := range relation.Evidence {
-			if evidence.FilePath == "a.tsx" && evidence.Detail == "new Store().save" {
-				if want := markerLine(t, src, "chain-after-text"); evidence.StartLine != want {
-					t.Errorf("constructor chain entry at line %d, want %d", evidence.StartLine, want)
-				}
-			}
-		}
+	// `new Store().save()` in a caller that reaches it no other way (a caller
+	// that also calls store.save() keeps that entry, one relation per caller
+	// and target). callEntry fails when the relation is missing, and the
+	// detail says it is the chain's.
+	assertCallLine(t, snapshot, "CALLS", "a.tsx", "chainAfterText", ":Store.save", "call_site", markerLine(t, src, "chain-after-text"))
+	if _, evidence := callEntry(t, snapshot, "CALLS", "a.tsx", "chainAfterText", ":Store.save"); evidence.Detail != "new Store().save" {
+		t.Errorf("chainAfterText -> Store.save: detail %q, want the constructor chain's", evidence.Detail)
 	}
 }
 
@@ -321,9 +328,9 @@ const callLinesCodeGo = "package main\n\n" +
 	"\treturn text + raw + dir\n" +
 	"}\n"
 
-// Go: the generic mask is Go's own rule (comments, strings, raw strings
-// across lines), so a receiver, imported or goroutine call written first in
-// any of them is placed on the real call, the first of several. A package-level
+// Go: comments, strings and raw strings across lines are not code, so a
+// receiver, imported or goroutine call written first in any of them is placed
+// on the real call, the first of several. A package-level
 // var initialiser's call is the file's, on its own line. Reason: the brief
 // asks for each scan in each language, and the Go file-level call was
 // asserted nowhere.
@@ -419,4 +426,100 @@ func TestCallSiteLinesBoundArgumentIsNotTheTarget(t *testing.T) {
 	assertCallReference(t, snapshot, "CALLS", "target.test.ts", "passes", "lib.ts:function:target", "call_site", markerLine(t, callLinesBoundTarget, "passes-target"))
 	assertCallReference(t, snapshot, "CALLS", "target.test.ts", "both", "lib.ts:function:target", "call_site", markerLine(t, callLinesBoundTarget, "passes-after-local"))
 	assertCallReference(t, snapshot, "CALLS", "target.test.ts", "", "lib.ts:function:target", "top_level_call_site", markerLine(t, callLinesBoundTarget, "file-level-target"))
+}
+
+const callLinesEscapedHelpers = `def compute():
+    return 1
+`
+
+const callLinesEscapedPython = `import os
+import helpers
+
+
+def escaped_double():
+    """doc with \""" inside helpers.compute() and os.getcwd() """
+    q = 1
+    helpers.compute()  # double-module-call
+    return os.getcwd()  # double-imported-call
+
+
+def escaped_single():
+    '''doc with \''' inside helpers.compute() and os.getcwd() '''
+    q = 1
+    helpers.compute()  # single-module-call
+    return os.getcwd()  # single-imported-call
+
+
+def escaped_raw():
+    r"""raw doc with \""" inside helpers.compute() and os.getcwd() """
+    q = 1
+    helpers.compute()  # raw-module-call
+    return os.getcwd()  # raw-imported-call
+`
+
+// Python: a triple-quoted string holding a backslash before its own quote
+// run (three double or three single quotes) does not end there; a raw one
+// does not either, as the language reference says (a quote after a backslash is escaped even in a raw
+// literal). The calls the docstring spells after it are text, and the module
+// and imported calls lower are the lines. Reason: the review of the round
+// (N1): the Python mask ended the string at \""", read its tail as code and
+// put both entries on the docstring's line.
+func TestCallSiteLinesPythonEscapedTripleQuoteIsText(t *testing.T) {
+	snapshot := buildCallLineFixture(t, map[string]string{"helpers.py": callLinesEscapedHelpers, "app.py": callLinesEscapedPython})
+	src := callLinesEscapedPython
+	for _, shape := range []struct{ caller, prefix string }{{"escaped_double", "double"}, {"escaped_single", "single"}, {"escaped_raw", "raw"}} {
+		assertCallLine(t, snapshot, "CALLS", "app.py", shape.caller, "helpers.py:function:compute", "call_site", markerLine(t, src, shape.prefix+"-module-call"))
+		assertCallLine(t, snapshot, "CALLS", "app.py", shape.caller, "os.getcwd", "imported_call_site", markerLine(t, src, shape.prefix+"-imported-call"))
+	}
+}
+
+const callLinesRawBackslashGo = "package main\n\n" +
+	"type S struct{}\n\n" +
+	"func (s *S) Save() int { return 1 }\n\n" +
+	"func helper() int { return 1 }\n\n" +
+	"var sep = `\\`\n" +
+	"var doc = `helper() at file level`\n" +
+	"var initial = helper() // top-level-call\n\n" +
+	"func caller(s *S) string {\n" +
+	"\tsep := `\\`\n" +
+	"\tdoc := `helper() and s.Save() are here`\n" +
+	"\tq := 1\n" +
+	"\thelper() // bare-call\n" +
+	"\ts.Save() // receiver-call\n" +
+	"\treturn sep + doc + string(rune(q))\n" +
+	"}\n"
+
+// Go: a raw string takes no escapes, so one ending in a backslash ends at the
+// backtick after it. The calls the next raw string spells are text, and the
+// real bare and receiver calls lower are the lines, in a function and at file
+// level. Reason: the review of the round (N2): Go's view was the generic
+// mask, which reads that backtick as escaped and swapped code and text for
+// the rest of the caller.
+func TestCallSiteLinesGoRawStringEndingInBackslash(t *testing.T) {
+	snapshot := buildCallLineFixture(t, map[string]string{"go.mod": "module example.com/m\n\ngo 1.22\n", "main.go": callLinesRawBackslashGo})
+	src := callLinesRawBackslashGo
+	assertCallLine(t, snapshot, "CALLS", "main.go", "caller", ":function:helper", "call_site", markerLine(t, src, "bare-call"))
+	assertCallLine(t, snapshot, "CALLS", "main.go", "caller", ":S.Save", "call_site", markerLine(t, src, "receiver-call"))
+	assertCallLine(t, snapshot, "CALLS", "main.go", "", ":function:helper", "top_level_call_site", markerLine(t, src, "top-level-call"))
+}
+
+// A TypeScript file whose scope walk stopped at the depth limit has no syntax
+// tree to tell code from text, so its code view is blank: a call the tree did
+// not record gets no line, even where the text scan finds the name in a
+// regular expression first. Reason: the review of the round (note 3): a
+// view made all code there instead put the entry on the regular expression,
+// and no test failed.
+func TestCallSiteLinesTypeScriptNoWholeTreeIsNotCode(t *testing.T) {
+	src := "export function helper(): number {\n  return 1;\n}\n\n" +
+		"export function afterText(): unknown {\n  const re = /helper()/;\n  helper();\n  return re;\n}\n\n" +
+		nestedSource("export const nested = ", '(', ')', 6000, "1", ";\n")
+	scan, err := newJSScanState("deep.ts", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !scan.depthTruncated {
+		t.Fatal("the fixture no longer stops the scope walk at the depth limit")
+	}
+	snapshot := buildCallLineFixture(t, map[string]string{"deep.ts": src})
+	assertCallNoLine(t, snapshot, "CALLS", "deep.ts", "afterText", ":function:helper")
 }

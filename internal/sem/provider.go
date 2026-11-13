@@ -5821,11 +5821,13 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 			}
 			// blockCode is block with every byte that is not code by the
 			// language's own rule blanked; a line is placed only on code. Go's
-			// rule is the generic mask every scanner already reads, so Go keeps
-			// none and its scanners' own matches stand.
+			// rule is the generic mask every scanner already reads except in a
+			// raw string ending in a backslash, so a Go block keeps a view only
+			// when it holds a backslash before a backtick; otherwise its
+			// scanners' own matches stand.
 			blockCode := ""
-			if callSiteLineLanguageSet[file.Language] && file.Language != "Go" {
-				blockCode = callCodeView(file.Language, block, "", jsScan, textStart)
+			if callSiteLineLanguageSet[file.Language] {
+				blockCode = callCodeView(file.Language, block, jsScan, textStart)
 			}
 			sites := newCallSiteLines(from, file.Language, block, blockCode, blockFirstLine)
 			sites.textStart = textStart
@@ -6071,6 +6073,12 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 					placeBlock = sites.code
 					placeBareSites = callLikeIdentifierSites(placeBlock, file.Language)
 					placeArgumentSites = jsCallableArgumentIdentifierSites(placeBlock)
+				}
+				// So in Go, where a block has a view of its own (a raw string
+				// ending in a backslash); Go has no argument sites.
+				if file.Language == "Go" && sites.code != "" {
+					placeBlock = sites.code
+					placeBareSites = callLikeIdentifierSites(placeBlock, file.Language)
 				}
 				bareLine := func(name string, callsOnly, visibleOnly bool, skip func(position int) bool) int {
 					return bareCallLine(sites, placeBlock, name, from, jsScan, jsNamespaceCalls, objectCallableSpans, placeBareSites, placeArgumentSites, callsOnly, visibleOnly, skip)
@@ -6667,10 +6675,12 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 			// as topLevel's.
 			topLevelCode := ""
 			switch file.Language {
+			case "Go":
+				topLevelCode = callCodeView(file.Language, topLevel, nil, 0)
 			case "Python":
 				topLevelCode = stripPythonLiteralsAndComments(topLevel)
 			case "JavaScript", "TypeScript":
-				topLevelCode = stripDeclarationOnlyCallSignaturesLike(topLevelSource, topLevel, callCodeView(file.Language, topLevelSource, "", jsScan, 0))
+				topLevelCode = stripDeclarationOnlyCallSignaturesLike(topLevelSource, topLevel, callCodeView(file.Language, topLevelSource, jsScan, 0))
 			}
 			if file.Language == "Rust" {
 				topLevel = stripRustCodegenMacroBodies(topLevel)
@@ -6787,6 +6797,10 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 					topLevelPlace = topLevelCode
 					topLevelPlaceSites = callLikeIdentifierSites(topLevelCode, file.Language)
 					topLevelPlaceArgumentSites = jsCallableArgumentIdentifierSites(topLevelCode)
+				}
+				if file.Language == "Go" && topLevelCode != "" {
+					topLevelPlace = topLevelCode
+					topLevelPlaceSites = callLikeIdentifierSites(topLevelCode, file.Language)
 				}
 				topLevelTreeWhole := topLevelUses != nil && jsScan.parsed && !jsScan.depthTruncated
 				for _, name := range sortedKeysOf(topLevelNames) {
@@ -25106,6 +25120,23 @@ func fsharpCharLiteralEnd(b []byte, i int) int {
 }
 
 func stripCodeLiteralsAndComments(content string) string {
+	return maskCodeLiteralsAndComments(content, true)
+}
+
+// stripGoLiteralsAndComments is Go's own rule of what is code: the generic
+// mask, except that a raw string (backticks) takes no escapes and ends at the
+// next backtick whatever precedes it. Interpreted strings and runes keep their
+// escapes.
+func stripGoLiteralsAndComments(content string) string {
+	return maskCodeLiteralsAndComments(content, false)
+}
+
+// maskCodeLiteralsAndComments blanks `//` and `/* */` comments, one-line
+// strings in either quote (a backslash takes the next byte) and backtick
+// strings, keeping every newline and the length. backtickEscapes says whether
+// a backslash inside backticks takes the next byte, as in a JavaScript
+// template; in a Go raw string it does not.
+func maskCodeLiteralsAndComments(content string, backtickEscapes bool) string {
 	bytes := []byte(content)
 	for i := 0; i < len(bytes); i++ {
 		switch bytes[i] {
@@ -25128,7 +25159,7 @@ func stripCodeLiteralsAndComments(content string) string {
 			}
 		case '`':
 			for j := i + 1; j < len(bytes); j++ {
-				if bytes[j] == '\\' {
+				if backtickEscapes && bytes[j] == '\\' {
 					j++
 					continue
 				}

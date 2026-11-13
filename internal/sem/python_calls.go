@@ -434,6 +434,17 @@ func pythonSingleSelectorAliasCall(alias string, imported []string) bool {
 	return false
 }
 
+// stripPythonLiteralsAndComments blanks Python's `#` comments and strings,
+// triple-quoted ones across lines, keeping every newline and the length.
+//
+// Inside every string a backslash takes the byte after it, so `\"""` inside a
+// triple-quoted string, like `\"` inside a one-line one, does not close it.
+// That holds for raw strings (`r`, `R`, `rb`, `br` and their case variants)
+// too: the language reference (Lexical analysis, string and bytes literals)
+// says that even in a raw literal a quote can be escaped with a backslash,
+// which stays in the value, and that a raw literal cannot end in an odd
+// number of backslashes. A prefix changes the value, not where the string
+// ends, so none is read here.
 func stripPythonLiteralsAndComments(content string) string {
 	bytes := []byte(content)
 	for i := 0; i < len(bytes); i++ {
@@ -443,6 +454,9 @@ func stripPythonLiteralsAndComments(content string) string {
 			if i+2 < len(bytes) && bytes[i+1] == quote && bytes[i+2] == quote {
 				j := i + 3
 				for j+2 < len(bytes) && !(bytes[j] == quote && bytes[j+1] == quote && bytes[j+2] == quote) {
+					if bytes[j] == '\\' {
+						j++
+					}
 					j++
 				}
 				if j+2 < len(bytes) {

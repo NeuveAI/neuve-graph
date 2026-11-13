@@ -95,12 +95,18 @@ TypeScript), the same for all four kinds:
   (`store\n  .save()`, `fn(\n  arg,\n)`) that is the line of the callee's
   name, the one a reader needs.
 - The line rests on code. Every scan reads the caller through its
-  language's own rule of what is code: in Go comments, strings and raw strings;
-  in Python `#` comments and strings, triple-quoted ones across lines; in
-  TypeScript and JavaScript the syntax tree's comments, strings, template text
-  (a `${}` substitution is code, a template nested in it is text again),
-  regular expressions and JSX text. A spelling written there is never the
-  line; the first one written in code is.
+  language's own rule of what is code: in Go comments, interpreted strings,
+  runes and raw strings, a raw string taking no escapes (one ending in a
+  backslash ends at the next backtick); in Python `#` comments and strings,
+  triple-quoted ones across lines, where a backslash takes the next byte in
+  every string, raw ones included (`\"""` does not close a triple-quoted
+  string); in TypeScript and JavaScript the syntax tree's comments, strings,
+  template text (a `${}` substitution is code, a template nested in it is text
+  again), regular expressions and JSX text. A spelling written there is never
+  the line; the first one written in code is, with one Python limit: a call
+  inside an f-string's braces is code to Python but text to this rule, so the
+  line is a later real call of the same spelling, or the entry has no line
+  when the f-string holds the only one. It is never a wrong line.
 - When the caller writes that spelling more than once, it is the first in
   source order, with these exceptions in TypeScript and JavaScript, where the
   line is a later real call of the target: an awaited call with type
