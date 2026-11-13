@@ -112,7 +112,8 @@ TypeScript), the same for all four kinds:
   (`os.path.join()`) and an awaited call's own entry (`async_call_site`) are
   not: the scans that find them read a whole f-string as text, so the line is
   a later call of the same spelling, or there is none. A call written only
-  inside braces gives the caller no relation, whatever its kind.
+  inside braces usually gives the caller no relation; where it gives one, the
+  braces are the line.
 - When the caller writes that spelling more than once, it is the first in
   source order, with these exceptions in TypeScript and JavaScript, where the
   line is a later real call of the target: an awaited call with type
