@@ -18316,6 +18316,10 @@ const (
 
 var errGitMetadataTreeBound = errors.New("Git metadata tree exceeded its structural validation bound")
 
+// gitMetadataTreeBeforeOpen, when set (by tests), is called with each queued
+// directory's path just before the walk opens it.
+var gitMetadataTreeBeforeOpen func(path string)
+
 // gitMetadataTreesSafeWithResolver walks complete Git administrative trees
 // through the rooted resolver. Readdirnames enumerates from the already-opened
 // directory handle without an implicit Lstat; each name is then inspected by
@@ -18354,10 +18358,28 @@ func gitMetadataTreesSafeWithResolver(resolver *sameVolumePathResolver, roots []
 		queuedRoots[relative] = len(queue)
 		queue = append(queue, candidate)
 	}
+	rootCount := len(queue)
 	for cursor := 0; cursor < len(queue); cursor++ {
 		current := queue[cursor]
-		opened, resolved, err := resolver.open(filepath.Join(resolver.baseResolved, current.path))
+		path := filepath.Join(resolver.baseResolved, current.path)
+		if gitMetadataTreeBeforeOpen != nil {
+			gitMetadataTreeBeforeOpen(path)
+		}
+		opened, resolved, err := resolver.open(path)
 		if err != nil {
+			// A listed directory that is gone by the time it is opened (another
+			// process's `git worktree remove`, cache write or gc) is absent, as
+			// for the entry and redirect checks below: Git cannot read a
+			// directory that does not exist, and one created after this point was
+			// already outside the walk's view, so skipping opens no new window.
+			// Only plain not-exist counts. The resolver runs its mount and volume
+			// checks before each lookup, so a directory swapped for an off-volume
+			// link still fails here as off-volume; ENOTDIR (an ancestor replaced
+			// by a non-directory the walk never classified), permission and
+			// bound errors, and a missing walk root, still fail closed.
+			if cursor >= rootCount && errors.Is(err, fs.ErrNotExist) && !errors.Is(err, errSymlinkChainOffVolume) {
+				continue
+			}
 			return false
 		}
 		info, err := opened.Stat()
