@@ -6678,7 +6678,7 @@ func forEachRelation(ctx context.Context, repoKey string, files []FileRecord, re
 			case "Go":
 				topLevelCode = callCodeView(file.Language, topLevel, nil, 0)
 			case "Python":
-				topLevelCode = stripPythonLiteralsAndComments(topLevel)
+				topLevelCode = pythonCodeView(topLevel)
 			case "JavaScript", "TypeScript":
 				topLevelCode = stripDeclarationOnlyCallSignaturesLike(topLevelSource, topLevel, callCodeView(file.Language, topLevelSource, jsScan, 0))
 			}

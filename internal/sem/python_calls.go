@@ -444,12 +444,48 @@ func pythonSingleSelectorAliasCall(alias string, imported []string) bool {
 // says that even in a raw literal a quote can be escaped with a backslash,
 // which stays in the value, and that a raw literal cannot end in an odd
 // number of backslashes. A prefix changes the value, not where the string
-// ends, so none is read here.
+// ends, except for an f-string or t-string (below).
+//
+// An f-string or t-string (a prefix holding `f`, `F`, `t` or `T`, alone or
+// with `r` or `R`) holds replacement fields in braces; `{{` and `}}` are text.
+// Inside a field a quote opens a nested string, read by these same rules (an
+// f-string nested in it too), and since Python 3.12 (PEP 701) it may be the
+// outer string's own quote, so the outer quote ends the string only outside
+// every field. Code before 3.12 cannot reuse the quote inside a field, so the
+// rule reads every version the same. Here the whole f-string is blanked,
+// fields included, as the scanners have always read it; pythonCodeView keeps
+// the fields' code.
 func stripPythonLiteralsAndComments(content string) string {
+	return maskPythonLiteralsAndComments(content, false)
+}
+
+// pythonCodeView is Python's code view (callCodeView): the mask above, except
+// that an f-string's or t-string's replacement fields are code -- they are
+// expressions Python runs -- with their nested strings, comments and format
+// specifications blanked.
+func pythonCodeView(content string) string {
+	return maskPythonLiteralsAndComments(content, true)
+}
+
+func maskPythonLiteralsAndComments(content string, fieldsAreCode bool) string {
 	bytes := []byte(content)
 	for i := 0; i < len(bytes); i++ {
 		switch bytes[i] {
 		case '"', '\'':
+			if formatted, raw := pythonStringPrefix(bytes, i); formatted {
+				end, closed := maskPythonFString(bytes, i, raw)
+				if !closed {
+					// A one-line string a line break ends unclosed: left as
+					// is, as for any other string.
+					i = end
+					continue
+				}
+				if !fieldsAreCode {
+					maskBytes(bytes, i, end)
+				}
+				i = end - 1
+				continue
+			}
 			quote := bytes[i]
 			if i+2 < len(bytes) && bytes[i+1] == quote && bytes[i+2] == quote {
 				j := i + 3
@@ -491,4 +527,219 @@ func stripPythonLiteralsAndComments(content string) string {
 		}
 	}
 	return string(bytes)
+}
+
+// pythonStringPrefix reports, for the quote at quote, whether the word written
+// right before it is a string prefix that makes an f-string or t-string, and
+// whether it makes a raw one. A word that is not a prefix (`if"x"`) gives a
+// plain string.
+func pythonStringPrefix(b []byte, quote int) (formatted, raw bool) {
+	start := quote
+	for start > 0 && isASCIIIdentifierByte(b[start-1]) {
+		start--
+	}
+	if quote-start == 0 || quote-start > 2 || (start > 0 && b[start-1] >= 0x80) {
+		return false, false
+	}
+	// The prefixes that make one: f, t, and either with r, in any case and
+	// order. b and u never combine with f or t.
+	word := b[start:quote]
+	for _, c := range word {
+		switch c | 0x20 {
+		case 'f', 't':
+			if formatted {
+				return false, false
+			}
+			formatted = true
+		case 'r':
+			if raw {
+				return false, false
+			}
+			raw = true
+		default:
+			return false, false
+		}
+	}
+	return formatted, raw
+}
+
+// maskPythonFString blanks the text of the f-string or t-string whose opening
+// quote is at start -- its literal parts, its fields' nested strings,
+// comments and format specifications -- and keeps its fields' code. It
+// returns the index after the closing quote, and whether there was one: a
+// one-line string a line break ends unclosed returns that line break's index
+// (the end of the content for a string the content ends).
+func maskPythonFString(b []byte, start int, raw bool) (int, bool) {
+	quote := b[start]
+	width := 1
+	if start+2 < len(b) && b[start+1] == quote && b[start+2] == quote {
+		width = 3
+	}
+	text := start
+	j := start + width
+	for j < len(b) {
+		c := b[j]
+		switch {
+		case c == quote && (width == 1 || (j+2 < len(b) && b[j+1] == quote && b[j+2] == quote)):
+			maskBytes(b, text, j+width)
+			return j + width, true
+		case width == 1 && (c == '\n' || c == '\r'):
+			return j, false
+		case c == '\\':
+			if !raw && j+2 < len(b) && b[j+1] == 'N' && b[j+2] == '{' {
+				// A named escape, `\N{EM DASH}`: its braces are not a field.
+				k := j + 3
+				for k < len(b) && b[k] != '}' && b[k] != quote && b[k] != '\n' {
+					k++
+				}
+				if k < len(b) && b[k] == '}' {
+					k++
+				}
+				j = k
+				continue
+			}
+			if j+1 < len(b) && (b[j+1] == '{' || b[j+1] == '}') {
+				// A backslash does not escape a brace.
+				j++
+				continue
+			}
+			j += 2
+		case c == '{' && j+1 < len(b) && b[j+1] == '{':
+			j += 2
+		case c == '{':
+			maskBytes(b, text, j+1)
+			end, ok := maskPythonField(b, j+1, quote, width, raw)
+			if !ok {
+				return end, false
+			}
+			j, text = end, end
+		default:
+			j++
+		}
+	}
+	maskBytes(b, text, len(b))
+	return len(b), width == 3
+}
+
+// maskPythonField reads the replacement field whose code starts at j, inside
+// an f-string with the given quote and width. Its code stays; a nested string
+// or comment in it, and its format specification after a top-level `:`, are
+// blanked. It returns the index where the f-string's text resumes (after the
+// field's closing brace), and false when the content ends first.
+func maskPythonField(b []byte, j int, quote byte, width int, raw bool) (int, bool) {
+	depth := 0
+	for j < len(b) {
+		c := b[j]
+		switch c {
+		case '"', '\'':
+			if formatted, nestedRaw := pythonStringPrefix(b, j); formatted {
+				end, closed := maskPythonFString(b, j, nestedRaw)
+				if !closed {
+					return end, false
+				}
+				j = end
+				continue
+			}
+			end, closed := maskPythonPlainString(b, j)
+			if !closed {
+				return end, false
+			}
+			j = end
+		case '#':
+			k := j
+			for k < len(b) && b[k] != '\n' && b[k] != '\r' {
+				k++
+			}
+			maskBytes(b, j, k)
+			j = k
+		case '(', '[', '{':
+			depth++
+			j++
+		case ')', ']':
+			if depth > 0 {
+				depth--
+			}
+			j++
+		case '}':
+			if depth == 0 {
+				return j + 1, true
+			}
+			depth--
+			j++
+		case ':':
+			if depth == 0 {
+				return maskPythonFormatSpec(b, j+1, quote, width, raw)
+			}
+			j++
+		default:
+			j++
+		}
+	}
+	return len(b), false
+}
+
+// maskPythonFormatSpec blanks a field's format specification from j (text,
+// with nested fields in braces that are code) up to the field's closing
+// brace, and returns where the f-string's text resumes. The f-string's own
+// closing quote, or for a one-line string a line break, also ends it; the
+// f-string then reads that byte.
+func maskPythonFormatSpec(b []byte, j int, quote byte, width int, raw bool) (int, bool) {
+	text := j
+	for j < len(b) {
+		c := b[j]
+		switch {
+		case c == '}':
+			maskBytes(b, text, j)
+			return j + 1, true
+		case c == '{':
+			maskBytes(b, text, j+1)
+			end, ok := maskPythonField(b, j+1, quote, width, raw)
+			if !ok {
+				return end, false
+			}
+			j, text = end, end
+		case c == quote && (width == 1 || (j+2 < len(b) && b[j+1] == quote && b[j+2] == quote)), width == 1 && (c == '\n' || c == '\r'):
+			maskBytes(b, text, j)
+			return j, true
+		default:
+			j++
+		}
+	}
+	return len(b), false
+}
+
+// maskPythonPlainString blanks the string without f or t prefix whose opening
+// quote is at start, by the rules of stripPythonLiteralsAndComments, and
+// returns the index after its closing quote and whether there was one.
+func maskPythonPlainString(b []byte, start int) (int, bool) {
+	quote := b[start]
+	if start+2 < len(b) && b[start+1] == quote && b[start+2] == quote {
+		j := start + 3
+		for j+2 < len(b) && !(b[j] == quote && b[j+1] == quote && b[j+2] == quote) {
+			if b[j] == '\\' {
+				j++
+			}
+			j++
+		}
+		if j+2 >= len(b) {
+			maskBytes(b, start, len(b))
+			return len(b), false
+		}
+		maskBytes(b, start, j+3)
+		return j + 3, true
+	}
+	for j := start + 1; j < len(b); j++ {
+		if b[j] == '\n' || b[j] == '\r' {
+			return j, false
+		}
+		if b[j] == '\\' {
+			j++
+			continue
+		}
+		if b[j] == quote {
+			maskBytes(b, start, j+1)
+			return j + 1, true
+		}
+	}
+	return len(b), false
 }

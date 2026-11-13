@@ -523,3 +523,66 @@ func TestCallSiteLinesTypeScriptNoWholeTreeIsNotCode(t *testing.T) {
 	snapshot := buildCallLineFixture(t, map[string]string{"deep.ts": src})
 	assertCallNoLine(t, snapshot, "CALLS", "deep.ts", "afterText", ":function:helper")
 }
+
+const callLinesNestedFStringPython = "import os\nimport helpers\nfrom helpers import compute\n\n\n" +
+	"def nested_same_quote():\n" +
+	"    label = f\"{\"helpers.compute() and os.getcwd() and compute()\"}\"\n" +
+	"    helpers.compute()\n" +
+	"    compute()  # nested-bare-call\n" +
+	"    return os.getcwd(), label  # nested-imported-call\n\n\n" +
+	"def nested_single_only():\n" +
+	"    return f'{'os.getcwd()'}'\n\n\n" +
+	"def nested_prefixes():\n" +
+	"    a = rf\"{\"helpers.compute()\"}\" + T'{'os.getcwd()'}'\n" +
+	"    b = f\"{f\"{\"os.getcwd()\"}\"}\"\n" +
+	"    return os.getcwd(), a, b  # prefixes-imported-call\n\n\n" +
+	"class Store:\n" +
+	"    def refresh(self):\n" +
+	"        return 1\n\n" +
+	"    def in_braces(self):\n" +
+	"        text = f\"{self.refresh()} done\"  # braces-receiver\n" +
+	"        self.refresh()\n" +
+	"        return text\n"
+
+// Python 3.12 and later (PEP 701): a string nested in an f-string's braces
+// may use the outer quote, so the outer quote ends the f-string only outside
+// every field. The nested string's text is not code: the real calls lower are
+// the lines, and a caller that only spells a call there keeps its relation
+// (found by the receiver scan's generic mask) with no line. The same holds
+// for rf and T prefixes and an f-string nested in a field. A field itself is
+// code, so a receiver call written in one is the first call. Reason: the
+// review of round 10c (N3): the f-string ended at the nested string's opening
+// quote, its text read as code, and two entries sat on lines with no call.
+func TestCallSiteLinesPythonNestedFStringIsText(t *testing.T) {
+	snapshot := buildCallLineFixture(t, map[string]string{"helpers.py": callLinesEscapedHelpers, "app.py": callLinesNestedFStringPython})
+	src := callLinesNestedFStringPython
+	assertCallLine(t, snapshot, "CALLS", "app.py", "nested_same_quote", "helpers.py:function:compute", "call_site", markerLine(t, src, "nested-bare-call"))
+	assertCallLine(t, snapshot, "CALLS", "app.py", "nested_same_quote", "os.getcwd", "imported_call_site", markerLine(t, src, "nested-imported-call"))
+	assertCallNoLine(t, snapshot, "CALLS", "app.py", "nested_single_only", "os.getcwd")
+	assertCallLine(t, snapshot, "CALLS", "app.py", "nested_prefixes", "os.getcwd", "imported_call_site", markerLine(t, src, "prefixes-imported-call"))
+	assertCallNoLine(t, snapshot, "CALLS", "app.py", "nested_prefixes", "helpers.py:function:compute")
+	assertCallLine(t, snapshot, "CALLS", "app.py", "in_braces", ":Store.refresh", "call_site", markerLine(t, src, "braces-receiver"))
+}
+
+const callLinesRawBackslashOnlyTextGo = "package main\n\n" +
+	"import \"os\"\n\n" +
+	"type S struct{}\n\n" +
+	"func (s *S) Save() int { return 1 }\n\n" +
+	"func helper() int { return 1 }\n\n" +
+	"func onlyText(s *S) string {\n" +
+	"\tsep := `\\`\n" +
+	"\tdoc := `helper() and s.Save() and os.Getenv(\"x\") are here`\n" +
+	"\treturn sep + doc\n" +
+	"}\n"
+
+// Go: a caller whose only spellings of its calls are in a raw string after a
+// raw string ending in a backslash keeps the relations the scanners find
+// (they read the generic mask), each with no line. Reason: Neuve's review of
+// round 10c: the raw-string test always had a real call, so nothing pinned
+// the text-only case.
+func TestCallSiteLinesGoRawStringOnlyTextHasNoLine(t *testing.T) {
+	snapshot := buildCallLineFixture(t, map[string]string{"go.mod": "module example.com/m\n\ngo 1.22\n", "main.go": callLinesRawBackslashOnlyTextGo})
+	assertCallNoLine(t, snapshot, "CALLS", "main.go", "onlyText", ":function:helper")
+	assertCallNoLine(t, snapshot, "CALLS", "main.go", "onlyText", ":S.Save")
+	assertCallNoLine(t, snapshot, "CALLS", "main.go", "onlyText", "os.Getenv")
+}

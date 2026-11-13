@@ -78,7 +78,10 @@ func newCallSiteLines(from SymbolRecord, language, text, code string, firstLine 
 //     before a backtick the two agree byte for byte and the view is "": the
 //     scanners' own matches already rest on Go code.
 //   - Python: `#` comments and strings, triple-quoted ones across lines, a
-//     backslash taking the next byte in every string, raw ones included
+//     backslash taking the next byte in every string, raw ones included; an
+//     f-string's or t-string's replacement fields are code, their nested
+//     strings and format specifications not (pythonCodeView). The scanners
+//     read the same mask with every f-string blank, fields included
 //     (stripPythonLiteralsAndComments).
 //   - TypeScript and JavaScript: the syntax tree's comments, strings,
 //     template text (a `${}` substitution is code, a template nested in it is
@@ -93,7 +96,7 @@ func callCodeView(language, text string, jsScan *jsScanState, textStart int) str
 		}
 		return stripGoLiteralsAndComments(text)
 	case "Python":
-		return stripPythonLiteralsAndComments(text)
+		return pythonCodeView(text)
 	case "JavaScript", "TypeScript":
 		if view, ok := jsScan.codeViewOf(text, textStart); ok {
 			return view

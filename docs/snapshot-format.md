@@ -100,13 +100,17 @@ TypeScript), the same for all four kinds:
   backslash ends at the next backtick); in Python `#` comments and strings,
   triple-quoted ones across lines, where a backslash takes the next byte in
   every string, raw ones included (`\"""` does not close a triple-quoted
-  string); in TypeScript and JavaScript the syntax tree's comments, strings,
+  string), and an f-string's or t-string's replacement fields are code while
+  a string nested in one is text again, in the outer quote too as Python 3.12
+  allows; in TypeScript and JavaScript the syntax tree's comments, strings,
   template text (a `${}` substitution is code, a template nested in it is text
   again), regular expressions and JSX text. A spelling written there is never
-  the line; the first one written in code is, with one Python limit: a call
-  inside an f-string's braces is code to Python but text to this rule, so the
-  line is a later real call of the same spelling, or the entry has no line
-  when the f-string holds the only one. It is never a wrong line.
+  the line; the first one written in code is, with one Python limit: the
+  bare-name and module-qualified scans (`helper()`, `pkg.mod.fn()`) read a
+  whole f-string as text, so for them a call inside its braces is not the
+  line; the line is a later call of the same spelling, or the entry has no
+  line when the braces hold the only one. Receiver and awaited calls inside
+  braces are placed there.
 - When the caller writes that spelling more than once, it is the first in
   source order, with these exceptions in TypeScript and JavaScript, where the
   line is a later real call of the target: an awaited call with type
