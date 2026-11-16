@@ -9,7 +9,43 @@ on:
 permissions:
   contents: read
 
+# A newer push to a pull request replaces its older run; pushes to main always finish.
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # main only moves by fast-forward (the ruleset requires linear history), so a pushed commit that
+  # already passed this workflow as a pull request was tested as exactly this tree. Such a push
+  # reruns only the Linux jobs; macOS and Windows run on every pull request, manual run, and any
+  # push no pull request tested. A failed lookup runs everything.
+  scope:
+    name: platform scope
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      full: ${{ steps.decide.outputs.full }}
+      os: ${{ steps.decide.outputs.os }}
+    steps:
+      - id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          full=true
+          if [ "$EVENT" = push ]; then
+            tested=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/test.yml/runs?event=pull_request&head_sha=$SHA&status=success&per_page=1" --jq .total_count) || tested=0
+            if [ "${tested:-0}" -gt 0 ]; then
+              full=false
+              echo "A pull request run already passed $SHA; running the Linux jobs only."
+            fi
+          fi
+          if [ "$full" = true ]; then os='["ubuntu-latest","macos-latest"]'; else os='["ubuntu-latest"]'; fi
+          echo "full=$full" >> "$GITHUB_OUTPUT"
+          echo "os=$os" >> "$GITHUB_OUTPUT"
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -27,10 +63,12 @@ jobs:
             exit 1
           fi
 
-  build:
+  # One job per OS builds, tests and runs the status-line suite, so each runner's setup is paid once.
+  test:
+    needs: scope
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: ${{ fromJSON(needs.scope.outputs.os) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -39,23 +77,19 @@ jobs:
       - uses: actions/setup-go@v6
         with: { go-version: "1.27.x" }
       - run: go build ./...
-
-  test:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@v6
-        with: { go-version: "1.27.x" }
       # Keep the named package budget consistent with the Windows shard policy.
       - run: go test -timeout 30m ./...
+      # The status line is a POSIX shell script with its own shell suite; `go test` never runs it.
+      # Windows has no step for it: the script targets /bin/sh.
+      - name: Build for the status-line suite
+        run: go build -o entire-graph ./cmd/entire-graph
+      - name: Run the status-line suite
+        run: sh scripts/entire-graph-statusline_test.sh
 
   windows-test-prepare:
     name: test (windows-latest) / compile and plan
+    needs: scope
+    if: needs.scope.outputs.full == 'true'
     runs-on: windows-latest
     timeout-minutes: 30
     outputs:
@@ -116,7 +150,7 @@ jobs:
     timeout-minutes: 105
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 4
       matrix:
         shard: ${{ fromJSON(needs.windows-test-prepare.outputs.shard-matrix) }}
     steps:
@@ -201,6 +235,8 @@ jobs:
 
   windows-test-vet:
     name: test (windows-latest) / vet
+    needs: scope
+    if: needs.scope.outputs.full == 'true'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -212,6 +248,8 @@ jobs:
           go-version: "1.27.x"
           cache-dependency-path: go.sum
       - run: go vet ./...
+      # The native Windows build shares this job's runner setup.
+      - run: go build ./...
 
   windows-test-verify:
     name: test (windows-latest) / coverage and integrity
@@ -258,8 +296,8 @@ jobs:
   windows-test:
     name: test (windows-latest)
     needs:
-      [windows-test-prepare, windows-test-shards, windows-test-other, windows-test-vet, windows-test-verify]
-    if: always()
+      [scope, windows-test-prepare, windows-test-shards, windows-test-other, windows-test-vet, windows-test-verify]
+    if: ${{ always() && needs.scope.outputs.full == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Require every Windows test component
@@ -301,19 +339,3 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -B -m unittest bench.memory.ci.test_summarize_run
-
-  # The status line is a POSIX shell script with its own shell suite; `go test` never runs it.
-  # No windows-latest: the script targets /bin/sh.
-  statusline:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@v6
-        with: { go-version: "1.27.x" }
-      - run: go build -o entire-graph ./cmd/entire-graph
-      - run: sh scripts/entire-graph-statusline_test.sh

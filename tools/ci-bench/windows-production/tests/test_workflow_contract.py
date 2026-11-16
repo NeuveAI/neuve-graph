@@ -12,16 +12,21 @@ SETTINGS = Path(__file__).resolve().parents[1] / "settings.json"
 class WorkflowContractTests(unittest.TestCase):
     def test_windows_monolith_is_replaced_but_native_build_remains(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
+        scope_block = workflow.split("  scope:\n", 1)[1].split("  test:\n", 1)[0]
         test_block = workflow.split("  test:\n", 1)[1].split("  windows-test-prepare:\n", 1)[0]
-        build_block = workflow.split("  build:\n", 1)[1].split("  test:\n", 1)[0]
-        self.assertIn("os: [ubuntu-latest, macos-latest]", test_block)
+        vet_block = workflow.split("  windows-test-vet:\n", 1)[1].split(
+            "  windows-test-verify:\n", 1
+        )[0]
+        self.assertIn('os=\'["ubuntu-latest","macos-latest"]\'', scope_block)
+        self.assertIn("fromJSON(needs.scope.outputs.os)", test_block)
         self.assertNotIn("windows-latest", test_block)
-        self.assertIn("os: [ubuntu-latest, macos-latest, windows-latest]", build_block)
+        self.assertIn("- run: go build ./...", test_block)
+        self.assertIn("- run: go build ./...", vet_block)
 
     def test_dynamic_matrix_and_stable_aggregate_check_are_present(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         settings = json.loads(SETTINGS.read_text(encoding="utf-8"))
-        self.assertEqual(settings["shardCount"], 8)
+        self.assertEqual(settings["shardCount"], 4)
         self.assertIn("fromJSON(needs.windows-test-prepare.outputs.shard-matrix)", workflow)
         self.assertIn("name: test (windows-latest)", workflow)
         self.assertIn("windows-test-verify.result", workflow)

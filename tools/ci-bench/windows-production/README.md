@@ -3,8 +3,8 @@
 The `test` workflow compiles the configured CGO test binaries once on a
 standard ephemeral Windows runner, inventories every default-runnable root
 (`Test`, `Example`, and `Fuzz`, but never `Benchmark`), and assigns those roots
-to eight deterministic weighted shards. The compiled binaries and immutable
-plan are downloaded by eight independent standard Windows runners.
+to four deterministic weighted shards. The compiled binaries and immutable
+plan are downloaded by four independent standard Windows runners.
 
 `settings.json` is the only tuning surface. Its defaults preserve `go test`
 semantics: shuffle is off, `-parallel` and `GOMAXPROCS` are unset, and every
