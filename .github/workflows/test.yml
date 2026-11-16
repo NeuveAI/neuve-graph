@@ -9,21 +9,24 @@ on:
 permissions:
   contents: read
 
-# A newer push to a pull request replaces its older run; pushes to main always finish.
+# A newer push to a pull request replaces its older run. Every other run has a group of its own, so
+# no push to main or manual run is cancelled or dropped while another waits.
 concurrency:
-  group: test-${{ github.ref }}
+  group: test-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # main only moves by fast-forward (the ruleset requires linear history), so a pushed commit that
-  # already passed this workflow as a pull request was tested as exactly this tree. Such a push
-  # reruns only the Linux jobs; macOS and Windows run on every pull request, manual run, and any
-  # push no pull request tested. A failed lookup runs everything.
+  # A push reruns only the Linux jobs when a pull request run from this repository already passed
+  # with exactly the pushed commit's tree. A pull request run tests its merge commit, so it records
+  # the step "Head tree tested" only when that merge commit's tree equals the head commit's tree.
+  # macOS and Windows run on every pull request, every manual run, and every push without such a
+  # run. A failed lookup runs everything.
   scope:
     name: platform scope
     runs-on: ubuntu-latest
     permissions:
       actions: read
+      contents: read
     outputs:
       full: ${{ steps.decide.outputs.full }}
       os: ${{ steps.decide.outputs.os }}
@@ -33,18 +36,35 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
           SHA: ${{ github.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           full=true
+          head_tree=false
+          if [ "$EVENT" = pull_request ]; then
+            merge_tree=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA" --jq .commit.tree.sha) || merge_tree=
+            pr_tree=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA" --jq .commit.tree.sha) || pr_tree=
+            if [ -n "$merge_tree" ] && [ "$merge_tree" = "$pr_tree" ]; then head_tree=true; fi
+          fi
           if [ "$EVENT" = push ]; then
-            tested=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/test.yml/runs?event=pull_request&head_sha=$SHA&status=success&per_page=1" --jq .total_count) || tested=0
-            if [ "${tested:-0}" -gt 0 ]; then
-              full=false
-              echo "A pull request run already passed $SHA; running the Linux jobs only."
-            fi
+            runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/test.yml/runs?event=pull_request&head_sha=$SHA&status=success&per_page=20" \
+              --jq '.workflow_runs[] | select(.head_repository.full_name == env.GITHUB_REPOSITORY) | .id') || runs=
+            for run in $runs; do
+              tested=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/jobs?per_page=100" \
+                --jq '[.jobs[] | select(.name == "platform scope") | .steps[] | select(.name == "Head tree tested" and .conclusion == "success")] | length') || tested=0
+              if [ "${tested:-0}" -gt 0 ] 2>/dev/null; then
+                full=false
+                echo "Pull request run $run already passed $SHA's exact tree; running the Linux jobs only."
+                break
+              fi
+            done
           fi
           if [ "$full" = true ]; then os='["ubuntu-latest","macos-latest"]'; else os='["ubuntu-latest"]'; fi
           echo "full=$full" >> "$GITHUB_OUTPUT"
           echo "os=$os" >> "$GITHUB_OUTPUT"
+          echo "head_tree=$head_tree" >> "$GITHUB_OUTPUT"
+      - name: Head tree tested
+        if: steps.decide.outputs.head_tree == 'true'
+        run: echo "This run tests the pull request head's own tree."
 
   lint:
     runs-on: ubuntu-latest
