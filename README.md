@@ -1,289 +1,60 @@
-![entire-graph theme](docs/images/gh-repo-cover.png "entire-graph cover image")
+# Neuve Graph
 
-# Entire Graph
+Neuve Graph is the code-graph engine behind [Neuve](https://github.com/NeuveAI/neuve), open-source code review for code that agents write. It gives Neuve a precomputed map of a Git repository: ranked code search, definitions, callers and callees, types, routes and change impact, each with `file:line` locations. Neuve uses it to frame a change, connect each part to the code around it, and ground every finding in source.
 
-Agents are continually spending their budgets before they write the first line
-of code, rummaging through files, grepping for function names, and re-reading
-the same files and configs, as they attempt to understand a codebase fresh with
-each session. According to [OpenRouter's Head of Insights](https://www.linkedin.com/posts/peterjameswalker_february-6th-2026-potentially-the-last-share-7493029881841344512-IK89/?utm_source=share&utm_medium=member_desktop&rcm=ACoAABfX0nABz6sCWbPldiV_9liETVfz5fRLAD0), agentic
-token usage grew 14x between February and August 2026, up from 0.51 trillion tokens
-to 7.3 trillion.
+It runs entirely on your machine. It parses the repository with tree-sitter and makes no network requests, model calls or API-key lookups.
 
-Entire Graph is a plugin for the Entire CLI specifically designed to enable your
-agents to stop paying that cost. It hands your agent a precomputed map of a Git
-repository: ranked code search plus definitions, callers, types, routes, and
-change impact, each with `file:line` locations. The built-in analyzer parses the
-repository locally with tree-sitter and makes no network requests, model calls,
-or API-key lookups.
+## Credit
 
-When running [LoCoMo](https://github.com/snap-research/locomo) against competitors,
-we measured the top score of 94.74% for Entire Graph. We also observed token savings
-up to 71% depending on the coding scenario. As always, your mileage may vary.
+Neuve Graph is a fork of [Entire Graph](https://github.com/entireio/entire-graph), made by Entire Inc. and released under the MIT License. Most of what this engine does comes from their work, and we're grateful for it. Their copyright notice is kept in [LICENSE](LICENSE).
 
-## Features
+Neuve Graph is not affiliated with or endorsed by Entire Inc. Some internal names still carry the upstream name, such as the `entire-graph` binary, the `entire graph` command family and the `.entire/` folder. They're kept so the fork stays easy to compare with upstream; they don't refer to Entire's products.
 
-- Ranked code search from plain-language task descriptions, combining lexical matches across source bodies, identifiers, signatures, and paths with graph relationships.
-- Agent-ready results with source snippets, file:line locations, configurable context budgets, ranking explanations, and suggested verification commands.
-- Semantic parsing for 36 languages, including Go, Python, JavaScript, TypeScript, Java, Rust, C, C++, C#, Ruby, PHP, Swift, and Kotlin, plus inventory support for 149 additional language and filetype names. entire graph capabilities --json reports the installed build’s coverage.
-- Definition lookup and focused relationship queries for callers, callees, inheritance, type usage, field access, and supported framework routes.
-- Change-impact reports combining direct and transitive callers, callees, type consumers, data-flow relationships, same-container symbols, and files that historically change together.
-- Entity-level semantic diffs between Git revisions, including added, removed, renamed, signature-changed, and body-changed symbols, with heuristic dependent counts.
-- Commit and Entire checkpoint analysis for reviewing changes in their repository context.
-- Working-tree queries that include uncommitted edits by default, with explicit committed-tree queries and reusable caches for matching repository states and options.
-- Full graph export through versioned NDJSON snapshots, stable symbol identifiers, a compact NDJSON format, and experimental SCIP export.
-- Per-repository agent activation, which installs repository-specific guidance in AGENTS.md and CLAUDE.md.
-- Machine-readable coverage, exclusions, warnings, and partial failures, with relation confidence and resolution metadata.
-- Local analysis with no network requests, model calls, API keys, telemetry, or runtime grammar downloads.
+## What it does
 
-## Benchmarks
+- **Ranked code search** from a plain-language task description, combining lexical matches across source, identifiers, signatures and paths with graph relationships.
+- **Definitions and relationships:** callers, callees, inheritance, type usage, field access and supported framework routes.
+- **Change impact:** direct and transitive callers, callees, type consumers, data flow, and files that historically change together.
+- **Semantic diffs between Git revisions:** added, removed, renamed, signature-changed and body-changed symbols.
+- **Working-tree queries** that include uncommitted edits by default, with committed-tree queries and reusable caches.
+- **Graph export** as versioned NDJSON snapshots with stable symbol identifiers, plus experimental SCIP export.
+- **Machine-readable coverage, exclusions, warnings and partial failures**, with relation confidence.
+- **Semantic parsing for 36 languages,** including Go, Python, JavaScript, TypeScript, Java, Rust, C, C++, C#, Ruby, PHP, Swift and Kotlin, plus inventory support for many more filetypes. `entire-graph capabilities --json` reports the installed build's coverage.
 
-To put entire-graph to the test, we ran it through
-[LoCoMo](https://github.com/snap-research/locomo), the standard benchmark for
-one hard skill: finding a single small detail buried in a pile of text. LoCoMo
-asks over 1,500 questions about long conversations that span many sessions and
-scores whether the tool can find the right piece of evidence.
+## Using it
 
-On identical questions, entire-graph found the right evidence more often than
-any of the seven other systems we tested, including graphify, mem0, and cognee.
+Neuve installs and runs Neuve Graph for you: each [Neuve release](https://github.com/NeuveAI/neuve/releases) ships the engine, and the one-line install sets it up. You don't need to install it separately.
 
-| System | LoCoMo | Index-time tokens | Version tested |
-| --- | --- | --- | --- |
-| **entire-graph** § | **94.74** | **0** | [#104](https://github.com/entireio/entire-graph/pull/104) branch, 2026-08-14 (pre-merge) |
-| [mem0](https://github.com/mem0ai/mem0) | 93.83 | 50.85M | commit [`4debc58`](https://github.com/mem0ai/mem0/commit/4debc58a83377b18be81ae1e5969a300736b2fac) |
-| [cognee](https://github.com/topoteretes/cognee) | 92.86 | 12.35M | commit [`38eece5`](https://github.com/topoteretes/cognee/commit/38eece5bbb0cb9f5706fed908abd16dba0f5505e) |
-| [bm25](https://github.com/dorianbrown/rank_bm25) (lexical baseline) | 91.88 | 0 | [0.2.2](https://github.com/dorianbrown/rank_bm25/releases/tag/0.2.2) |
-| [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) (cmm) † | 91.30 | 0 | [v0.9.0](https://github.com/DeusData/codebase-memory-mcp/releases/tag/v0.9.0) |
-| [graphify](https://github.com/Graphify-Labs/graphify)  | 87.34 | 0 | [0.9.37](https://github.com/Graphify-Labs/graphify/releases?page=3#release-v0.9.34)|
-| [letta](https://github.com/letta-ai/letta) | 84.68 | not projectable | [0.16.8](https://github.com/letta-ai/letta/releases/tag/0.16.8) |
-| [supermemory](https://github.com/supermemoryai/supermemory)  | 82.08 | hosted | [server-v0.0.7-rc.2](https://github.com/supermemoryai/supermemory/releases/tag/server-v0.0.7-rc.2) |
-
-See [benchmarks](docs/benchmarks.md) for full methodology, per-category results,
-retractions, and reproduction steps.
-
-## Install
-
-Entire Graph requires Entire CLI 0.10.0 or later and Git 2.36 or later on
-`PATH`. Git 2.36 added the single-session object protocol Entire Graph uses to
-inspect an object's type before reading its contents. The commands below are
-the official ones from the [Entire CLI installation
-guide](https://docs.entire.io/installation), which also covers Homebrew, Windows and
-other channels.
-
-On macOS or Linux:
+To build it from source, you need [Go](https://go.dev) and [mise](https://mise.jdx.dev):
 
 ```sh
-curl -fsSL https://entire.io/install.sh | bash
+mise run build
+mise run test
 ```
 
-Then **install the plugin** from the plugin index and confirm its version:
-
-```sh
-entire plugin install graph
-entire graph version
-```
-
-`entire graph version` printing a release tag confirms that a versioned build
-is active.
-
-## Activate it for your agent
-
-Activation is per repository:
-
-```sh
-entire graph init-agents --repo .
-```
-
-Add `--strict` to save mandatory Graph/Brain tool-use rules for this repository.
-The saved mode is shared by enabled products and inherited on later runs.
-Use `init-agents --normal` to reset it. `agent-guide` inherits the saved mode;
-`agent-guide --strict` or `--normal` previews an override without saving it.
-The two flags are mutually exclusive. New repositories default to normal.
-
-The command creates or updates these files:
-
-- `.entire/agent-guide.md`: the agent operating guide. Generated in full and
-  regenerated in full on each successful rerun; manual edits there do not
-  survive.
-- `AGENTS.md` and `CLAUDE.md`: created if absent; otherwise one managed block
-  between `<!-- entire-agent:begin -->` and `<!-- entire-agent:end -->` markers
-  is added or replaced. Text outside the markers is preserved.
-
-Review the three files, then commit them together when the instructions should
-apply to your team.
-
-After that, the interface is your coding agent: start it with the new instructions,
-then you ask a code question in plain language, the agent runs graph queries,
-reads the code the graph points at, and answers with citations. A captured example
-is shown further below.
-
-## What to ask
-
-Prompts are the interface. The commands are what the agent runs underneath;
-you can also invoke them directly for manual inspection, debugging, or
-automation. See the [command reference](docs/commands.md).
-
-| Goal | Example prompt | Graph command |
-| --- | --- | --- |
-| Find the implementation | Find where request routing is implemented. | `query` |
-| Read one definition | Show the definition of `ResolveRoute`. | `def` |
-| Trace callers or callees | What calls `ResolveRoute`? | `neighbors` |
-| Check the blast radius | What would changing `ResolveRoute` affect? | `impact` |
-| Review a branch | Summarize the semantic changes from `main` to `HEAD`. | `diff` |
-| Export the full graph | Export the repository graph as NDJSON. | `snapshot` |
-| Inspect indexing health | Show parser coverage and affected files, including healthy results. | `health` |
-
-## Example Session
-
-The transcript below is a real captured session, recorded with pinned inputs: the
-installed Entire Graph release, a fresh clone of `gorilla/mux` at commit `db9d1d0` with
-no prior agent instructions, activation files committed, and Claude Code
-2.1.233 (model Claude Fable 5) as the client. The prompt:
-
-> Without changing any files, find where route matching is implemented in this
-> repository, what calls it, and what is most likely to be affected if its
-> behavior changes. Cite the relevant source.
-
-The session's tool calls, in order (command syntax updated to the current
-interface, the last command truncated):
-
-```text
-Bash: entire graph query --profile full "route matching implementation for incoming request paths"
-Bash: entire graph impact --symbol Route.Match
-Bash: entire graph impact --symbol Router.Match
-Bash: sed -n 145,230p mux.go
-Bash: sed -n 40,120p route.go
-Bash: grep -n "func.*Match\|matcher\b" route.go regexp.go | head -40
-Bash: sed -n 185,225p regexp.go; grep -n "\.Match(" mux.go route.go middleware.go ...
-```
-
-The first call is a graph query. That is the activation instructions at
-work: Claude Code loads `CLAUDE.md` at session start and resolves its import
-of the guide, so the agent reached for the graph before any grep.
-Search returns ranked JSON evidence; the top hit for this query was
-`Route.addMatcher` at `route.go:237` with `newRouteRegexp` at `regexp.go:41`
-right behind it. The agent then asked for blast radius. The start of the
-`impact` output it received, verbatim except for one line wrapped to fit:
-
-```text
-Index: cache-hit (49ms) | Query: 0ms | Total: 50ms
-Impact: Router.Match (mux.go:151) def=151 span=151-182 [method in Router]
-Blast radius: 1 caller (1 direct, 0 transitive), 0 callees, 3 type consumers,
-  1 data flow, 7 co-change files, 29 siblings.
-Callers (1 direct, 0 transitive; who breaks if behavior changes):
-- Router.ServeHTTP (mux.go:203, def :188)
-```
-
-That point-in-time capture predates ADR 0004's security correction. A current
-default working-tree query reports `cache-miss`; committed-tree queries can
-still report `cache-hit` when a matching entry exists.
-
-Only after the graph queries did the agent read source, in narrow line ranges
-around the reported locations. Its answer traced matching through
-`Router.Match` (`mux.go:151-182`), `Route.Match` (`route.go:47-114`), and
-`routeRegexp.Match` (`regexp.go:189-209`), and named what a change would
-touch: handler dispatch and 404-vs-405 selection, route variables via
-`setMatch`, URL reversing built by `newRouteRegexp`, and the CORS middleware
-path through `getAllMethodsForRoute`. It also exposed a graph limit that the
-agent verified against source: `impact --symbol Route.Match` reports zero
-callers, while source inspection finds two direct call sites.
-
-That last point is the working relationship to expect: graph output is
-evidence for the agent to check against source, not an oracle. The
-[supporting record](docs/evidence/2026-08-16-mux-agent-session.md) includes the
-capture conditions, relevant agent and tool events, complete graph-command
-outputs, and the final answer verbatim.
-
-Activation succeeds when the managed guide and pointers are present and
-`agent-guide` matches the installed guide for the same target and invocation.
-Follow the [coordinated workflow](docs/agent-coordination.md): Brain supplies task
-context in combined mode; Graph handles further discovery and structural analysis.
-Sufficient task or brief locations permit direct source inspection. Ground claims
-in inspected source and executed verification.
+Inside a Neuve checkout, the engine sits at `apps/neuve-graph` as a Git submodule. Neuve's [development guide](https://github.com/NeuveAI/neuve/blob/main/docs/development.md) covers `bun run setup:graph` and `bun run build:graph`.
 
 ## Working tree and cache
 
-The interactive query family (`query`, `def`, `explain`, `neighbors`, and
-`impact`) reads the working tree by default, so agents see uncommitted edits.
-Add `--head` to ask about the committed tree instead. Bulk streams
-(`snapshot`, `symbols`, `edges`) and ref-based analysis (`diff`, `commit`)
-default to committed state.
+The interactive queries (`query`, `def`, `explain`, `neighbors` and `impact`) read the working tree by default, so uncommitted edits are visible. Add `--head` to ask about the committed tree. Bulk streams (`snapshot`, `symbols`, `edges`) and revision analysis (`diff`, `commit`) default to committed state.
 
-Queries can write a derivative local cache; they never modify repository files.
-Default working-tree queries always build fresh and do not load or store cache
-entries. A `--head` query can reuse a snapshot keyed to the committed tree and
-query options; changing `.graphignore` selects a different committed-tree
-entry.
-
-Cache state is visible where the format reports it: the default `query` JSON
-carries `stats.index_cache_hit`, and `impact`/`neighbors` text output opens
-with an `Index: cache-hit`/`cache-miss` line. Default working-tree queries
-report a miss; matching `--head` queries may hit. `query --format text` does
-not report cache state.
-
-`entire graph index` prewarms committed-tree (`--head`) queries only, and
-defaults to profile `full` while plain `query` defaults to `fast`. A default
-`index` run therefore does not warm the default working-tree path. One caveat
-inside the query family: `def` and `explain` only cache when `--cache-dir` or
-`ENTIRE_PLUGIN_DATA_DIR` is set, unlike the other query commands. Cache
-locations, key inputs, and prewarming are documented in
-[operations](docs/operations.md#cache).
-
-## Indexing health
-
-```sh
-entire graph health
-entire graph health --repo . --json
-entire graph health --refresh
-```
-
-Health defaults to committed `HEAD` and profile `full`. It reuses the matching
-index or announces and builds one; `--refresh` forces a rebuild. The report
-includes revision, profile, cache freshness, source totals, unique flagged
-files, language/category breakdowns, diagnostic details and intentional skips.
-`doctor` remains unchanged.
-
-The degradation threshold is **5% of eligible source files**, inclusive.
-Multiple diagnostics for a file count once. Documentation, configuration and
-data do not dilute the denominator; minified/oversized skips are excluded from
-the numerator. Existing unsafe and empty/unusable-graph safeguards still apply.
-Diagnostics remain available below the threshold, including query warnings.
-These are parser limitations, not a verdict that the source code is invalid.
-See [health accounting and cache behavior](docs/operations.md#graph-health).
+Queries can write a derivative local cache. They never modify repository files. Cache locations, key inputs and prewarming are documented in [operations](docs/operations.md#cache).
 
 ## Limits
 
-Static analysis is heuristic. Calls through interfaces, reflection, dynamic
-dispatch, and generated or runtime-wired code can be missed or unresolved.
-The captured session above shows one such case. Dependent counts are guidance
-for inspection, not compiler facts. Files the parser cannot handle surface as
-machine-readable partial failures rather than silent gaps.
-
-[Language coverage](docs/language-support.md) has two tiers: 36 languages with
-semantic parsing, and inventory-only filetypes that get file and symbol
-structure without call or type analysis. Check the current build with
-`entire graph capabilities --json`.
-
-Entire Graph is code intelligence for the repository your agent is working in:
-ranked search, relationships, and change impact grounded in source. It does _not_
-store user or conversation memory, run in the background, or expose its own MCP
-server. The full data-flow and write-surface description, including what runs
-caller-provided commands, is in
-the [trust and security](docs/trust-and-security.md) documentation.
+Static analysis is heuristic. Calls through interfaces, reflection, dynamic dispatch, and generated or runtime-wired code can be missed. Dependent counts are guidance for inspection, not compiler facts. Files the parser can't handle surface as machine-readable partial failures rather than silent gaps. See [language support](docs/language-support.md) and [trust and security](docs/trust-and-security.md).
 
 ## Documentation
 
-- [All Documentation](docs/README.md)
+- [All documentation](docs/README.md)
 - [Command reference](docs/commands.md)
-- [Agent activation and verification](docs/agents.md)
 - [Search results and ranking](docs/search.md)
 - [Operations: installs, cache, troubleshooting](docs/operations.md)
 - [Trust and security](docs/trust-and-security.md)
 - [Language support](docs/language-support.md)
-- [Benchmark methodology and evidence](docs/benchmarks.md)
 
-Please report problems in [GitHub Issues](https://github.com/entireio/entire-graph/issues)
-or open a pull request. Thank you! ❤️
+Report problems in [GitHub Issues](https://github.com/NeuveAI/neuve-graph/issues), or open a pull request.
 
 ## License
 
-Entire Graph is distributed under the [MIT License](LICENSE).
+Neuve Graph is distributed under the [MIT License](LICENSE), as was Entire Graph.
